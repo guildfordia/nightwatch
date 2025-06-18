@@ -59,10 +59,10 @@ services:
           memory: 16M
 
   batman-node:
+    container_name: batman-node
     build:
       context: .
       dockerfile: ./batman/Dockerfile
-    image: batman-node
     privileged: true
     network_mode: "host"
     env_file:
@@ -78,4 +78,3 @@ services:
 networks:
   irc-net:
     name: ${DOCKER_NETWORK}
-    external: true
