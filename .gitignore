@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Environment
+.env
+.env.*
+*.env
+*.envrc
+
+# Docker
+*.tar
+*.tar.gz
+docker-compose.override.yml
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Shell script artifacts
+*.bak
+*.swp
+
+# Misc
+nightwatch-optimized.tar.gz
+
+# Ignore compiled Go binaries
+irc-bridge-go/irc-bridge
+
+# Ignore node_modules if any
+node_modules/

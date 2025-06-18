@@ -1,0 +1,81 @@
+services:
+  ngircd:
+    image: lscr.io/linuxserver/ngircd:latest
+    container_name: ngircd
+    env_file:
+      - ./.env
+    volumes:
+      - ./ngircd:/config
+    ports:
+      - "${IRC_PORT}:${IRC_PORT}"
+    restart: unless-stopped
+    networks:
+      - irc-net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+
+  irc-bridge:
+    build: ./irc-bridge-go
+    container_name: irc-bridge
+    env_file:
+      - ./.env
+    ports:
+      - "${KIWI_PORT}:3000"
+    restart: unless-stopped
+    networks:
+      - irc-net
+    depends_on:
+      - ngircd
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+        reservations:
+          memory: 32M
+
+  nginx:
+    image: nginx:alpine
+    container_name: nginx
+    env_file:
+      - ./.env
+    ports:
+      - "${NGINX_PORT}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf
+      - ./html:/usr/share/nginx/html
+    depends_on:
+      - irc-bridge
+    networks:
+      - irc-net
+    deploy:
+      resources:
+        limits:
+          memory: 32M
+        reservations:
+          memory: 16M
+
+  batman-node:
+    build:
+      context: .
+      dockerfile: ./batman/Dockerfile
+    image: batman-node
+    privileged: true
+    network_mode: "host"
+    env_file:
+      - ./.env
+    #environment:
+    #  - MESH_IP=192.168.199.10  # customize per node
+    volumes:
+      - /lib/modules:/lib/modules
+      - /lib/firmware:/lib/firmware
+    restart: unless-stopped
+
+
+networks:
+  irc-net:
+    name: ${DOCKER_NETWORK}
+    external: true

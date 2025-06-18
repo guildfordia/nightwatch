@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>* Nightwatch Chat *</title>
+    <style>
+        * { 
+            box-sizing: border-box; 
+            margin: 0; 
+            padding: 0; 
+        }
+        
+        body { 
+            font-family: 'Courier New', monospace; 
+            background: #000000; 
+            color: #ffffff; 
+            height: 100vh;
+            font-size: 14px;
+            font-weight: bold;
+            line-height: 1.3;
+        }
+        
+        .header {
+            background: #000000;
+            padding: 8px;
+            text-align: center;
+            border-bottom: 1px solid #333333;
+        }
+        
+        .status {
+            font-size: 14px;
+            color: #cccccc;
+        }
+        
+        .status.connected { color: #ffffff; }
+        .status.connecting { color: #cccccc; }
+        .status.disconnected { color: #888888; }
+        
+        .chat-container {
+            height: calc(100vh - 80px);
+        }
+        
+        .messages {
+            height: calc(100vh - 140px);
+            padding: 8px;
+            overflow-y: auto;
+            background: #000000;
+        }
+        
+        .message {
+            margin-bottom: 2px;
+            line-height: 1.3;
+        }
+        
+        .message .timestamp {
+            color: #888888;
+            font-size: 14px;
+        }
+        
+        .message .nick {
+            color: #cccccc;
+        }
+        
+        .message .content {
+            color: #ffffff;
+        }
+        
+        .message.system {
+            color: #aaaaaa;
+        }
+        
+        .message.error {
+            color: #888888;
+        }
+        
+        .input-area {
+            background: #000000;
+            padding: 8px;
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            border-top: 1px solid #333333;
+        }
+        
+        .input-container {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        
+        .nick-input {
+            background: #111111;
+            border: 1px solid #444444;
+            color: #ffffff;
+            font-family: 'Courier New', monospace;
+            font-weight: bold;
+            width: 120px;
+            font-size: 14px;
+            padding: 4px 6px;
+        }
+        
+        .message-input {
+            background: #111111;
+            border: 1px solid #444444;
+            color: #ffffff;
+            font-family: 'Courier New', monospace;
+            font-weight: bold;
+            flex: 1;
+            font-size: 14px;
+            padding: 4px 6px;
+        }
+        
+        .send-button {
+            background: #333333;
+            border: 1px solid #555555;
+            color: #ffffff;
+            font-family: 'Courier New', monospace;
+            font-weight: bold;
+            font-size: 14px;
+            padding: 4px 12px;
+            cursor: pointer;
+        }
+        
+        .send-button:hover {
+            background: #444444;
+        }
+        
+        .send-button:disabled {
+            background: #222222;
+            color: #666666;
+            cursor: not-allowed;
+        }
+        
+        input:focus {
+            outline: none;
+            border-color: #666666;
+        }
+        
+        .users-info {
+            font-size: 14px;
+            color: #888888;
+            margin-bottom: 4px;
+        }
+        
+        h1 {
+            font-size: 14px;
+            font-weight: bold;
+        }
+        
+        .prompt-text {
+            color: #cccccc;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>*** NIGHTWATCH CHAT *** <span class="status" id="status">[CONNECTING...]</span></h1>
+    </div>
+    
+    <div class="chat-container">
+        <div class="messages" id="messages"></div>
+        
+        <div class="input-area">
+            <div class="users-info" id="usersInfo">Users: #nightwatch</div>
+            <div class="input-container">
+                <span class="prompt-text">&lt;</span><input type="text" class="nick-input" id="nickInput" value="guest" maxlength="16"><span class="prompt-text">&gt;</span>
+                <input type="text" class="message-input" id="messageInput" placeholder="Type message..." disabled>
+                <button class="send-button" id="sendButton" disabled>SEND</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class NightwatchChat {
+            constructor() {
+                this.ws = null;
+                this.connected = false;
+                this.nickname = 'guest';
+                this.channel = '#nightwatch';
+                this.registered = false;
+                
+                this.initElements();
+                this.connect();
+            }
+            
+            initElements() {
+                this.statusEl = document.getElementById('status');
+                this.messagesEl = document.getElementById('messages');
+                this.nickInput = document.getElementById('nickInput');
+                this.messageInput = document.getElementById('messageInput');
+                this.sendButton = document.getElementById('sendButton');
+                this.usersInfo = document.getElementById('usersInfo');
+                
+                this.nickInput.addEventListener('change', () => {
+                    const newNick = this.nickInput.value.trim();
+                    if (newNick && newNick !== this.nickname && this.connected) {
+                        this.changeNick(newNick);
+                    }
+                });
+                
+                this.messageInput.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') {
+                        this.sendMessage();
+                    }
+                });
+                
+                this.sendButton.addEventListener('click', () => {
+                    this.sendMessage();
+                });
+            }
+            
+            connect() {
+                this.updateStatus('Connecting...', 'connecting');
+                
+                const wsUrl = `ws://${window.location.hostname}/ws`;
+                this.ws = new WebSocket(wsUrl);
+                
+                this.ws.onopen = () => {
+                    this.connected = true;
+                    this.updateStatus('Connected', 'connected');
+                    this.register();
+                };
+                
+                this.ws.onmessage = (event) => {
+                    this.handleMessage(event.data);
+                };
+                
+                this.ws.onclose = () => {
+                    this.connected = false;
+                    this.registered = false;
+                    this.updateStatus('Disconnected', 'disconnected');
+                    this.messageInput.disabled = true;
+                    this.sendButton.disabled = true;
+                    
+                    // Auto-reconnect after 3 seconds
+                    setTimeout(() => this.connect(), 3000);
+                };
+                
+                this.ws.onerror = (error) => {
+                    this.addMessage('!! CONNECTION ERROR !!', '', 'error');
+                    console.error('WebSocket error:', error);
+                };
+            }
+            
+            register() {
+                this.nickname = this.nickInput.value.trim() || 'guest';
+                this.send(`NICK ${this.nickname}`);
+                this.send(`USER ${this.nickname} 0 * :Nightwatch User`);
+            }
+            
+            changeNick(newNick) {
+                this.send(`NICK ${newNick}`);
+            }
+            
+            send(message) {
+                if (this.ws && this.connected) {
+                    this.ws.send(message + '\r\n');
+                }
+            }
+            
+            sendMessage() {
+                const message = this.messageInput.value.trim();
+                if (!message || !this.connected || !this.registered) return;
+                
+                this.send(`PRIVMSG ${this.channel} :${message}`);
+                this.addMessage(message, this.nickname, 'own');
+                this.messageInput.value = '';
+            }
+            
+            handleMessage(data) {
+                const lines = data.split('\r\n').filter(line => line.trim());
+                
+                lines.forEach(line => {
+                    const parts = line.split(' ');
+                    
+                    if (line.includes('Welcome to the') || line.includes('001')) {
+                        this.registered = true;
+                        this.send(`JOIN ${this.channel}`);
+                        this.messageInput.disabled = false;
+                        this.sendButton.disabled = false;
+                        this.addMessage('>>> CONNECTED TO NIGHTWATCH IRC <<<', '', 'system');
+                    }
+                    else if (line.includes('433')) { // Nickname in use
+                        this.nickname = this.nickname + '_';
+                        this.nickInput.value = this.nickname;
+                        this.send(`NICK ${this.nickname}`);
+                    }
+                    else if (line.includes('353')) { // Names list
+                        const names = line.split(':').pop().trim();
+                        this.usersInfo.textContent = `Users: ${names}`;
+                    }
+                    else if (line.includes('JOIN')) {
+                        const nick = line.split('!')[0].substring(1);
+                        this.addMessage(`>> ${nick} joined`, '', 'system');
+                    }
+                    else if (line.includes('PART') || line.includes('QUIT')) {
+                        const nick = line.split('!')[0].substring(1);
+                        this.addMessage(`<< ${nick} left`, '', 'system');
+                    }
+                    else if (line.includes('NICK')) {
+                        const match = line.match(/:([^!]+)![^:]+NICK :(.+)/);
+                        if (match) {
+                            const oldNick = match[1];
+                            const newNick = match[2];
+                            
+                            // If it's our own nick change, update our nickname
+                            if (oldNick === this.nickname) {
+                                this.nickname = newNick;
+                                this.nickInput.value = newNick;
+                                this.addMessage(`** You are now ${newNick}`, '', 'system');
+                            } else {
+                                this.addMessage(`** ${oldNick} -> ${newNick}`, '', 'system');
+                            }
+                        }
+                    }
+                    else if (line.includes('PRIVMSG')) {
+                        const match = line.match(/:([^!]+)![^:]+PRIVMSG [^:]+:(.+)/);
+                        if (match && match[1] !== this.nickname) {
+                            this.addMessage(match[2], match[1], 'message');
+                        }
+                    }
+                    else if (line.startsWith('PING')) {
+                        this.send(line.replace('PING', 'PONG'));
+                    }
+                });
+            }
+            
+            addMessage(content, nick = '', type = 'message') {
+                const messageEl = document.createElement('div');
+                messageEl.className = `message ${type}`;
+                
+                const timestamp = new Date().toLocaleTimeString();
+                
+                let html = `<span class="timestamp">[${timestamp}]</span> `;
+                
+                if (nick) {
+                    html += `<span class="nick">&lt;${nick}&gt;</span> `;
+                }
+                
+                html += `<span class="content">${this.escapeHtml(content)}</span>`;
+                
+                messageEl.innerHTML = html;
+                this.messagesEl.appendChild(messageEl);
+                this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+            }
+            
+            updateStatus(text, className) {
+                this.statusEl.textContent = `[${text.toUpperCase()}]`;
+                this.statusEl.className = `status ${className}`;
+            }
+            
+            escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }
+        }
+        
+        // Initialize chat when page loads
+        window.addEventListener('DOMContentLoaded', () => {
+            new NightwatchChat();
+        });
+    </script>
+</body>
+</html> 
