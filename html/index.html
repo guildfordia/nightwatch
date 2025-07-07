@@ -3,256 +3,316 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>* Nightwatch Chat *</title>
+    <title>irssi</title>
     <style>
         * { 
-            box-sizing: border-box; 
+            box-sizing: border-box;
             margin: 0; 
             padding: 0; 
         }
         
         body { 
-            font-family: 'Courier New', monospace; 
+            font-family: 'Courier New', 'Liberation Mono', monospace; 
             background: #000000; 
-            color: #ffffff; 
+            color: #cccccc; 
             height: 100vh;
             font-size: 14px;
-            font-weight: bold;
-            line-height: 1.3;
+            line-height: 1.0;
+            overflow: hidden;
         }
         
-        .header {
+        .irssi-terminal {
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .main-content {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+        
+        .chat-area {
+            flex: 1;
             background: #000000;
-            padding: 8px;
-            text-align: center;
+            color: #cccccc;
+            padding: 0;
+            overflow-y: auto;
+            overflow-x: hidden;
+            white-space: pre-wrap;
+            font-family: inherit;
+        }
+        
+        .user-list {
+            width: 200px;
+            background: #000000;
+            border-left: 1px solid #333333;
+            color: #cccccc;
+            padding: 0;
+            overflow-y: auto;
+            flex-shrink: 0;
+        }
+        
+        /* Default state: hidden on mobile, visible on desktop */
+        .user-list {
+            display: none;
+        }
+        
+        .user-list.visible {
+            display: block !important;
+        }
+        
+        /* Desktop: show by default unless explicitly hidden */
+        @media (min-width: 768px) {
+            .user-list:not(.hidden) {
+                display: block;
+            }
+        }
+        
+        .user-list-header {
+            background: #000088;
+            color: #ffffff;
+            padding: 0 1ch;
+            height: 1.2em;
+            line-height: 1.2em;
+            font-weight: normal;
             border-bottom: 1px solid #333333;
         }
         
-        .status {
-            font-size: 14px;
-            color: #cccccc;
+        .user-item {
+            padding: 0 1ch;
+            color: #00ff00;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         
-        .status.connected { color: #ffffff; }
-        .status.connecting { color: #cccccc; }
-        .status.disconnected { color: #888888; }
-        
-        .chat-container {
-            height: calc(100vh - 80px);
+        .user-item.self {
+            color: #ffffff;
+            font-weight: bold;
         }
         
-        .messages {
-            height: calc(100vh - 140px);
-            padding: 8px;
-            overflow-y: auto;
-            background: #000000;
+        /* Desktop: show user list by default */
+        @media (min-width: 768px) {
+            .user-list {
+                display: block;
+            }
+        }
+        
+        .toggle-button {
+            background: #000088;
+            color: #ffffff;
+            border: none;
+            padding: 0 1ch;
+            height: 1.2em;
+            line-height: 1.2em;
+            font-family: inherit;
+            font-size: inherit;
+            cursor: pointer;
+            margin-left: auto;
+        }
+        
+        .toggle-button:hover {
+            background: #0000aa;
         }
         
         .message {
-            margin-bottom: 2px;
-            line-height: 1.3;
+            padding: 0 1ch;
+            margin: 0;
+            display: block;
+            white-space: pre-wrap;
+            word-wrap: break-word;
         }
         
-        .message .timestamp {
-            color: #888888;
-            font-size: 14px;
+        /* ANSI terminal colors */
+        .time { color: #888888; }
+        .nick-self { color: #ffffff; }
+        .nick-other { color: #00ff00; }  /* Green for other users */
+        .text { color: #cccccc; }
+        .text-own { color: #ffffff; }
+        .system { color: #0088ff; }      /* Blue/Cyan for system */
+        .error { color: #ff0000; }       /* Red for errors */
+        .join-part { color: #00ff00; }   /* Green for joins/parts */
+        .highlight { color: #ffff00; }   /* Yellow for highlights */
+        
+        .status-bar {
+            background: #000088;
+            color: #ffffff;
+            padding: 0 1ch;
+            height: 1.2em;
+            line-height: 1.2em;
+            font-weight: normal;
+            display: flex;
+            justify-content: space-between;
         }
         
-        .message .nick {
-            color: #cccccc;
-        }
-        
-        .message .content {
+        .status-left {
             color: #ffffff;
         }
         
-        .message.system {
-            color: #aaaaaa;
+        .status-right {
+            color: #cccccc;
         }
         
-        .message.error {
-            color: #888888;
-        }
-        
-        .input-area {
+        .input-bar {
             background: #000000;
-            padding: 8px;
-            position: fixed;
-            bottom: 0;
-            left: 0;
-            right: 0;
-            border-top: 1px solid #333333;
-        }
-        
-        .input-container {
+            color: #ffffff;
+            padding: 0 1ch;
+            height: 1.2em;
+            line-height: 1.2em;
             display: flex;
-            gap: 8px;
             align-items: center;
         }
         
-        .nick-input {
-            background: #111111;
-            border: 1px solid #444444;
+        .input-prompt {
             color: #ffffff;
-            font-family: 'Courier New', monospace;
-            font-weight: bold;
-            width: 120px;
-            font-size: 14px;
-            padding: 4px 6px;
+            white-space: pre;
         }
         
-        .message-input {
-            background: #111111;
-            border: 1px solid #444444;
+        .input-field {
+            background: transparent;
+            border: none;
             color: #ffffff;
-            font-family: 'Courier New', monospace;
-            font-weight: bold;
+            font-family: inherit;
+            font-size: inherit;
             flex: 1;
-            font-size: 14px;
-            padding: 4px 6px;
-        }
-        
-        .send-button {
-            background: #333333;
-            border: 1px solid #555555;
-            color: #ffffff;
-            font-family: 'Courier New', monospace;
-            font-weight: bold;
-            font-size: 14px;
-            padding: 4px 12px;
-            cursor: pointer;
-        }
-        
-        .send-button:hover {
-            background: #444444;
-        }
-        
-        .send-button:disabled {
-            background: #222222;
-            color: #666666;
-            cursor: not-allowed;
-        }
-        
-        input:focus {
             outline: none;
-            border-color: #666666;
+            padding: 0;
+            margin: 0;
         }
         
-        .users-info {
-            font-size: 14px;
-            color: #888888;
-            margin-bottom: 4px;
-        }
-        
-        h1 {
-            font-size: 14px;
-            font-weight: bold;
-        }
-        
-        .prompt-text {
-            color: #cccccc;
-            font-weight: bold;
+        /* Hide scrollbar */
+        .chat-area::-webkit-scrollbar {
+            width: 0px;
+            background: transparent;
         }
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>*** NIGHTWATCH CHAT *** <span class="status" id="status">[CONNECTING...]</span></h1>
-    </div>
-    
-    <div class="chat-container">
-        <div class="messages" id="messages"></div>
-        
-        <div class="input-area">
-            <div class="users-info" id="usersInfo">Users: #nightwatch</div>
-            <div class="input-container">
-                <span class="prompt-text">&lt;</span><input type="text" class="nick-input" id="nickInput" value="guest" maxlength="16"><span class="prompt-text">&gt;</span>
-                <input type="text" class="message-input" id="messageInput" placeholder="Type message..." disabled>
-                <button class="send-button" id="sendButton" disabled>SEND</button>
+    <div class="irssi-terminal">
+        <div class="main-content">
+            <div class="chat-area" id="chatArea"></div>
+            <div class="user-list" id="userList">
+                <div class="user-list-header">Users</div>
             </div>
+        </div>
+        
+        <div class="status-bar">
+            <div class="status-left" id="statusLeft">[ #nightwatch ]</div>
+            <div class="status-right">
+                <span id="statusRight">[connecting]</span>
+                <button class="toggle-button" id="toggleUsers">Users</button>
+            </div>
+        </div>
+        
+        <div class="input-bar">
+            <span class="input-prompt" id="inputPrompt">[guest] </span>
+            <input type="text" class="input-field" id="inputField" disabled>
         </div>
     </div>
 
     <script>
-        class NightwatchChat {
+        class IrssiTerminal {
             constructor() {
                 this.ws = null;
                 this.connected = false;
                 this.nickname = 'guest';
                 this.channel = '#nightwatch';
                 this.registered = false;
+                this.userCount = 0;
+                this.users = [];
+                this.nickMap = {}; // Map IRC names to display names
+                this.pendingNickChange = null; // Track pending nickname change
+                this.userListVisible = window.innerWidth >= 768; // Show on desktop by default
                 
                 this.initElements();
                 this.connect();
             }
             
             initElements() {
-                this.statusEl = document.getElementById('status');
-                this.messagesEl = document.getElementById('messages');
-                this.nickInput = document.getElementById('nickInput');
-                this.messageInput = document.getElementById('messageInput');
-                this.sendButton = document.getElementById('sendButton');
-                this.usersInfo = document.getElementById('usersInfo');
+                this.chatArea = document.getElementById('chatArea');
+                this.userList = document.getElementById('userList');
+                this.inputField = document.getElementById('inputField');
+                this.inputPrompt = document.getElementById('inputPrompt');
+                this.statusLeft = document.getElementById('statusLeft');
+                this.statusRight = document.getElementById('statusRight');
+                this.toggleButton = document.getElementById('toggleUsers');
                 
-                this.nickInput.addEventListener('change', () => {
-                    const newNick = this.nickInput.value.trim();
-                    if (newNick && newNick !== this.nickname && this.connected) {
-                        this.changeNick(newNick);
-                    }
-                });
-                
-                this.messageInput.addEventListener('keypress', (e) => {
+                this.inputField.addEventListener('keypress', (e) => {
                     if (e.key === 'Enter') {
                         this.sendMessage();
                     }
                 });
                 
-                this.sendButton.addEventListener('click', () => {
-                    this.sendMessage();
+                this.toggleButton.addEventListener('click', () => {
+                    this.toggleUserList();
                 });
+                
+                // Show ASCII banner and welcome messages
+                this.showWelcomeBanner();
+                this.updatePrompt();
+                this.updateUserListVisibility();
+            }
+            
+            showWelcomeBanner() {
+                // ASCII NIGHTWATCH banner
+                const banner = [
+                    "███╗   ██╗██╗ ██████╗ ██╗  ██╗████████╗██╗    ██╗ █████╗ ████████╗ ██████╗██╗  ██╗",
+                    "████╗  ██║██║██╔════╝ ██║  ██║╚══██╔══╝██║    ██║██╔══██╗╚══██╔══╝██╔════╝██║  ██║",
+                    "██╔██╗ ██║██║██║  ███╗███████║   ██║   ██║ █╗ ██║███████║   ██║   ██║     ███████║",
+                    "██║╚██╗██║██║██║   ██║██╔══██║   ██║   ██║███╗██║██╔══██║   ██║   ██║     ██╔══██║",
+                    "██║ ╚████║██║╚██████╔╝██║  ██║   ██║   ╚███╔███╔╝██║  ██║   ██║   ╚██████╗██║  ██║",
+                    "╚═╝  ╚═══╝╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝    ╚══╝╚══╝ ╚═╝  ╚═╝   ╚═╝    ╚═════╝╚═╝  ╚═╝"
+                ];
+                
+                banner.forEach(line => {
+                    const message = document.createElement('div');
+                    message.className = 'message';
+                    message.innerHTML = `<span class="system">${this.escapeHtml(line)}</span>`;
+                    this.chatArea.appendChild(message);
+                });
+                
+                // Welcome messages
+                this.addSystemMessage('Welcome to NIGHTWATCH - Mesh IRC Network');
+                this.addSystemMessage('Type /nick <name> to change your nickname');
+                this.addSystemMessage('Connecting to IRC bridge...');
             }
             
             connect() {
-                this.updateStatus('Connecting...', 'connecting');
-                
                 const wsUrl = `ws://${window.location.hostname}/ws`;
-                this.ws = new WebSocket(wsUrl);
+                
+                try {
+                    this.ws = new WebSocket(wsUrl);
+                } catch (error) {
+                    this.addSystemMessage(`WebSocket error: ${error.message}`);
+                    return;
+                }
                 
                 this.ws.onopen = () => {
                     this.connected = true;
-                    this.updateStatus('Connected', 'connected');
-                    this.register();
+                    this.updateStatus('connected');
                 };
                 
                 this.ws.onmessage = (event) => {
                     this.handleMessage(event.data);
                 };
                 
-                this.ws.onclose = () => {
+                this.ws.onclose = (event) => {
                     this.connected = false;
                     this.registered = false;
-                    this.updateStatus('Disconnected', 'disconnected');
-                    this.messageInput.disabled = true;
-                    this.sendButton.disabled = true;
+                    this.updateStatus('disconnected');
+                    this.inputField.disabled = true;
+                    this.addSystemMessage(`Connection lost (${event.code})`);
+                    this.addSystemMessage('Reconnecting in 3 seconds...');
                     
-                    // Auto-reconnect after 3 seconds
                     setTimeout(() => this.connect(), 3000);
                 };
                 
                 this.ws.onerror = (error) => {
-                    this.addMessage('!! CONNECTION ERROR !!', '', 'error');
+                    this.addSystemMessage('Connection error');
                     console.error('WebSocket error:', error);
                 };
-            }
-            
-            register() {
-                this.nickname = this.nickInput.value.trim() || 'guest';
-                this.send(`NICK ${this.nickname}`);
-                this.send(`USER ${this.nickname} 0 * :Nightwatch User`);
-            }
-            
-            changeNick(newNick) {
-                this.send(`NICK ${newNick}`);
             }
             
             send(message) {
@@ -262,64 +322,128 @@
             }
             
             sendMessage() {
-                const message = this.messageInput.value.trim();
-                if (!message || !this.connected || !this.registered) return;
+                const input = this.inputField.value.trim();
+                if (!input || !this.connected) return;
                 
-                this.send(`PRIVMSG ${this.channel} :${message}`);
-                this.addMessage(message, this.nickname, 'own');
-                this.messageInput.value = '';
+                // Handle /nick command
+                if (input.startsWith('/nick ')) {
+                    const newNick = input.slice(6).trim();
+                    if (newNick && newNick !== this.nickname) {
+                        // Store that we're attempting to change to this nickname
+                        this.pendingNickChange = newNick;
+                        this.send(`NICK ${newNick}`);
+                        this.addSystemMessage(`Attempting to change nickname to: ${newNick}`);
+                    } else if (!newNick) {
+                        this.addSystemMessage('Usage: /nick <new_nickname>');
+                    } else {
+                        this.addSystemMessage('You are already using that nickname');
+                    }
+                    this.inputField.value = '';
+                    return;
+                }
+                
+                // Regular chat message
+                if (!this.registered) {
+                    this.addSystemMessage('Not connected to IRC yet, please wait...');
+                    this.inputField.value = '';
+                    return;
+                }
+                
+                this.send(`PRIVMSG ${this.channel} :${input}`);
+                this.addChatMessage(this.nickname, input, true);
+                this.inputField.value = '';
             }
             
             handleMessage(data) {
                 const lines = data.split('\r\n').filter(line => line.trim());
                 
                 lines.forEach(line => {
-                    const parts = line.split(' ');
-                    
                     if (line.includes('Welcome to the') || line.includes('001')) {
                         this.registered = true;
-                        this.send(`JOIN ${this.channel}`);
-                        this.messageInput.disabled = false;
-                        this.sendButton.disabled = false;
-                        this.addMessage('>>> CONNECTED TO NIGHTWATCH IRC <<<', '', 'system');
+                        this.inputField.disabled = false;
+                        this.updateStatus('active');
+                        this.addSystemMessage('Registration successful');
+                        
+                        // Add ourselves to user list if not already there
+                        if (!this.users.includes(this.nickname)) {
+                            this.users.push(this.nickname);
+                            this.userCount = this.users.length;
+                            this.updateUserList();
+                        }
+                        
+                        // Show join message with current nickname (guest)
+                        this.addJoinPart(`${this.nickname} has joined ${this.channel}`);
                     }
-                    else if (line.includes('433')) { // Nickname in use
+                    else if (line.includes('433')) { // Nick in use
                         this.nickname = this.nickname + '_';
-                        this.nickInput.value = this.nickname;
                         this.send(`NICK ${this.nickname}`);
+                        this.addSystemMessage(`Nickname in use, trying ${this.nickname}`);
+                        this.updatePrompt();
                     }
                     else if (line.includes('353')) { // Names list
-                        const names = line.split(':').pop().trim();
-                        this.usersInfo.textContent = `Users: ${names}`;
-                    }
-                    else if (line.includes('JOIN')) {
-                        const nick = line.split('!')[0].substring(1);
-                        this.addMessage(`>> ${nick} joined`, '', 'system');
-                    }
-                    else if (line.includes('PART') || line.includes('QUIT')) {
-                        const nick = line.split('!')[0].substring(1);
-                        this.addMessage(`<< ${nick} left`, '', 'system');
+                        const names = line.split(':').pop().trim().split(' ');
+                        this.users = names.filter(name => name.trim() && !name.includes('.irc') && !name.includes('nightwatch'));
+                        this.userCount = this.users.length;
+                        this.updateStatus();
+                        this.updateUserList();
                     }
                     else if (line.includes('NICK')) {
                         const match = line.match(/:([^!]+)![^:]+NICK :(.+)/);
                         if (match) {
-                            const oldNick = match[1];
-                            const newNick = match[2];
+                            const oldIrcNick = match[1];
+                            const newIrcNick = match[2];
                             
-                            // If it's our own nick change, update our nickname
-                            if (oldNick === this.nickname) {
-                                this.nickname = newNick;
-                                this.nickInput.value = newNick;
-                                this.addMessage(`** You are now ${newNick}`, '', 'system');
+                            // Check if this is our own nickname change
+                            // Either we have a pending change or the old IRC nick maps to us
+                            const isOurNickChange = (this.pendingNickChange && newIrcNick === this.pendingNickChange) || 
+                                                   this.nickMap[oldIrcNick] === this.nickname || 
+                                                   oldIrcNick === this.nickname;
+                            
+                            if (isOurNickChange) {
+                                // This is our nickname change
+                                const oldDisplayName = this.nickname;
+                                this.nickname = this.pendingNickChange || newIrcNick; // Use the name we requested
+                                this.pendingNickChange = null; // Clear pending change
+                                
+                                // Update our mapping
+                                this.nickMap[newIrcNick] = this.nickname;
+                                
+                                this.updatePrompt();
+                                this.updateUserList();
+                                this.addSystemMessage(`You are now known as ${this.nickname}`);
                             } else {
-                                this.addMessage(`** ${oldNick} -> ${newNick}`, '', 'system');
+                                // Update user list for other users
+                                const userIndex = this.users.indexOf(oldIrcNick);
+                                if (userIndex !== -1) {
+                                    this.users[userIndex] = newIrcNick;
+                                }
+                                
+                                // Update nickname mapping for other users
+                                if (this.nickMap[oldIrcNick]) {
+                                    this.nickMap[newIrcNick] = this.nickMap[oldIrcNick];
+                                    delete this.nickMap[oldIrcNick];
+                                } else {
+                                    this.nickMap[newIrcNick] = newIrcNick;
+                                }
+                                
+                                this.updateUserList();
+                                this.addJoinPart(`${oldIrcNick} is now known as ${newIrcNick}`);
                             }
                         }
                     }
                     else if (line.includes('PRIVMSG')) {
                         const match = line.match(/:([^!]+)![^:]+PRIVMSG [^:]+:(.+)/);
                         if (match && match[1] !== this.nickname) {
-                            this.addMessage(match[2], match[1], 'message');
+                            const nick = match[1];
+                            const message = match[2];
+                            
+                            // Handle CTCP ACTION (/me)
+                            if (message.startsWith('\x01ACTION') && message.endsWith('\x01')) {
+                                const action = message.slice(8, -1);
+                                this.addAction(nick, action);
+                            } else {
+                                this.addChatMessage(nick, message, false);
+                            }
                         }
                     }
                     else if (line.startsWith('PING')) {
@@ -328,28 +452,135 @@
                 });
             }
             
-            addMessage(content, nick = '', type = 'message') {
-                const messageEl = document.createElement('div');
-                messageEl.className = `message ${type}`;
-                
-                const timestamp = new Date().toLocaleTimeString();
-                
-                let html = `<span class="timestamp">[${timestamp}]</span> `;
-                
-                if (nick) {
-                    html += `<span class="nick">&lt;${nick}&gt;</span> `;
-                }
-                
-                html += `<span class="content">${this.escapeHtml(content)}</span>`;
-                
-                messageEl.innerHTML = html;
-                this.messagesEl.appendChild(messageEl);
-                this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+            getTime() {
+                const now = new Date();
+                return String(now.getHours()).padStart(2, '0') + ':' + 
+                       String(now.getMinutes()).padStart(2, '0');
             }
             
-            updateStatus(text, className) {
-                this.statusEl.textContent = `[${text.toUpperCase()}]`;
-                this.statusEl.className = `status ${className}`;
+            addChatMessage(nick, text, isOwnMessage) {
+                const time = this.getTime();
+                const nickClass = isOwnMessage ? 'nick-self' : 'nick-other';
+                const textClass = isOwnMessage ? 'text-own' : 'text';
+                
+                const message = document.createElement('div');
+                message.className = 'message';
+                message.innerHTML = `<span class="time">${time}</span> <span class="${nickClass}">&lt;${this.escapeHtml(nick)}&gt;</span> <span class="${textClass}">${this.escapeHtml(text)}</span>`;
+                
+                this.chatArea.appendChild(message);
+                this.scrollToBottom();
+            }
+            
+            addAction(nick, action) {
+                const time = this.getTime();
+                
+                const message = document.createElement('div');
+                message.className = 'message';
+                message.innerHTML = `<span class="time">${time}</span> <span class="nick-other">* ${this.escapeHtml(nick)}</span> <span class="text">${this.escapeHtml(action)}</span>`;
+                
+                this.chatArea.appendChild(message);
+                this.scrollToBottom();
+            }
+            
+            addSystemMessage(text) {
+                const time = this.getTime();
+                
+                const message = document.createElement('div');
+                message.className = 'message';
+                message.innerHTML = `<span class="time">${time}</span> <span class="system">-!- ${this.escapeHtml(text)}</span>`;
+                
+                this.chatArea.appendChild(message);
+                this.scrollToBottom();
+            }
+            
+            addJoinPart(text) {
+                const time = this.getTime();
+                
+                const message = document.createElement('div');
+                message.className = 'message';
+                message.innerHTML = `<span class="time">${time}</span> <span class="join-part">-!- ${this.escapeHtml(text)}</span>`;
+                
+                this.chatArea.appendChild(message);
+                this.scrollToBottom();
+            }
+            
+            updatePrompt() {
+                this.inputPrompt.textContent = `[${this.nickname}] `;
+            }
+            
+            toggleUserList() {
+                this.userListVisible = !this.userListVisible;
+                this.updateUserListVisibility();
+            }
+            
+            updateUserListVisibility() {
+                if (this.userListVisible) {
+                    this.userList.classList.add('visible');
+                    this.userList.classList.remove('hidden');
+                    this.toggleButton.textContent = 'Hide';
+                } else {
+                    this.userList.classList.remove('visible');
+                    this.userList.classList.add('hidden');
+                    this.toggleButton.textContent = 'Show';
+                }
+            }
+            
+            updateUserList() {
+                // Clear existing users (except header)
+                const header = this.userList.querySelector('.user-list-header');
+                this.userList.innerHTML = '';
+                this.userList.appendChild(header);
+                
+                // Create a list of display names
+                const displayUsers = [];
+                
+                // Always include ourselves with our display name
+                if (!displayUsers.includes(this.nickname)) {
+                    displayUsers.push(this.nickname);
+                }
+                
+                // Add other users, using display names if we have them
+                this.users.forEach(ircUser => {
+                    const displayName = this.nickMap[ircUser] || ircUser;
+                    // Skip IRC-assigned names that look like webuser123
+                    if (!ircUser.startsWith('webuser') && !displayUsers.includes(displayName) && displayName !== this.nickname) {
+                        displayUsers.push(displayName);
+                    }
+                });
+                
+                // Sort users with self first
+                displayUsers.sort((a, b) => {
+                    if (a === this.nickname) return -1;
+                    if (b === this.nickname) return 1;
+                    return a.localeCompare(b);
+                });
+                
+                // Add user elements
+                displayUsers.forEach(user => {
+                    const userEl = document.createElement('div');
+                    userEl.className = 'user-item';
+                    if (user === this.nickname) {
+                        userEl.classList.add('self');
+                    }
+                    userEl.textContent = user;
+                    this.userList.appendChild(userEl);
+                });
+                
+                this.userCount = displayUsers.length;
+            }
+            
+            updateStatus(connectionStatus = null) {
+                if (connectionStatus) {
+                    this.statusRight.textContent = `[${connectionStatus}]`;
+                }
+                
+                if (this.registered && this.userCount > 0) {
+                    this.statusRight.textContent = `[users: ${this.userCount}]`;
+                }
+            }
+            
+            scrollToBottom() {
+                this.chatArea.scrollTop = this.chatArea.scrollHeight;
             }
             
             escapeHtml(text) {
@@ -359,9 +590,9 @@
             }
         }
         
-        // Initialize chat when page loads
+        // Initialize when page loads
         window.addEventListener('DOMContentLoaded', () => {
-            new NightwatchChat();
+            new IrssiTerminal();
         });
     </script>
 </body>

@@ -9,31 +9,35 @@ BATMAN_SETUP_SCRIPT = $(BATMAN_SCRIPTS)/host-mesh-setup.sh
 BATMAN_RESET_SCRIPT = $(BATMAN_SCRIPTS)/host-mesh-setup.sh # (Assume same for reset, or add your own)
 BATMAN_RUN_SCRIPT = $(BATMAN_SCRIPTS)/run.sh
 PREPARE_ENV_SCRIPT = scripts/prepare-env.sh
+DISTRIBUTED_IRC_SCRIPT = scripts/setup-distributed-irc.sh
 
 # Tools required
 REQUIRED_TOOLS = docker docker-compose batctl ip fping
+TAILSCALE_INSTALL_SCRIPT = scripts/install-tailscale.sh
 
-.PHONY: all help check-env check-tools up down restart logs batman-setup batman-reset batman-status start stop full-restart prepare-env
+.PHONY: all help check-env check-tools up down restart logs batman-setup batman-reset batman-status start stop full-restart prepare-env setup-distributed-irc install-tailscale
 
 all: start
 
 help:
 	@echo "Nightwatch Makefile"
 	@echo "Available targets:"
-	@echo "  all            - Run everything (BATMAN setup + services)"
-	@echo "  prepare-env    - Prepare .env from .env.example and run env setup script"
-	@echo "  up             - Bring up all services via docker-compose"
-	@echo "  down           - Bring down all services"
-	@echo "  restart        - Restart all services"
-	@echo "  logs           - Show logs for all services"
-	@echo "  batman-setup   - Setup BATMAN mesh networking (from .env)"
-	@echo "  batman-reset   - Reset BATMAN mesh networking"
-	@echo "  batman-status  - Show BATMAN mesh status"
-	@echo "  start          - Setup BATMAN and bring up services"
-	@echo "  stop           - Bring down services and reset BATMAN"
-	@echo "  full-restart   - Full system restart (BATMAN + services)"
-	@echo "  check-env      - Check for .env file"
-	@echo "  check-tools    - Check for required tools"
+	@echo "  all                    - Run everything (BATMAN setup + services)"
+	@echo "  prepare-env            - Prepare .env from .env.example and run env setup script"
+	@echo "  setup-distributed-irc  - Setup distributed IRC configuration (from .env)"
+	@echo "  install-tailscale      - Install Tailscale VPN for remote access"
+	@echo "  up                     - Bring up all services via docker-compose"
+	@echo "  down                   - Bring down all services"
+	@echo "  restart                - Restart all services"
+	@echo "  logs                   - Show logs for all services"
+	@echo "  batman-setup           - Setup BATMAN mesh networking (from .env)"
+	@echo "  batman-reset           - Reset BATMAN mesh networking"
+	@echo "  batman-status          - Show BATMAN mesh status"
+	@echo "  start                  - Setup BATMAN and bring up services"
+	@echo "  stop                   - Bring down services and reset BATMAN"
+	@echo "  full-restart           - Full system restart (BATMAN + services)"
+	@echo "  check-env              - Check for .env file"
+	@echo "  check-tools            - Check for required tools"
 
 prepare-env:
 	@if [ ! -f $(ENV_FILE) ]; then \
@@ -44,6 +48,16 @@ prepare-env:
 	fi
 	@chmod +x $(PREPARE_ENV_SCRIPT)
 	@$(PREPARE_ENV_SCRIPT)
+
+setup-distributed-irc: check-env
+	@echo "[+] Setting up distributed IRC configuration..."
+	@chmod +x $(DISTRIBUTED_IRC_SCRIPT)
+	@$(DISTRIBUTED_IRC_SCRIPT)
+
+install-tailscale:
+	@echo "[+] Installing Tailscale VPN..."
+	@chmod +x $(TAILSCALE_INSTALL_SCRIPT)
+	@$(TAILSCALE_INSTALL_SCRIPT)
 
 check-env:
 	@if [ ! -f $(ENV_FILE) ]; then \
@@ -59,7 +73,21 @@ check-tools:
 		fi \
 	done
 
-up: check-env check-tools
+#create-network: check-env check-tools
+#	@echo "[+] Creating Docker network if it doesn't exist..."
+#	@if [ -f $(ENV_FILE) ]; then \
+#		set -a && . ./$(ENV_FILE) && set +a && \
+#		if ! docker network ls | grep -q "$$DOCKER_NETWORK" 2>/dev/null; then \
+#			docker network create $$DOCKER_NETWORK; \
+#		else \
+#			echo "[+] Docker network $$DOCKER_NETWORK already exists"; \
+#		fi \
+#	else \
+#		echo "[ERROR] $(ENV_FILE) not found!"; \
+#		exit 1; \
+#	fi
+
+up:
 	@echo "[+] Bringing up all services with docker-compose..."
 	$(DC) --env-file $(ENV_FILE) up -d
 
@@ -76,7 +104,9 @@ logs:
 batman-setup: check-env check-tools
 	@echo "[+] Setting up BATMAN mesh networking..."
 	@chmod +x $(BATMAN_SETUP_SCRIPT)
-	@$(BATMAN_SETUP_SCRIPT)
+	@$(BATMAN_SETUP_SCRIPT) || { \
+		echo "[!] BATMAN setup exited. Continuing..."; \
+	}
 
 batman-reset: check-env check-tools
 	@echo "[+] Resetting BATMAN mesh networking..."
@@ -105,9 +135,12 @@ batman-status: check-tools
 	@sudo batctl o || true
 	@echo ""
 	@echo "[+] Scanning mesh subnet for reachable peers..."
-	@fping -a -q -r1 -g 192.168.199.10 192.168.199.254 2>/dev/null || echo "[!] No mesh nodes reachable"
+	@fping -a -q -r1 -g 192.168.199.101 192.168.199.104 2>/dev/null || echo "[!] No mesh nodes reachable"
 
-start: batman-setup up
+start: 
+	@echo "[+] Starting Nightwatch services..."
+	@$(MAKE) batman-setup 2>/dev/null || echo "[!] Continuing without mesh networking..."
+	@$(MAKE) up
 
 stop: down batman-reset
 

@@ -1,6 +1,6 @@
 services:
   ngircd:
-    image: lscr.io/linuxserver/ngircd:latest
+    image: linuxserver/ngircd:latest
     container_name: ngircd
     env_file:
       - ./.env
@@ -28,6 +28,9 @@ services:
     restart: unless-stopped
     networks:
       - irc-net
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     depends_on:
       - ngircd
     deploy:
@@ -73,7 +76,6 @@ services:
       - /lib/modules:/lib/modules
       - /lib/firmware:/lib/firmware
     restart: unless-stopped
-
 
 networks:
   irc-net:

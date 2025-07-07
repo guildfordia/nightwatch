@@ -9,7 +9,9 @@ sudo apt update && sudo apt install -y \
     wireless-tools \
     net-tools \
     curl \
-    git
+    git \
+    fping \
+    telnet
 
 echo "[+] Installing Docker Compose (v2)..."
 DOCKER_COMPOSE_BIN="/usr/local/bin/docker-compose"

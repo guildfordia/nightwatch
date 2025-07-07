@@ -1,14 +1,22 @@
-FROM golang:1.21-alpine AS builder
+FROM golang:1.21-bullseye AS builder
+
+# Configure Go for direct downloads
+ENV GOPROXY=direct
+ENV GOSUMDB=off
+ENV CGO_ENABLED=0
 
 WORKDIR /app
+
+# Copy source files
 COPY go.mod ./
 COPY main.go ./
-RUN go mod tidy && go mod download
 
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main .
+# Download and build
+RUN go mod download
+RUN go build -o main .
 
-FROM alpine:latest
-RUN apk --no-cache add ca-certificates
+FROM debian:bullseye-slim
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /root/
 COPY --from=builder /app/main .
 EXPOSE 3000
