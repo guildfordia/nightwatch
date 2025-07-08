@@ -256,11 +256,14 @@
             background: var(--bg-secondary);
             color: var(--text-secondary);
             padding: 0 1ch;
-            height: 1.2em;
+            min-height: 1.2em;
             line-height: 1.2em;
             font-weight: normal;
             display: flex;
+            flex-wrap: wrap;
             justify-content: space-between;
+            align-items: center;
+            gap: 0.5ch;
         }
         
         .status-left {
@@ -269,6 +272,10 @@
         
         .status-right {
             color: var(--text-primary);
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.5ch;
         }
         
         .input-bar {
@@ -304,12 +311,43 @@
             width: 0px;
             background: transparent;
         }
+        
+        /* Force full-width wrapping on very small screens */
+        @media (max-width: 600px) {
+            .status-bar {
+                flex-direction: column;
+                align-items: stretch;
+                gap: 0;
+            }
+            
+            .status-left,
+            .status-right {
+                justify-content: center;
+                padding: 0.1em 0;
+            }
+            
+            .status-right {
+                justify-content: center;
+                flex-wrap: wrap;
+            }
+        }
+        
+        /* Moderate wrapping for medium-small screens */
+        @media (max-width: 800px) and (min-width: 601px) {
+            .status-bar {
+                gap: 0.25ch;
+            }
+            
+            .status-right {
+                gap: 0.25ch;
+            }
+        }
     </style>
 </head>
 <body>
     <div class="irssi-terminal">
         <div class="top-status-bar">
-            <div class="top-status-left" id="topStatusLeft">NIGHTWATCH Terminal</div>
+            <div class="top-status-left" id="topStatusLeft">NIGHTWATCH</div>
             <div class="top-status-right">
                 <span id="connectionStatus">[disconnected]</span>
                 <button class="about-link" id="aboutLink">about</button>
@@ -481,20 +519,22 @@
             }
             
             showWelcomeBanner() {
-                // Check if screen can fit the large banner (roughly 88 characters wide)
-                // Assume ~8-10px per character, so large banner needs ~880-1000px minimum
-                const canFitLargeBanner = window.innerWidth >= 1000;
-                const isMobile = !canFitLargeBanner;
+                // Calculate space requirements
+                const userListWidth = 200; // Fixed width of user list
+                const smallBannerWidth = 38 * 9; // 38 chars × ~9px per char = ~342px
+                const largeBannerWidth = 88 * 9; // 88 chars × ~9px per char = ~792px
                 
-                let banner;
-                if (isMobile) {
-                    // Compact banner (38 chars width)
-                    banner = [
-                        "░█▀█░▀█▀░█▀▀░█░█░▀█▀░█░█░█▀█░▀█▀░█▀▀░█░█",
-                        "░█░█░░█░░█░█░█▀█░░█░░█▄█░█▀█░░█░░█░░░█▀█",
-                        "░▀░▀░▀▀▀░▀▀▀░▀░▀░░▀░░▀░▀░▀░▀░░▀░░▀▀▀░▀░▀"
-                    ];
-                } else {
+                // Check if we can fit the large banner (minimum 1000px)
+                const canFitLargeBanner = window.innerWidth >= 1000;
+                
+                // Check if we can fit small banner + user list together
+                const totalSpaceNeeded = smallBannerWidth + userListWidth; // ~542px
+                const canFitSmallBannerWithUserList = window.innerWidth >= totalSpaceNeeded;
+                
+                let banner = null;
+                let isMobile = false;
+                
+                if (canFitLargeBanner) {
                     // Full desktop banner
                     banner = [
                         "███╗   ██╗██╗ ██████╗ ██╗  ██╗████████╗██╗    ██╗ █████╗ ████████╗ ██████╗██╗  ██╗",
@@ -504,17 +544,29 @@
                         "██║ ╚████║██║╚██████╔╝██║  ██║   ██║   ╚███╔███╔╝██║  ██║   ██║   ╚██████╗██║  ██║",
                         "╚═╝  ╚═══╝╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝    ╚══╝╚══╝ ╚═╝  ╚═╝   ╚═╝    ╚═════╝╚═╝  ╚═╝"
                     ];
+                } else if (canFitSmallBannerWithUserList) {
+                    // Compact banner (38 chars width) - only if there's space for banner + user list
+                    banner = [
+                        "░█▀█░▀█▀░█▀▀░█░█░▀█▀░█░█░█▀█░▀█▀░█▀▀░█░█",
+                        "░█░█░░█░░█░█░█▀█░░█░░█▄█░█▀█░░█░░█░░░█▀█",
+                        "░▀░▀░▀▀▀░▀▀▀░▀░▀░░▀░░▀░▀░▀░▀░░▀░░▀▀▀░▀░▀"
+                    ];
+                    isMobile = true;
+                }
+                // If neither condition is met, banner remains null (no banner displayed)
+                
+                // Display banner if we have one
+                if (banner) {
+                    banner.forEach(line => {
+                        const message = document.createElement('div');
+                        message.className = 'message';
+                        message.innerHTML = `<span class="system">${this.escapeHtml(line)}</span>`;
+                        this.chatArea.appendChild(message);
+                    });
                 }
                 
-                banner.forEach(line => {
-                    const message = document.createElement('div');
-                    message.className = 'message';
-                    message.innerHTML = `<span class="system">${this.escapeHtml(line)}</span>`;
-                    this.chatArea.appendChild(message);
-                });
-                
-                // Welcome messages (shorter on small screens)
-                if (isMobile) {
+                // Welcome messages (shorter when no banner or on small screens)
+                if (!banner || isMobile) {
                     this.addSystemMessage('Welcome to NIGHTWATCH');
                     this.addSystemMessage('Decentralized Mesh Network');
                     this.addSystemMessage('Off-Grid conversation');
