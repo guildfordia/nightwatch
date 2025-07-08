@@ -5,6 +5,62 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>irssi</title>
     <style>
+        /* CSS Variables for themes */
+        :root {
+            /* Dark theme (default) */
+            --bg-primary: #000000;
+            --bg-secondary: #000088;
+            --bg-secondary-hover: #0000aa;
+            --text-primary: #cccccc;
+            --text-secondary: #ffffff;
+            --text-system: #0088ff;
+            --text-error: #ff0000;
+            --text-join: #00ff00;
+            --text-highlight: #ffff00;
+            --text-time: #888888;
+            --text-nick-self: #ffb3d9;
+            --text-nick-other: #b3e5d1;
+            --text-own: #ffffff;
+            --border-color: #333333;
+            --user-list-bg: #000000;
+        }
+
+        [data-theme="light"] {
+            --bg-primary: #ffffff;
+            --bg-secondary: #e6e6fa;
+            --bg-secondary-hover: #d0d0d0;
+            --text-primary: #333333;
+            --text-secondary: #000000;
+            --text-system: #0066cc;
+            --text-error: #cc0000;
+            --text-join: #008800;
+            --text-highlight: #cc6600;
+            --text-time: #666666;
+            --text-nick-self: #d147a3;
+            --text-nick-other: #16a085;
+            --text-own: #000000;
+            --border-color: #cccccc;
+            --user-list-bg: #f8f8f8;
+        }
+
+        [data-theme="dark"] {
+            --bg-primary: #000000;
+            --bg-secondary: #000088;
+            --bg-secondary-hover: #0000aa;
+            --text-primary: #cccccc;
+            --text-secondary: #ffffff;
+            --text-system: #0088ff;
+            --text-error: #ff0000;
+            --text-join: #00ff00;
+            --text-highlight: #ffff00;
+            --text-time: #888888;
+            --text-nick-self: #ffb3d9;
+            --text-nick-other: #b3e5d1;
+            --text-own: #ffffff;
+            --border-color: #333333;
+            --user-list-bg: #000000;
+        }
+
         * { 
             box-sizing: border-box;
             margin: 0; 
@@ -13,12 +69,13 @@
         
         body { 
             font-family: 'Courier New', 'Liberation Mono', monospace; 
-            background: #000000; 
-            color: #cccccc; 
+            background: var(--bg-primary); 
+            color: var(--text-primary); 
             height: 100vh;
             font-size: 14px;
             line-height: 1.0;
             overflow: hidden;
+            transition: background-color 0.3s ease, color 0.3s ease;
         }
         
         .irssi-terminal {
@@ -35,8 +92,8 @@
         
         .chat-area {
             flex: 1;
-            background: #000000;
-            color: #cccccc;
+            background: var(--bg-primary);
+            color: var(--text-primary);
             padding: 0;
             overflow-y: auto;
             overflow-x: hidden;
@@ -46,9 +103,9 @@
         
         .user-list {
             width: 200px;
-            background: #000000;
-            border-left: 1px solid #333333;
-            color: #cccccc;
+            background: var(--user-list-bg);
+            border-left: 1px solid var(--border-color);
+            color: var(--text-primary);
             padding: 0;
             overflow-y: auto;
             flex-shrink: 0;
@@ -64,45 +121,42 @@
         }
         
         /* Desktop: show by default unless explicitly hidden */
-        @media (min-width: 768px) {
+        @media (min-width: 1200px) {
             .user-list:not(.hidden) {
                 display: block;
+            }
+            
+            .user-list.hidden {
+                display: none !important;
             }
         }
         
         .user-list-header {
-            background: #000088;
-            color: #ffffff;
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
             padding: 0 1ch;
             height: 1.2em;
             line-height: 1.2em;
             font-weight: normal;
-            border-bottom: 1px solid #333333;
+            border-bottom: 1px solid var(--border-color);
         }
         
         .user-item {
             padding: 0 1ch;
-            color: #00ff00;
+            color: var(--text-nick-other);
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
         
         .user-item.self {
-            color: #ffffff;
+            color: var(--text-nick-self);
             font-weight: bold;
         }
         
-        /* Desktop: show user list by default */
-        @media (min-width: 768px) {
-            .user-list {
-                display: block;
-            }
-        }
-        
         .toggle-button {
-            background: #000088;
-            color: #ffffff;
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
             border: none;
             padding: 0 1ch;
             height: 1.2em;
@@ -111,10 +165,34 @@
             font-size: inherit;
             cursor: pointer;
             margin-left: auto;
+            transition: background-color 0.2s ease;
         }
         
         .toggle-button:hover {
-            background: #0000aa;
+            background: var(--bg-secondary-hover);
+        }
+        
+        .theme-selector {
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+            border: none;
+            padding: 0 0.5ch;
+            height: 1.2em;
+            line-height: 1.2em;
+            font-family: inherit;
+            font-size: inherit;
+            cursor: pointer;
+            margin-left: 0.5ch;
+            transition: background-color 0.2s ease;
+        }
+        
+        .theme-selector:hover {
+            background: var(--bg-secondary-hover);
+        }
+        
+        .theme-selector option {
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
         }
         
         .message {
@@ -126,19 +204,57 @@
         }
         
         /* ANSI terminal colors */
-        .time { color: #888888; }
-        .nick-self { color: #ffffff; }
-        .nick-other { color: #00ff00; }  /* Green for other users */
-        .text { color: #cccccc; }
-        .text-own { color: #ffffff; }
-        .system { color: #0088ff; }      /* Blue/Cyan for system */
-        .error { color: #ff0000; }       /* Red for errors */
-        .join-part { color: #00ff00; }   /* Green for joins/parts */
-        .highlight { color: #ffff00; }   /* Yellow for highlights */
+        .time { color: var(--text-time); }
+        .nick-self { color: var(--text-nick-self); }
+        .nick-other { color: var(--text-nick-other); }
+        .text { color: var(--text-primary); }
+        .text-own { color: var(--text-own); }
+        .system { color: var(--text-system); }
+        .error { color: var(--text-error); }
+        .join-part { color: var(--text-join); }
+        .highlight { color: var(--text-highlight); }
+        
+        .top-status-bar {
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+            padding: 0 1ch;
+            height: 1.2em;
+            line-height: 1.2em;
+            font-weight: normal;
+            display: flex;
+            justify-content: space-between;
+            flex-shrink: 0;
+        }
+        
+        .top-status-left {
+            color: var(--text-secondary);
+        }
+        
+        .top-status-right {
+            color: var(--text-secondary);
+        }
+        
+        .about-link {
+            background: transparent;
+            color: var(--text-secondary);
+            border: none;
+            padding: 0;
+            height: 1.2em;
+            line-height: 1.2em;
+            font-family: inherit;
+            font-size: inherit;
+            cursor: pointer;
+            text-decoration: underline;
+            margin-left: 1ch;
+        }
+        
+        .about-link:hover {
+            color: var(--text-primary);
+        }
         
         .status-bar {
-            background: #000088;
-            color: #ffffff;
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
             padding: 0 1ch;
             height: 1.2em;
             line-height: 1.2em;
@@ -148,16 +264,16 @@
         }
         
         .status-left {
-            color: #ffffff;
+            color: var(--text-secondary);
         }
         
         .status-right {
-            color: #cccccc;
+            color: var(--text-primary);
         }
         
         .input-bar {
-            background: #000000;
-            color: #ffffff;
+            background: var(--bg-primary);
+            color: var(--text-secondary);
             padding: 0 1ch;
             height: 1.2em;
             line-height: 1.2em;
@@ -166,14 +282,14 @@
         }
         
         .input-prompt {
-            color: #ffffff;
+            color: var(--text-secondary);
             white-space: pre;
         }
         
         .input-field {
             background: transparent;
             border: none;
-            color: #ffffff;
+            color: var(--text-secondary);
             font-family: inherit;
             font-size: inherit;
             flex: 1;
@@ -183,7 +299,8 @@
         }
         
         /* Hide scrollbar */
-        .chat-area::-webkit-scrollbar {
+        .chat-area::-webkit-scrollbar,
+        .user-list::-webkit-scrollbar {
             width: 0px;
             background: transparent;
         }
@@ -191,9 +308,17 @@
 </head>
 <body>
     <div class="irssi-terminal">
+        <div class="top-status-bar">
+            <div class="top-status-left" id="topStatusLeft">NIGHTWATCH Terminal</div>
+            <div class="top-status-right">
+                <span id="connectionStatus">[disconnected]</span>
+                <button class="about-link" id="aboutLink">about</button>
+            </div>
+        </div>
+        
         <div class="main-content">
             <div class="chat-area" id="chatArea"></div>
-            <div class="user-list" id="userList">
+                        <div class="user-list" id="userList">
                 <div class="user-list-header">Users</div>
             </div>
         </div>
@@ -202,6 +327,11 @@
             <div class="status-left" id="statusLeft">[ #nightwatch ]</div>
             <div class="status-right">
                 <span id="statusRight">[connecting]</span>
+                <select class="theme-selector" id="themeSelector">
+                    <option value="auto">Auto</option>
+                    <option value="dark">Dark</option>
+                    <option value="light">Light</option>
+                </select>
                 <button class="toggle-button" id="toggleUsers">Users</button>
             </div>
         </div>
@@ -213,6 +343,76 @@
     </div>
 
     <script>
+        class ThemeManager {
+            constructor() {
+                this.themes = ['auto', 'dark', 'light'];
+                this.currentTheme = this.getSavedTheme();
+                this.selector = null;
+                this.mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+                
+                // Initialize theme
+                this.applyTheme(this.currentTheme);
+                
+                // Listen for system theme changes
+                this.mediaQuery.addListener(() => {
+                    if (this.currentTheme === 'auto') {
+                        this.applyAutoTheme();
+                    }
+                });
+            }
+            
+            initSelector(selector) {
+                this.selector = selector;
+                this.selector.value = this.currentTheme;
+                this.selector.addEventListener('change', (e) => {
+                    this.setTheme(e.target.value);
+                });
+            }
+            
+            getSavedTheme() {
+                return localStorage.getItem('nightwatch-theme') || 'auto';
+            }
+            
+            saveTheme(theme) {
+                localStorage.setItem('nightwatch-theme', theme);
+            }
+            
+            setTheme(theme) {
+                if (!this.themes.includes(theme)) return;
+                
+                this.currentTheme = theme;
+                this.saveTheme(theme);
+                this.applyTheme(theme);
+                
+                if (this.selector) {
+                    this.selector.value = theme;
+                }
+            }
+            
+            applyTheme(theme) {
+                const body = document.body;
+                
+                if (theme === 'auto') {
+                    this.applyAutoTheme();
+                } else {
+                    body.setAttribute('data-theme', theme);
+                }
+            }
+            
+            applyAutoTheme() {
+                const body = document.body;
+                const prefersDark = this.mediaQuery.matches;
+                body.setAttribute('data-theme', prefersDark ? 'dark' : 'light');
+            }
+            
+            getEffectiveTheme() {
+                if (this.currentTheme === 'auto') {
+                    return this.mediaQuery.matches ? 'dark' : 'light';
+                }
+                return this.currentTheme;
+            }
+        }
+
         class IrssiTerminal {
             constructor() {
                 this.ws = null;
@@ -224,7 +424,12 @@
                 this.users = [];
                 this.nickMap = {}; // Map IRC names to display names
                 this.pendingNickChange = null; // Track pending nickname change
-                this.userListVisible = window.innerWidth >= 768; // Show on desktop by default
+                // Show user list by default, hide only if screen too small for banner + user list
+                // Large banner (~1000px) + user list (~200px) = ~1200px minimum
+                this.userListVisible = window.innerWidth >= 1200;
+                
+                // Initialize theme manager
+                this.themeManager = new ThemeManager();
                 
                 this.initElements();
                 this.connect();
@@ -238,6 +443,9 @@
                 this.statusLeft = document.getElementById('statusLeft');
                 this.statusRight = document.getElementById('statusRight');
                 this.toggleButton = document.getElementById('toggleUsers');
+                this.themeSelector = document.getElementById('themeSelector');
+                this.connectionStatus = document.getElementById('connectionStatus');
+                this.aboutLink = document.getElementById('aboutLink');
                 
                 this.inputField.addEventListener('keypress', (e) => {
                     if (e.key === 'Enter') {
@@ -249,22 +457,54 @@
                     this.toggleUserList();
                 });
                 
+                this.aboutLink.addEventListener('click', () => {
+                    this.showAbout();
+                });
+                
+                // Initialize theme selector
+                this.themeManager.initSelector(this.themeSelector);
+                
                 // Show ASCII banner and welcome messages
                 this.showWelcomeBanner();
                 this.updatePrompt();
                 this.updateUserListVisibility();
+                
+                // Initialize top status
+                this.connectionStatus.textContent = '[connecting]';
+                
+                // Update banner on window resize
+                window.addEventListener('resize', () => {
+                    // Clear chat area and show new banner
+                    this.chatArea.innerHTML = '';
+                    this.showWelcomeBanner();
+                });
             }
             
             showWelcomeBanner() {
-                // ASCII NIGHTWATCH banner
-                const banner = [
-                    "███╗   ██╗██╗ ██████╗ ██╗  ██╗████████╗██╗    ██╗ █████╗ ████████╗ ██████╗██╗  ██╗",
-                    "████╗  ██║██║██╔════╝ ██║  ██║╚══██╔══╝██║    ██║██╔══██╗╚══██╔══╝██╔════╝██║  ██║",
-                    "██╔██╗ ██║██║██║  ███╗███████║   ██║   ██║ █╗ ██║███████║   ██║   ██║     ███████║",
-                    "██║╚██╗██║██║██║   ██║██╔══██║   ██║   ██║███╗██║██╔══██║   ██║   ██║     ██╔══██║",
-                    "██║ ╚████║██║╚██████╔╝██║  ██║   ██║   ╚███╔███╔╝██║  ██║   ██║   ╚██████╗██║  ██║",
-                    "╚═╝  ╚═══╝╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝    ╚══╝╚══╝ ╚═╝  ╚═╝   ╚═╝    ╚═════╝╚═╝  ╚═╝"
-                ];
+                // Check if screen can fit the large banner (roughly 88 characters wide)
+                // Assume ~8-10px per character, so large banner needs ~880-1000px minimum
+                const canFitLargeBanner = window.innerWidth >= 1000;
+                const isMobile = !canFitLargeBanner;
+                
+                let banner;
+                if (isMobile) {
+                    // Compact banner (38 chars width)
+                    banner = [
+                        "░█▀█░▀█▀░█▀▀░█░█░▀█▀░█░█░█▀█░▀█▀░█▀▀░█░█",
+                        "░█░█░░█░░█░█░█▀█░░█░░█▄█░█▀█░░█░░█░░░█▀█",
+                        "░▀░▀░▀▀▀░▀▀▀░▀░▀░░▀░░▀░▀░▀░▀░░▀░░▀▀▀░▀░▀"
+                    ];
+                } else {
+                    // Full desktop banner
+                    banner = [
+                        "███╗   ██╗██╗ ██████╗ ██╗  ██╗████████╗██╗    ██╗ █████╗ ████████╗ ██████╗██╗  ██╗",
+                        "████╗  ██║██║██╔════╝ ██║  ██║╚══██╔══╝██║    ██║██╔══██╗╚══██╔══╝██╔════╝██║  ██║",
+                        "██╔██╗ ██║██║██║  ███╗███████║   ██║   ██║ █╗ ██║███████║   ██║   ██║     ███████║",
+                        "██║╚██╗██║██║██║   ██║██╔══██║   ██║   ██║███╗██║██╔══██║   ██║   ██║     ██╔══██║",
+                        "██║ ╚████║██║╚██████╔╝██║  ██║   ██║   ╚███╔███╔╝██║  ██║   ██║   ╚██████╗██║  ██║",
+                        "╚═╝  ╚═══╝╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝    ╚══╝╚══╝ ╚═╝  ╚═╝   ╚═╝    ╚═════╝╚═╝  ╚═╝"
+                    ];
+                }
                 
                 banner.forEach(line => {
                     const message = document.createElement('div');
@@ -273,9 +513,16 @@
                     this.chatArea.appendChild(message);
                 });
                 
-                // Welcome messages
-                this.addSystemMessage('Welcome to NIGHTWATCH - Mesh IRC Network');
-                this.addSystemMessage('Type /nick <name> to change your nickname');
+                // Welcome messages (shorter on small screens)
+                if (isMobile) {
+                    this.addSystemMessage('Welcome to NIGHTWATCH');
+                    this.addSystemMessage('Decentralized Mesh Network');
+                    this.addSystemMessage('Off-Grid conversation');
+                    this.addSystemMessage('Type /nick <name> to change nick');
+                } else {
+                    this.addSystemMessage('Welcome to NIGHTWATCH - Decentralized Mesh Network - Off-Grid conversation');
+                    this.addSystemMessage('Type /nick <name> to change your nickname');
+                }
                 this.addSystemMessage('Connecting to IRC bridge...');
             }
             
@@ -517,11 +764,11 @@
                 if (this.userListVisible) {
                     this.userList.classList.add('visible');
                     this.userList.classList.remove('hidden');
-                    this.toggleButton.textContent = 'Hide';
+                    this.toggleButton.textContent = 'Hide Users';
                 } else {
                     this.userList.classList.remove('visible');
                     this.userList.classList.add('hidden');
-                    this.toggleButton.textContent = 'Show';
+                    this.toggleButton.textContent = 'Show Users';
                 }
             }
             
@@ -572,11 +819,45 @@
             updateStatus(connectionStatus = null) {
                 if (connectionStatus) {
                     this.statusRight.textContent = `[${connectionStatus}]`;
+                    this.connectionStatus.textContent = `[${connectionStatus}]`;
                 }
                 
                 if (this.registered && this.userCount > 0) {
                     this.statusRight.textContent = `[users: ${this.userCount}]`;
+                    this.connectionStatus.textContent = `[connected]`;
                 }
+            }
+            
+            showAbout() {
+                const aboutText = [
+                    "╔════════════════════════════════════════════════════════════════════╗",
+                    "║                            NIGHTWATCH                             ║",
+                    "║                    Decentralized Mesh Network                     ║",
+                    "║                                                                    ║",
+                    "║  A resilient chat system designed for off-grid communication      ║",
+                    "║  using Batman Advanced mesh networking protocol.                   ║",
+                    "║                                                                    ║",
+                    "║  Features:                                                         ║",
+                    "║  • Zero-infrastructure messaging                                   ║",
+                    "║  • Automatic node discovery                                        ║",
+                    "║  • Self-healing network topology                                   ║",
+                    "║  • Terminal-style interface                                        ║",
+                    "║                                                                    ║",
+                    "║  Commands:                                                         ║",
+                    "║  /nick <name>  - Change your nickname                             ║",
+                    "║                                                                    ║",
+                    "║  Built with love for decentralized communication                  ║",
+                    "╚════════════════════════════════════════════════════════════════════╝"
+                ];
+                
+                aboutText.forEach(line => {
+                    const message = document.createElement('div');
+                    message.className = 'message';
+                    message.innerHTML = `<span class="system">${this.escapeHtml(line)}</span>`;
+                    this.chatArea.appendChild(message);
+                });
+                
+                this.scrollToBottom();
             }
             
             scrollToBottom() {
