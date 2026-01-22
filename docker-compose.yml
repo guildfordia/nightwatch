@@ -61,21 +61,21 @@ services:
         reservations:
           memory: 16M
 
-  batman-node:
-    container_name: batman-node
-    build:
-      context: .
-      dockerfile: ./batman/Dockerfile
-    privileged: true
-    network_mode: "host"
-    env_file:
-      - ./.env
+  #batman-node:
+  #  container_name: batman-node
+  #  build:
+  #    context: .
+  #    dockerfile: ./batman/Dockerfile
+  #  privileged: true
+  #  network_mode: "host"
+  #  env_file:
+  #    - ./.env
     #environment:
     #  - MESH_IP=192.168.199.10  # customize per node
-    volumes:
-      - /lib/modules:/lib/modules
-      - /lib/firmware:/lib/firmware
-    restart: unless-stopped
+  #  volumes:
+  #    - /lib/modules:/lib/modules
+  #    - /lib/firmware:/lib/firmware
+  #  restart: unless-stopped
 
 networks:
   irc-net:

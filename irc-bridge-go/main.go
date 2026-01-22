@@ -45,7 +45,7 @@ func (h *Hub) run() {
             h.clients[client] = true
             h.mu.Unlock()
             log.Printf("[%s] Client registered. Total: %d", client.id, len(h.clients))
-            
+
         case client := <-h.unregister:
             h.mu.Lock()
             if _, ok := h.clients[client]; ok {
@@ -68,9 +68,9 @@ func (c *Client) readPump(hub *Hub) {
         hub.unregister <- c
         c.conn.Close()
     }()
-    
+
     log.Printf("[%s] Starting WebSocket readPump", c.id)
-    
+
     for {
         // Read WebSocket frame
         message, err := c.readWebSocketFrame()
@@ -78,7 +78,7 @@ func (c *Client) readPump(hub *Hub) {
             log.Printf("[%s] WebSocket read error: %v", c.id, err)
             break
         }
-        
+
         if message != "" {
             log.Printf("[%s] WebSocket received: %q", c.id, message)
             if c.irc != nil {
@@ -102,7 +102,7 @@ func (c *Client) readWebSocketFrame() (string, error) {
     if err != nil {
         return "", err
     }
-    
+
     // Check if this is a text frame
     opcode := header[0] & 0x0F
     if opcode == 0x08 { // Close frame
@@ -111,11 +111,11 @@ func (c *Client) readWebSocketFrame() (string, error) {
     if opcode != 0x01 { // Not a text frame
         return "", fmt.Errorf("unsupported frame type: %d", opcode)
     }
-    
+
     // Get payload length
     masked := (header[1] & 0x80) != 0
     length := int(header[1] & 0x7F)
-    
+
     if length == 126 {
         lengthBytes := make([]byte, 2)
         _, err := c.conn.Read(lengthBytes)
@@ -132,7 +132,7 @@ func (c *Client) readWebSocketFrame() (string, error) {
         // For simplicity, only handle reasonable lengths
         length = int(lengthBytes[4])<<24 | int(lengthBytes[5])<<16 | int(lengthBytes[6])<<8 | int(lengthBytes[7])
     }
-    
+
     // Read mask key if present
     var maskKey []byte
     if masked {
@@ -142,28 +142,28 @@ func (c *Client) readWebSocketFrame() (string, error) {
             return "", err
         }
     }
-    
+
     // Read payload
     payload := make([]byte, length)
     _, err = c.conn.Read(payload)
     if err != nil {
         return "", err
     }
-    
+
     // Unmask payload if necessary
     if masked {
         for i := 0; i < length; i++ {
             payload[i] ^= maskKey[i%4]
         }
     }
-    
+
     return strings.TrimSpace(string(payload)), nil
 }
 
 func (c *Client) writePump() {
     log.Printf("[%s] Starting WebSocket writePump", c.id)
     defer log.Printf("[%s] WebSocket writePump ending", c.id)
-    
+
     for {
         select {
         case message, ok := <-c.send:
@@ -171,7 +171,7 @@ func (c *Client) writePump() {
                 log.Printf("[%s] Send channel closed", c.id)
                 return
             }
-            
+
             // Send as WebSocket text frame
             frame := createWebSocketFrame(message)
             _, err := c.conn.Write(frame)
@@ -190,11 +190,11 @@ func (c *Client) writePump() {
 func createWebSocketFrame(data []byte) []byte {
     length := len(data)
     var frame []byte
-    
+
     // WebSocket frame format:
     // Byte 0: FIN (1) + RSV (000) + Opcode (0001 for text)
     frame = append(frame, 0x81) // 10000001 = FIN + text frame
-    
+
     if length < 126 {
         frame = append(frame, byte(length))
     } else if length < 65536 {
@@ -207,7 +207,7 @@ func createWebSocketFrame(data []byte) []byte {
             frame = append(frame, byte((length>>(8*i))&0xFF))
         }
     }
-    
+
     frame = append(frame, data...)
     return frame
 }
@@ -217,10 +217,10 @@ func (c *Client) ircPump() {
         log.Printf("[%s] IRC connection is nil, cannot start ircPump", c.id)
         return
     }
-    
+
     log.Printf("[%s] Starting IRC readPump", c.id)
     defer log.Printf("[%s] IRC readPump ending", c.id)
-    
+
     scanner := bufio.NewScanner(c.irc)
     for scanner.Scan() {
         line := scanner.Text()
@@ -237,7 +237,7 @@ func (c *Client) ircPump() {
             return
         }
     }
-    
+
     if err := scanner.Err(); err != nil {
         log.Printf("[%s] IRC scanner error: %v", c.id, err)
     }
@@ -246,43 +246,43 @@ func (c *Client) ircPump() {
 func handleWebSocket(hub *Hub, w http.ResponseWriter, r *http.Request) {
     clientID := fmt.Sprintf("client-%d", time.Now().UnixNano()%10000)
     log.Printf("[%s] New WebSocket request from %s", clientID, r.RemoteAddr)
-    
+
     // Simple WebSocket handshake
     if r.Header.Get("Upgrade") != "websocket" {
         log.Printf("[%s] Not a websocket request", clientID)
         http.Error(w, "Not a websocket request", 400)
         return
     }
-    
+
     key := r.Header.Get("Sec-WebSocket-Key")
     if key == "" {
         log.Printf("[%s] Missing websocket key", clientID)
         http.Error(w, "Missing websocket key", 400)
         return
     }
-    
+
     log.Printf("[%s] WebSocket key: %s", clientID, key)
-    
+
     // WebSocket handshake response
     acceptKey := computeAcceptKey(key)
     log.Printf("[%s] WebSocket accept key: %s", clientID, acceptKey)
-    
+
     hijacker, ok := w.(http.Hijacker)
     if !ok {
         log.Printf("[%s] Cannot hijack connection", clientID)
         http.Error(w, "Cannot hijack connection", 500)
         return
     }
-    
+
     conn, _, err := hijacker.Hijack()
     if err != nil {
         log.Printf("[%s] Cannot hijack connection: %v", clientID, err)
         http.Error(w, "Cannot hijack connection", 500)
         return
     }
-    
+
     log.Printf("[%s] Connection hijacked successfully", clientID)
-    
+
     // Send WebSocket handshake response
     response := fmt.Sprintf(
         "HTTP/1.1 101 Switching Protocols\r\n"+
@@ -290,16 +290,16 @@ func handleWebSocket(hub *Hub, w http.ResponseWriter, r *http.Request) {
         "Connection: Upgrade\r\n"+
         "Sec-WebSocket-Accept: %s\r\n\r\n",
         acceptKey)
-    
+
     _, writeErr := conn.Write([]byte(response))
     if writeErr != nil {
         log.Printf("[%s] Failed to write WebSocket handshake: %v", clientID, writeErr)
         conn.Close()
         return
     }
-    
+
     log.Printf("[%s] WebSocket handshake sent", clientID)
-    
+
     // Connect to IRC server
     log.Printf("[%s] Connecting to IRC server ngircd:6667", clientID)
     ircConn, err := net.DialTimeout("tcp", "ngircd:6667", 5*time.Second)
@@ -308,35 +308,43 @@ func handleWebSocket(hub *Hub, w http.ResponseWriter, r *http.Request) {
         conn.Close()
         return
     }
-    
+
+    // Immediately register as "guest"
+    if _, err := ircConn.Write([]byte("NICK guest\r\nUSER guest 0 * :Web User\r\n")); err != nil {
+        log.Printf("IRC pre-registration failed: %v", err)
+        conn.Close()
+        ircConn.Close()
+        return
+    }
+
     log.Printf("[%s] IRC connection established", clientID)
-    
+
     // Authenticate with IRC server
     nick := fmt.Sprintf("webuser%d", time.Now().Unix()%1000)
     log.Printf("[%s] Authenticating with IRC as %s", clientID, nick)
-    
+
     _, err1 := ircConn.Write([]byte(fmt.Sprintf("NICK %s\r\n", nick)))
     _, err2 := ircConn.Write([]byte(fmt.Sprintf("USER %s 0 * :Web User\r\n", nick)))
     _, err3 := ircConn.Write([]byte("JOIN #nightwatch\r\n"))
-    
+
     if err1 != nil || err2 != nil || err3 != nil {
         log.Printf("[%s] IRC auth write errors: %v, %v, %v", clientID, err1, err2, err3)
         ircConn.Close()
         conn.Close()
         return
     }
-    
+
     log.Printf("[%s] IRC authentication commands sent", clientID)
-    
+
     client := &Client{
         conn: conn,
         irc:  ircConn,
         send: make(chan []byte, 256),
         id:   clientID,
     }
-    
+
     hub.register <- client
-    
+
     log.Printf("[%s] Starting client goroutines", clientID)
     go client.writePump()
     go client.ircPump()
@@ -352,11 +360,11 @@ func computeAcceptKey(key string) string {
 func main() {
     hub := newHub()
     go hub.run()
-    
+
     http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
         handleWebSocket(hub, w, r)
     })
-    
+
     log.Println("* IRC Bridge starting on :3000")
     log.Fatal(http.ListenAndServe(":3000", nil))
-} 
+}

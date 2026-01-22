@@ -1,19 +1,19 @@
 # BATMAN Advanced Mesh Network Configuration
 
 network:
-  interface: "wlan0"
+  interface: "wlan1"
   ip_range: "192.168.199.0/24"
-  port: 8080
+  port: 9080
 
 mesh:
   protocol: "batman-adv"
   nodes:
-    - id: "node001"
-      ip: "192.168.199.10"
-    - id: "node002"
-      ip: "192.168.199.11"
-    - id: "node003"
-      ip: "192.168.199.12"
+    - id: "bluenode"
+      ip: "192.168.199.101"
+    - id: "blacknode"
+      ip: "192.168.199.102"
+    - id: "whitenode"
+      ip: "192.168.199.103"
 
 monitoring:
   enabled: true
@@ -22,4 +22,4 @@ monitoring:
     - "latency"
     - "bandwidth"
     - "packet_loss"
-    - "signal_strength" 
+    - "signal_strength"
