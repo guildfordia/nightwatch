@@ -11,6 +11,12 @@ services:
     restart: unless-stopped
     networks:
       - irc-net
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 6667 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     deploy:
       resources:
         limits:
@@ -24,15 +30,19 @@ services:
     env_file:
       - ./.env
     ports:
-      - "${KIWI_PORT}:3000"
+      - "${BRIDGE_PORT:-8080}:3000"
     restart: unless-stopped
     networks:
       - irc-net
-    dns:
-      - 8.8.8.8
-      - 8.8.4.4
     depends_on:
-      - ngircd
+      ngircd:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     deploy:
       resources:
         limits:
@@ -51,31 +61,22 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf
       - ./html:/usr/share/nginx/html
     depends_on:
-      - irc-bridge
+      irc-bridge:
+        condition: service_healthy
     networks:
       - irc-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:80/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
     deploy:
       resources:
         limits:
           memory: 32M
         reservations:
           memory: 16M
-
-  #batman-node:
-  #  container_name: batman-node
-  #  build:
-  #    context: .
-  #    dockerfile: ./batman/Dockerfile
-  #  privileged: true
-  #  network_mode: "host"
-  #  env_file:
-  #    - ./.env
-    #environment:
-    #  - MESH_IP=192.168.199.10  # customize per node
-  #  volumes:
-  #    - /lib/modules:/lib/modules
-  #    - /lib/firmware:/lib/firmware
-  #  restart: unless-stopped
 
 networks:
   irc-net:

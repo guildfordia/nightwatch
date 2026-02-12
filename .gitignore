@@ -24,6 +24,10 @@ build/
 *.tar.gz
 docker-compose.override.yml
 
+# Generated configs (contain secrets)
+ngircd/ngircd.conf
+arp-entries.conf
+
 # Logs
 *.log
 logs/

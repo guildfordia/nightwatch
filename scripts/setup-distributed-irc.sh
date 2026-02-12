@@ -99,71 +99,51 @@ maxusers = 100
 EOF
 
 # Add server configurations for all other Pis (excluding self)
-if [ "$PI_NUMBER" != "1" ]; then
+# Only add entries where both SERVER_NAME and MESH_IP are defined
+add_server_link() {
+    local pi_num="$1"
+    local server_name="$2"
+    local mesh_ip="$3"
+
+    # Skip self
+    if [ "$PI_NUMBER" = "$pi_num" ]; then
+        return
+    fi
+
+    # Skip if server name or IP not configured
+    if [ -z "$server_name" ] || [ -z "$mesh_ip" ]; then
+        echo "    [skip] Pi $pi_num not configured (missing SERVER_NAME or MESH_IP)"
+        return
+    fi
+
     cat >> "ngircd/ngircd.conf" << EOF
 
 [Server]
-Name = $PI1_SERVER_NAME
-Host = $PI1_MESH_IP
+Name = $server_name
+Host = $mesh_ip
 Port = 6667
 MyPassword = $IRC_LINK_PASSWORD
 PeerPassword = $IRC_LINK_PASSWORD
 Group = 1
 Passive = no
 EOF
-fi
+    echo "    [+] Added link to Pi $pi_num ($server_name @ $mesh_ip)"
+}
 
-if [ "$PI_NUMBER" != "2" ]; then
-    cat >> "ngircd/ngircd.conf" << EOF
-
-[Server]
-Name = $PI2_SERVER_NAME
-Host = $PI2_MESH_IP
-Port = 6667
-MyPassword = $IRC_LINK_PASSWORD
-PeerPassword = $IRC_LINK_PASSWORD
-Group = 1
-Passive = no
-EOF
-fi
-
-if [ "$PI_NUMBER" != "3" ]; then
-    cat >> "ngircd/ngircd.conf" << EOF
-
-[Server]
-Name = $PI3_SERVER_NAME
-Host = $PI3_MESH_IP
-Port = 6667
-MyPassword = $IRC_LINK_PASSWORD
-PeerPassword = $IRC_LINK_PASSWORD
-Group = 1
-Passive = no
-EOF
-fi
-
-if [ "$PI_NUMBER" != "4" ]; then
-    cat >> "ngircd/ngircd.conf" << EOF
-
-[Server]
-Name = $PI4_SERVER_NAME
-Host = $PI4_MESH_IP
-Port = 6667
-MyPassword = $IRC_LINK_PASSWORD
-PeerPassword = $IRC_LINK_PASSWORD
-Group = 1
-Passive = no
-EOF
-fi
+add_server_link 1 "$PI1_SERVER_NAME" "$PI1_MESH_IP"
+add_server_link 2 "$PI2_SERVER_NAME" "$PI2_MESH_IP"
+add_server_link 3 "$PI3_SERVER_NAME" "$PI3_MESH_IP"
+add_server_link 4 "${PI4_SERVER_NAME:-}" "${PI4_MESH_IP:-}"
 
 echo "[+] Generated ngircd configuration for Pi $PI_NUMBER"
 echo "[+] Configuration saved to: ngircd/ngircd.conf"
 
 # Show which servers this Pi will connect to
 echo "[+] This Pi will connect to:"
-if [ "$PI_NUMBER" != "1" ]; then echo "    → $PI1_SERVER_NAME ($PI1_MESH_IP)"; fi
-if [ "$PI_NUMBER" != "2" ]; then echo "    → $PI2_SERVER_NAME ($PI2_MESH_IP)"; fi
-if [ "$PI_NUMBER" != "3" ]; then echo "    → $PI3_SERVER_NAME ($PI3_MESH_IP)"; fi
-if [ "$PI_NUMBER" != "4" ]; then echo "    → $PI4_SERVER_NAME ($PI4_MESH_IP)"; fi
+if [ "$PI_NUMBER" != "1" ] && [ -n "$PI1_SERVER_NAME" ]; then echo "    -> $PI1_SERVER_NAME ($PI1_MESH_IP)"; fi
+if [ "$PI_NUMBER" != "2" ] && [ -n "$PI2_SERVER_NAME" ]; then echo "    -> $PI2_SERVER_NAME ($PI2_MESH_IP)"; fi
+if [ "$PI_NUMBER" != "3" ] && [ -n "$PI3_SERVER_NAME" ]; then echo "    -> $PI3_SERVER_NAME ($PI3_MESH_IP)"; fi
+if [ "$PI_NUMBER" != "4" ] && [ -n "${PI4_SERVER_NAME:-}" ]; then echo "    -> $PI4_SERVER_NAME ($PI4_MESH_IP)"; fi
 
 echo ""
 echo "[+] Next steps:"

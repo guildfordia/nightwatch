@@ -336,6 +336,8 @@
         this.pendingNickChange = null;
         this.userListVisible = window.innerWidth >= 1200;
         this.bannerRendered = false; // prevent re-render on resize
+        this.reconnectDelay = 1000; // start at 1s, exponential backoff
+        this.maxReconnectDelay = 30000; // cap at 30s
 
         this.themeManager = new ThemeManager();
         this.initElements();
@@ -418,16 +420,21 @@
         try { this.ws = new WebSocket(wsUrl); }
         catch (error) { this.addSystemMessage(`WebSocket error: ${error.message}`); return; }
 
-        this.ws.onopen = () => { this.connected = true; this.updateStatus('connected'); };
+        this.ws.onopen = () => {
+          this.connected = true;
+          this.reconnectDelay = 1000; // reset backoff on successful connect
+          this.updateStatus('connected');
+        };
         this.ws.onmessage = (event) => this.handleMessage(event.data);
         this.ws.onclose = (event) => {
           this.connected = false;
           this.registered = false;
           this.updateStatus('disconnected');
           this.inputField.disabled = true;
-          this.addSystemMessage(`Connection lost (${event.code})`);
-          this.addSystemMessage('Reconnecting in 3 seconds...');
-          setTimeout(() => this.connect(), 3000);
+          const delaySec = (this.reconnectDelay / 1000).toFixed(0);
+          this.addSystemMessage(`Connection lost (${event.code}). Reconnecting in ${delaySec}s...`);
+          setTimeout(() => this.connect(), this.reconnectDelay);
+          this.reconnectDelay = Math.min(this.reconnectDelay * 2, this.maxReconnectDelay);
         };
         this.ws.onerror = () => { this.addSystemMessage('Connection error'); };
       }
@@ -531,6 +538,45 @@
               }
             }
           }
+          // JOIN — add user to list
+          else if (line.includes(' JOIN ')) {
+            const match = line.match(/:([^!]+)![^ ]+ JOIN/);
+            if (match) {
+              const nick = match[1];
+              if (nick !== this.nickname && !this.users.includes(nick)) {
+                this.users.push(nick);
+                this.userCount = this.users.length;
+                this.updateUserList();
+              }
+              if (nick !== this.nickname) {
+                this.addJoinPart(`${nick} has joined ${this.channel}`);
+              }
+            }
+          }
+          // PART — remove user from list
+          else if (line.includes(' PART ')) {
+            const match = line.match(/:([^!]+)![^ ]+ PART/);
+            if (match) {
+              const nick = match[1];
+              this.users = this.users.filter(u => u !== nick);
+              this.userCount = this.users.length;
+              this.updateUserList();
+              this.addJoinPart(`${nick} has left ${this.channel}`);
+            }
+          }
+          // QUIT — remove user from list
+          else if (line.includes(' QUIT ')) {
+            const match = line.match(/:([^!]+)![^ ]+ QUIT/);
+            if (match) {
+              const nick = match[1];
+              this.users = this.users.filter(u => u !== nick);
+              delete this.nickMap[nick];
+              this.userCount = this.users.length;
+              this.updateUserList();
+              const reason = line.includes(':') ? line.split('QUIT :')[1] || '' : '';
+              this.addJoinPart(`${nick} has quit${reason ? ` (${reason})` : ''}`);
+            }
+          }
           // PRIVMSG & CTCP ACTION
           else if (line.includes(' PRIVMSG ')) {
             const match = line.match(/:([^!]+)![^:]+PRIVMSG [^:]+:(.+)/);
@@ -625,19 +671,22 @@
         this.userList.innerHTML = '';
         this.userList.appendChild(header);
 
-        const displayUsers = [];
-        if (!displayUsers.includes(this.nickname)) displayUsers.push(this.nickname);
+        const displayUsers = new Set();
+        displayUsers.add(this.nickname);
 
         this.users.forEach(ircUser => {
-          const displayName = this.nickMap[ircUser] || ircUser;
-          if (!ircUser.startsWith('webuser') && !displayUsers.includes(displayName) && displayName !== this.nickname) {
-            displayUsers.push(displayName);
+          // Filter out IRC server names, keep all real users (including webuser*)
+          if (!ircUser.includes('.irc') && !ircUser.includes('nightwatch')) {
+            const displayName = this.nickMap[ircUser] || ircUser;
+            displayUsers.add(displayName);
           }
         });
 
-        displayUsers.sort((a, b) => (a === this.nickname ? -1 : b === this.nickname ? 1 : a.localeCompare(b)));
+        const sorted = [...displayUsers].sort((a, b) =>
+          a === this.nickname ? -1 : b === this.nickname ? 1 : a.localeCompare(b)
+        );
 
-        displayUsers.forEach(user => {
+        sorted.forEach(user => {
           const el = document.createElement('div');
           el.className = 'user-item';
           if (user === this.nickname) el.classList.add('self');
@@ -645,7 +694,8 @@
           this.userList.appendChild(el);
         });
 
-        this.userCount = displayUsers.length;
+        this.userCount = sorted.length;
+        header.textContent = `Users (${this.userCount})`;
       }
 
       updateStatus(connectionStatus = null) {
