@@ -1,0 +1,14 @@
+[Unit]
+Description=Nightwatch Mesh Network (802.11s + batman-adv + AP)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/nightwatch/scripts/mesh-fix.sh start
+ExecStop=/opt/nightwatch/scripts/mesh-fix.sh stop
+ExecReload=/opt/nightwatch/scripts/mesh-fix.sh stop ; /opt/nightwatch/scripts/mesh-fix.sh start
+
+[Install]
+WantedBy=multi-user.target
