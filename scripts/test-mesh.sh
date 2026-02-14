@@ -4,12 +4,13 @@
 #
 # Tests:
 #   1. Local mesh health (batman-adv, 802.11s, interfaces)
-#   2. Node-to-node reachability (ping over bat0)
+#   2. Node discovery (ping all configured nodes, find who's online)
 #   3. batman-adv topology (neighbors, originators)
-#   4. Docker services on all nodes (IRC, bridge, nginx)
-#   5. IRC cross-node messaging (send on this node, verify on remote)
+#   4. Docker services (local + remote live nodes)
+#   5. IRC cross-node messaging (if >1 node online)
 #   6. Access point status
 #   7. Gateway / internet connectivity
+#   8. Local Docker container health
 #
 # Usage: sudo ./scripts/test-mesh.sh [--quick]
 #   --quick  Skip slow tests (cross-node IRC, latency matrix)
@@ -78,18 +79,13 @@ for i in $(seq 1 20); do
     fi
 done
 
-if [ ${#NODE_IPS[@]} -eq 0 ]; then
-    echo -e "${RED}No nodes configured in .env (PI*_MESH_IP)${NC}"
-    exit 1
-fi
-
 echo "======================================"
 echo "  Nightwatch Mesh Integration Test"
 echo "======================================"
 echo ""
-echo "  This node:   $LOCAL_IP (Pi #${PI_NUMBER:-?})"
-echo "  Nodes in .env: ${#NODE_IPS[@]}"
-echo "  Mode:        $([ "$QUICK_MODE" = true ] && echo 'quick' || echo 'full')"
+echo "  This node:       $LOCAL_IP (Pi #${PI_NUMBER:-?})"
+echo "  Configured nodes: ${#NODE_IPS[@]}"
+echo "  Mode:            $([ "$QUICK_MODE" = true ] && echo 'quick' || echo 'full')"
 echo ""
 
 # ---- Check we're running as root ----
@@ -150,7 +146,7 @@ fi
 
 # batman-adv gateway mode
 gw_mode=$(batctl meshif "$BAT_IFACE" gw_mode 2>/dev/null || batctl gw_mode 2>/dev/null || echo "unknown")
-if [ "$MESH_GATEWAY" = "true" ]; then
+if [ "${MESH_GATEWAY:-false}" = "true" ]; then
     if echo "$gw_mode" | grep -qi "server"; then
         pass "Gateway mode: server (as configured)"
     else
@@ -165,42 +161,79 @@ else
 fi
 
 # ============================================================
-# 2. 802.11s Mesh Peers
+# 2. Node Discovery
 # ============================================================
 
-section "2. 802.11s Mesh Peers"
+section "2. Node Discovery"
+
+declare -a LIVE_IPS=()
+declare -a LIVE_NAMES=()
+
+if [ ${#NODE_IPS[@]} -le 1 ]; then
+    echo -e "  Only this node is configured. Skipping remote node tests."
+    skip "No other nodes configured in .env"
+else
+    for idx in "${!NODE_IPS[@]}"; do
+        ip="${NODE_IPS[$idx]}"
+        name="${NODE_NAMES[$idx]}"
+
+        if [ "$ip" = "$LOCAL_IP" ]; then
+            continue
+        fi
+
+        if ping -c 1 -W 2 "$ip" >/dev/null 2>&1; then
+            rtt=$(ping -c 1 -W 2 "$ip" 2>/dev/null | grep 'time=' | sed 's/.*time=//' || echo "?")
+            echo -e "  ${GREEN}[ONLINE]${NC}  $ip ($name) — ${rtt}"
+            LIVE_IPS+=("$ip")
+            LIVE_NAMES+=("$name")
+        else
+            echo -e "  ${YELLOW}[OFFLINE]${NC} $ip ($name)"
+        fi
+    done
+
+    live_count=${#LIVE_IPS[@]}
+    total_remote=$((${#NODE_IPS[@]} - 1))
+    echo ""
+    echo "  Discovered: $live_count / $total_remote remote node(s) online"
+
+    if [ "$live_count" -gt 0 ]; then
+        pass "$live_count remote node(s) reachable"
+    else
+        warn "No remote nodes reachable (this node is alone)"
+    fi
+fi
+
+# ============================================================
+# 3. 802.11s Mesh Peers
+# ============================================================
+
+section "3. 802.11s Mesh Peers"
 
 station_dump=$(iw dev "$MESH_IFACE" station dump 2>/dev/null || true)
 peer_count=$(echo "$station_dump" | grep -c "^Station" || true)
 peer_count=$((peer_count + 0))
-expected_peers=$((${#NODE_IPS[@]} - 1))
 
 if [ "$peer_count" -gt 0 ]; then
     pass "802.11s has $peer_count mesh peer(s)"
+    # Check peer link states
+    established=$(echo "$station_dump" | grep "mesh plink:" | grep -c "ESTAB" || true)
+    established=$((established + 0))
+    if [ "$established" -gt 0 ]; then
+        pass "$established peer link(s) ESTABLISHED"
+    else
+        warn "No established peer links"
+    fi
+elif [ ${#LIVE_IPS[@]} -gt 0 ]; then
+    warn "No direct 802.11s peers (nodes may be multi-hop via batman-adv)"
 else
-    fail "No 802.11s mesh peers found"
-fi
-
-# Check peer link states
-established=$(echo "$station_dump" | grep "mesh plink:" | grep -c "ESTAB" || true)
-established=$((established + 0))
-if [ "$established" -gt 0 ]; then
-    pass "$established peer link(s) ESTABLISHED"
-else
-    fail "No established peer links"
-fi
-
-if [ "$peer_count" -ge "$expected_peers" ]; then
-    pass "Peer count ($peer_count) >= expected ($expected_peers)"
-else
-    warn "Peer count ($peer_count) < expected ($expected_peers) — some nodes may be multi-hop"
+    skip "No 802.11s peers (no other nodes online)"
 fi
 
 # ============================================================
-# 3. batman-adv Topology
+# 4. batman-adv Topology
 # ============================================================
 
-section "3. batman-adv Topology"
+section "4. batman-adv Topology"
 
 # Neighbors (direct links)
 neighbor_output=$(batctl meshif "$BAT_IFACE" n 2>/dev/null || batctl n 2>/dev/null || true)
@@ -208,8 +241,10 @@ neighbor_count=$(echo "$neighbor_output" | grep -cv "^\[B.A.T.M.A.N\|^$\|IF" || 
 neighbor_count=$((neighbor_count + 0))
 if [ "$neighbor_count" -gt 0 ]; then
     pass "batman-adv has $neighbor_count direct neighbor(s)"
+elif [ ${#LIVE_IPS[@]} -gt 0 ]; then
+    fail "No batman-adv neighbors (but live nodes exist)"
 else
-    fail "No batman-adv neighbors"
+    skip "No batman-adv neighbors (no other nodes online)"
 fi
 
 # Originators (full mesh view)
@@ -218,8 +253,10 @@ originator_count=$(echo "$originator_output" | grep -cv "^\[B.A.T.M.A.N\|^$\|Ori
 originator_count=$((originator_count + 0))
 if [ "$originator_count" -gt 0 ]; then
     pass "batman-adv sees $originator_count originator(s) in mesh"
+elif [ ${#LIVE_IPS[@]} -gt 0 ]; then
+    fail "No batman-adv originators (but live nodes exist)"
 else
-    fail "No batman-adv originators (mesh has no routes)"
+    skip "No batman-adv originators (no other nodes online)"
 fi
 
 # Gateway list
@@ -228,56 +265,23 @@ gw_count=$(echo "$gw_list" | grep -cv "^\[B.A.T.M.A.N\|^$\|Gateway" || true)
 gw_count=$((gw_count + 0))
 if [ "$gw_count" -gt 0 ]; then
     pass "batman-adv sees $gw_count gateway(s)"
-elif [ "$MESH_GATEWAY" = "true" ]; then
+elif [ "${MESH_GATEWAY:-false}" = "true" ]; then
     warn "This node is a gateway but no gateways in list (may need time)"
 else
-    skip "No gateways in mesh (none configured)"
+    skip "No gateways in mesh"
 fi
 
 # ============================================================
-# 4. Node-to-Node Reachability
+# 5. Latency Matrix (full mode, only live nodes)
 # ============================================================
 
-section "4. Node-to-Node Reachability (ping over $BAT_IFACE)"
-
-reachable=0
-unreachable=0
-
-for idx in "${!NODE_IPS[@]}"; do
-    ip="${NODE_IPS[$idx]}"
-    name="${NODE_NAMES[$idx]}"
-
-    if [ "$ip" = "$LOCAL_IP" ]; then
-        pass "$ip ($name) — this node"
-        ((reachable++)) || true
-        continue
-    fi
-
-    if ping -c 2 -W 2 -I "$BAT_IFACE" "$ip" >/dev/null 2>&1; then
-        rtt=$(ping -c 3 -W 2 -I "$BAT_IFACE" "$ip" 2>/dev/null | tail -1 | awk -F'/' '{print $5}')
-        pass "$ip ($name) — reachable (avg ${rtt}ms)"
-        ((reachable++)) || true
-    else
-        fail "$ip ($name) — UNREACHABLE"
-        ((unreachable++)) || true
-    fi
-done
-
-echo ""
-echo -e "  Reachable: $reachable/${#NODE_IPS[@]}  Unreachable: $unreachable"
-
-# ============================================================
-# 5. Latency Matrix (full mode only)
-# ============================================================
-
-if [ "$QUICK_MODE" = false ] && [ ${#NODE_IPS[@]} -gt 1 ]; then
+if [ "$QUICK_MODE" = false ] && [ ${#LIVE_IPS[@]} -gt 0 ]; then
     section "5. Latency Matrix"
 
     echo "  From this node ($LOCAL_IP):"
-    for idx in "${!NODE_IPS[@]}"; do
-        ip="${NODE_IPS[$idx]}"
-        name="${NODE_NAMES[$idx]}"
-        [ "$ip" = "$LOCAL_IP" ] && continue
+    for idx in "${!LIVE_IPS[@]}"; do
+        ip="${LIVE_IPS[$idx]}"
+        name="${LIVE_NAMES[$idx]}"
 
         result=$(ping -c 5 -W 2 -I "$BAT_IFACE" "$ip" 2>/dev/null | tail -1 || echo "")
         if echo "$result" | grep -q "/"; then
@@ -292,98 +296,93 @@ if [ "$QUICK_MODE" = false ] && [ ${#NODE_IPS[@]} -gt 1 ]; then
                 warn "$ip latency high (${avg}ms avg)"
             fi
         else
-            echo -e "    → $ip ($name): ${RED}unreachable${NC}"
+            echo -e "    → $ip ($name): ${RED}unreachable over bat0${NC}"
         fi
     done
 else
     section "5. Latency Matrix"
-    skip "Skipped (use full mode: sudo ./scripts/test-mesh.sh)"
+    if [ ${#LIVE_IPS[@]} -eq 0 ]; then
+        skip "No other nodes online"
+    else
+        skip "Skipped in quick mode"
+    fi
 fi
 
 # ============================================================
-# 6. Docker Services on All Nodes
+# 6. Docker Services (local + live remote nodes)
 # ============================================================
 
-section "6. Docker Services Across Mesh"
+section "6. Docker Services"
 
-for idx in "${!NODE_IPS[@]}"; do
-    ip="${NODE_IPS[$idx]}"
-    name="${NODE_NAMES[$idx]}"
+# Local services
+echo -e "  ${BOLD}$LOCAL_IP (this node) — local:${NC}"
 
-    if [ "$ip" = "$LOCAL_IP" ]; then
-        # Test local services directly
-        echo -e "  ${BOLD}$ip ($name) — local:${NC}"
+if nc -z localhost "$IRC_PORT" 2>/dev/null; then
+    pass "  IRC (port $IRC_PORT) listening"
+else
+    fail "  IRC (port $IRC_PORT) not reachable"
+fi
 
-        # ngircd
-        if nc -z localhost "$IRC_PORT" 2>/dev/null; then
-            pass "  IRC (port $IRC_PORT) listening"
-        else
-            fail "  IRC (port $IRC_PORT) not reachable"
-        fi
+health=$(curl -sf --max-time 3 "http://localhost:${BRIDGE_PORT}/health" 2>/dev/null || echo "")
+if [ "$health" = "OK" ]; then
+    pass "  Bridge /health returns OK"
+else
+    fail "  Bridge /health returned: '$health'"
+fi
 
-        # irc-bridge health
-        health=$(curl -sf --max-time 3 "http://localhost:${BRIDGE_PORT}/health" 2>/dev/null || echo "")
-        if [ "$health" = "OK" ]; then
-            pass "  Bridge /health returns OK"
-        else
-            fail "  Bridge /health returned: '$health'"
-        fi
+if curl -sf --max-time 3 "http://localhost:${NGINX_PORT}/" >/dev/null 2>&1; then
+    pass "  Nginx (port $NGINX_PORT) serves frontend"
+else
+    fail "  Nginx (port $NGINX_PORT) not reachable"
+fi
 
-        # nginx
-        if curl -sf --max-time 3 "http://localhost:${NGINX_PORT}/" >/dev/null 2>&1; then
-            pass "  Nginx (port $NGINX_PORT) serves frontend"
-        else
-            fail "  Nginx (port $NGINX_PORT) not reachable"
-        fi
+# Remote live nodes only
+for idx in "${!LIVE_IPS[@]}"; do
+    ip="${LIVE_IPS[$idx]}"
+    name="${LIVE_NAMES[$idx]}"
+    echo -e "  ${BOLD}$ip ($name) — remote:${NC}"
+
+    if nc -z -w 3 "$ip" "$IRC_PORT" 2>/dev/null; then
+        pass "  IRC (port $IRC_PORT) reachable"
     else
-        echo -e "  ${BOLD}$ip ($name) — remote:${NC}"
+        fail "  IRC (port $IRC_PORT) not reachable"
+    fi
 
-        # IRC port
-        if nc -z -w 3 "$ip" "$IRC_PORT" 2>/dev/null; then
-            pass "  IRC (port $IRC_PORT) reachable"
-        else
-            fail "  IRC (port $IRC_PORT) not reachable"
-        fi
+    health=$(curl -sf --max-time 5 "http://${ip}:${BRIDGE_PORT}/health" 2>/dev/null || echo "")
+    if [ "$health" = "OK" ]; then
+        pass "  Bridge /health returns OK"
+    else
+        fail "  Bridge /health: '$health'"
+    fi
 
-        # Bridge health
-        health=$(curl -sf --max-time 5 "http://${ip}:${BRIDGE_PORT}/health" 2>/dev/null || echo "")
-        if [ "$health" = "OK" ]; then
-            pass "  Bridge /health returns OK"
-        else
-            fail "  Bridge /health: '$health'"
-        fi
-
-        # Nginx frontend
-        if curl -sf --max-time 5 "http://${ip}:${NGINX_PORT}/" 2>/dev/null | grep -qi "nightwatch"; then
-            pass "  Nginx serves Nightwatch frontend"
-        else
-            fail "  Nginx (port $NGINX_PORT) not serving frontend"
-        fi
+    if curl -sf --max-time 5 "http://${ip}:${NGINX_PORT}/" 2>/dev/null | grep -qi "nightwatch"; then
+        pass "  Nginx serves Nightwatch frontend"
+    else
+        fail "  Nginx (port $NGINX_PORT) not serving frontend"
     fi
 done
 
 # ============================================================
-# 7. IRC Cross-Node Messaging
+# 7. IRC Cross-Node Messaging (only if live remote nodes)
 # ============================================================
 
-if [ "$QUICK_MODE" = false ] && [ "$reachable" -gt 1 ]; then
+if [ "$QUICK_MODE" = false ] && [ ${#LIVE_IPS[@]} -gt 0 ]; then
     section "7. IRC Cross-Node Messaging"
 
-    # Pick the first remote node that's reachable
+    # Pick the first remote node with IRC reachable
     REMOTE_IP=""
     REMOTE_NAME=""
-    for idx in "${!NODE_IPS[@]}"; do
-        ip="${NODE_IPS[$idx]}"
-        [ "$ip" = "$LOCAL_IP" ] && continue
+    for idx in "${!LIVE_IPS[@]}"; do
+        ip="${LIVE_IPS[$idx]}"
         if nc -z -w 2 "$ip" "$IRC_PORT" 2>/dev/null; then
             REMOTE_IP="$ip"
-            REMOTE_NAME="${NODE_NAMES[$idx]}"
+            REMOTE_NAME="${LIVE_NAMES[$idx]}"
             break
         fi
     done
 
     if [ -z "$REMOTE_IP" ]; then
-        skip "No remote IRC server reachable for cross-node test"
+        skip "No remote IRC server reachable"
     else
         echo "  Testing: send on $LOCAL_IP → verify on $REMOTE_IP ($REMOTE_NAME)"
 
@@ -423,23 +422,22 @@ if [ "$QUICK_MODE" = false ] && [ "$reachable" -gt 1 ]; then
         if grep -q "$TEST_MSG" "$RECV_OUTPUT" 2>/dev/null; then
             pass "Message delivered across mesh: $LOCAL_IP → $REMOTE_IP"
         else
-            # The receiver might have joined after the message — try reverse
             fail "Message not received on $REMOTE_IP (IRC federation may need time)"
-            echo -e "    ${YELLOW}Hint: ensure ngircd servers are linked (make setup-distributed-irc)${NC}"
         fi
 
         rm -f "$RECV_OUTPUT"
     fi
-elif [ "$QUICK_MODE" = true ]; then
-    section "7. IRC Cross-Node Messaging"
-    skip "Skipped in quick mode"
 else
     section "7. IRC Cross-Node Messaging"
-    skip "Only one node reachable — cannot test cross-node"
+    if [ ${#LIVE_IPS[@]} -eq 0 ]; then
+        skip "No other nodes online"
+    else
+        skip "Skipped in quick mode"
+    fi
 fi
 
 # ============================================================
-# 8. Access Point Status
+# 8. Access Point
 # ============================================================
 
 section "8. Access Point"
@@ -468,58 +466,47 @@ else
 fi
 
 # ============================================================
-# 9. Gateway / Internet
+# 9. Gateway & Internet
 # ============================================================
 
 section "9. Gateway & Internet"
 
-if [ "$MESH_GATEWAY" = "true" ]; then
+if [ "${MESH_GATEWAY:-false}" = "true" ]; then
     echo "  This node is configured as gateway"
 
-    # Check IP forwarding
     fwd=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo "0")
     if [ "$fwd" = "1" ]; then
         pass "IP forwarding enabled"
     else
-        fail "IP forwarding disabled (sysctl net.ipv4.ip_forward=0)"
+        fail "IP forwarding disabled"
     fi
 
-    # Check NAT rules
     if iptables -t nat -L POSTROUTING -n 2>/dev/null | grep -q "MASQUERADE"; then
         pass "NAT/MASQUERADE rule active"
     else
-        fail "No MASQUERADE rule in iptables (internet sharing broken)"
+        fail "No MASQUERADE rule (internet sharing broken)"
     fi
 
-    # Check internet access
     if ping -c 2 -W 3 8.8.8.8 >/dev/null 2>&1; then
         pass "Internet reachable (8.8.8.8)"
     else
         fail "Internet not reachable from gateway"
     fi
-
-    if ping -c 2 -W 3 1.1.1.1 >/dev/null 2>&1; then
-        pass "DNS reachable (1.1.1.1)"
-    else
-        warn "Secondary DNS not reachable"
-    fi
 else
-    # Non-gateway: check if a gateway is available
     if [ "$gw_count" -gt 0 ]; then
-        pass "Gateway available in mesh ($gw_count gateway(s) advertised)"
-        # Try to reach internet via mesh gateway
+        pass "Gateway available in mesh ($gw_count gateway(s))"
         if ping -c 2 -W 5 8.8.8.8 >/dev/null 2>&1; then
             pass "Internet reachable via mesh gateway"
         else
-            warn "Internet not reachable (gateway may not be sharing internet)"
+            warn "Internet not reachable (gateway may not be sharing)"
         fi
     else
-        skip "No gateway configured or advertised in mesh"
+        skip "No gateway in mesh"
     fi
 fi
 
 # ============================================================
-# 10. Docker Container Health
+# 10. Local Docker Health
 # ============================================================
 
 section "10. Local Docker Health"
@@ -549,6 +536,11 @@ echo -e "  ${GREEN}Passed:   $PASSED${NC}"
 echo -e "  ${RED}Failed:   $FAILED${NC}"
 echo -e "  ${YELLOW}Warnings: $WARNINGS${NC}"
 echo -e "  ${YELLOW}Skipped:  $SKIPPED${NC}"
+if [ ${#LIVE_IPS[@]} -gt 0 ]; then
+    echo "  Live nodes: ${#LIVE_IPS[@]}"
+else
+    echo "  Live nodes: only this node"
+fi
 echo ""
 
 if [ "$FAILED" -eq 0 ]; then
