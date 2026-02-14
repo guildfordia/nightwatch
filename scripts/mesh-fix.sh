@@ -7,7 +7,7 @@
 #   wlan0 (onboard)    → hostapd AP   → bridged into bat0
 #   Clients connect to AP, traffic flows through mesh via bat0
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -162,8 +162,25 @@ APEOF
     batctl meshif "$BAT_IFACE" if add "$AP_IFACE" 2>/dev/null || \
         batctl if add "$AP_IFACE" 2>/dev/null || true
 
-    # Start hostapd
-    hostapd -B "$HOSTAPD_CONF"
+    # Start hostapd (with safety checks)
+    if ! command -v hostapd >/dev/null 2>&1; then
+        echo "[-] hostapd not installed! Install with: sudo apt-get install -y hostapd"
+        echo "[-] AP will not be available, but mesh still works"
+        return 1
+    fi
+
+    # Kill any stale hostapd first
+    killall hostapd 2>/dev/null || true
+    sleep 1
+
+    # Start with timeout to prevent freeze
+    timeout 10 hostapd -B "$HOSTAPD_CONF"
+    local hostapd_rc=$?
+    if [ $hostapd_rc -ne 0 ]; then
+        echo "[-] hostapd failed to start (exit code $hostapd_rc)"
+        echo "[-] AP will not be available, but mesh still works"
+        return 1
+    fi
     sleep 1
 
     echo "[+] Access point '$AP_SSID' is broadcasting"
@@ -204,7 +221,7 @@ case "$1" in
         load_batman_module
         setup_mesh_interface
         setup_batman
-        setup_ap
+        setup_ap || echo "[!] AP setup failed — mesh still operational without WiFi hotspot"
         setup_gateway
 
         echo ""
