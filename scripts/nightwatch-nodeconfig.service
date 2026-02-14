@@ -1,0 +1,15 @@
+[Unit]
+Description=Nightwatch Node Auto-Configuration
+Before=nightwatch-mesh.service
+Before=docker.service
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/nightwatch/scripts/nodeconfig.sh
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

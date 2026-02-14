@@ -14,7 +14,7 @@ RUN go build -ldflags="-s -w" -o main .
 
 # Use alpine for minimal image size (~5MB vs ~80MB with debian)
 FROM alpine:3.19
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates wget
 WORKDIR /root/
 COPY --from=builder /app/main .
 EXPOSE 3000

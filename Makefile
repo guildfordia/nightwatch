@@ -22,7 +22,9 @@ REQUIRED_TOOLS = docker ip iw batctl
 .PHONY: all help prepare-env setup-distributed-irc install-tailscale \
         check-env check-tools up down restart logs clean \
         mesh-setup mesh-reset mesh-status mesh-test mesh-install \
-        start stop full-restart monitor
+        start stop full-restart monitor \
+        test test-go test-lint test-docker test-mesh \
+        sdcard build-image update
 
 all: start
 
@@ -55,6 +57,20 @@ help:
 	@echo "  stop                   Stop everything (apps + mesh)"
 	@echo "  full-restart           Complete restart"
 	@echo "  monitor                Live dashboard (refreshes every 5s)"
+	@echo ""
+	@echo "Testing:"
+	@echo "  test                   Run all tests (Go unit + shellcheck lint)"
+	@echo "  test-go                Run Go unit tests (irc-bridge)"
+	@echo "  test-lint              Run shellcheck on all bash scripts"
+	@echo "  test-docker            Run Docker integration tests (builds, health, connectivity)"
+	@echo "  test-mesh              Run mesh integration tests (requires running mesh)"
+	@echo "  test-mesh-quick        Quick mesh test (skip IRC cross-node + latency matrix)"
+	@echo ""
+	@echo "Updates & Deployment:"
+	@echo "  update                 Update code + rebuild Docker (keeps node config)"
+	@echo "  build-image            Prepare this Pi as a clonable image (run ON the Pi)"
+	@echo "  sdcard NODE=<n>        Prepare SD card for node N (e.g. make sdcard NODE=1)"
+	@echo "  sdcard NODE=<n> GW=1   Prepare as gateway node (internet sharing)"
 	@echo ""
 	@echo "Optional:"
 	@echo "  install-tailscale      Install Tailscale VPN for remote access"
@@ -212,5 +228,99 @@ monitor: check-tools
 		docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || true; \
 		sleep 5; \
 	done
+
+# -------- Testing --------
+SHELL_SCRIPTS := scripts/mesh-fix.sh scripts/setup-rpi.sh scripts/test-docker.sh \
+                 scripts/test-mesh.sh scripts/setup-distributed-irc.sh \
+                 scripts/prepare-env.sh scripts/install-tailscale.sh \
+                 scripts/firstboot.sh scripts/prepare-sdcard.sh \
+                 scripts/build-image.sh scripts/nodeconfig.sh
+
+test: test-go test-lint
+	@echo ""
+	@echo "====================================="
+	@echo "  All tests passed"
+	@echo "====================================="
+
+test-go:
+	@echo "== Go Unit Tests (irc-bridge) =="
+	@cd irc-bridge-go && go test -v -count=1 -timeout 30s ./...
+	@echo ""
+
+test-lint:
+	@echo "== Shell Script Lint (shellcheck) =="
+	@if command -v shellcheck >/dev/null 2>&1; then \
+		shellcheck $(SHELL_SCRIPTS); \
+		echo "[+] All scripts pass shellcheck"; \
+	else \
+		echo "[!] shellcheck not installed — skipping (install: apt install shellcheck / brew install shellcheck)"; \
+	fi
+	@echo ""
+
+test-docker:
+	@echo "== Docker Integration Tests =="
+	@scripts/test-docker.sh
+
+test-mesh:
+	@echo "== Mesh Integration Tests =="
+	@sudo scripts/test-mesh.sh
+
+test-mesh-quick:
+	@echo "== Mesh Integration Tests (quick) =="
+	@sudo scripts/test-mesh.sh --quick
+
+# -------- SD Card Deployment --------
+NODE ?= 0
+GW ?= 0
+
+sdcard:
+	@if [ "$(NODE)" = "0" ]; then \
+		echo "Usage: make sdcard NODE=<number> [GW=1]"; \
+		echo "  NODE: Pi number (1-20)"; \
+		echo "  GW:   Set to 1 for gateway node"; \
+		echo ""; \
+		echo "Example: make sdcard NODE=1"; \
+		echo "         make sdcard NODE=3 GW=1"; \
+		exit 1; \
+	fi
+	@if [ "$(GW)" = "1" ]; then \
+		scripts/prepare-sdcard.sh $(NODE) --gateway; \
+	else \
+		scripts/prepare-sdcard.sh $(NODE); \
+	fi
+
+update:
+	@echo "======================================"
+	@echo "  Updating Nightwatch"
+	@echo "======================================"
+	@echo ""
+	@echo "[1/4] Stopping services..."
+	@$(MAKE) stop 2>/dev/null || true
+	@echo ""
+	@echo "[2/4] Syncing code to /opt/nightwatch..."
+	@sudo rsync -a --delete \
+		--exclude='.git' \
+		--exclude='.env' \
+		--exclude='ngircd/ngircd.conf' \
+		--exclude='*.log' \
+		--exclude='.DS_Store' \
+		--exclude='.firstboot-done' \
+		. /opt/nightwatch/
+	@sudo chmod +x /opt/nightwatch/scripts/*.sh
+	@echo "[+] Code synced (node config preserved)"
+	@echo ""
+	@echo "[3/4] Rebuilding Docker images..."
+	@cd /opt/nightwatch && sudo docker compose --env-file .env build
+	@echo ""
+	@echo "[4/4] Restarting services..."
+	@sudo systemctl daemon-reload
+	@$(MAKE) start 2>/dev/null || sudo systemctl restart nightwatch-mesh.service
+	@sudo systemctl restart nightwatch-docker.service 2>/dev/null || true
+	@echo ""
+	@echo "[+] Update complete. No reboot needed."
+
+build-image:
+	@echo "== Building Nightwatch Image =="
+	@sudo scripts/build-image.sh
 
 .DEFAULT_GOAL := help

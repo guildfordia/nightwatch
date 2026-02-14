@@ -18,6 +18,7 @@ fi
 
 # Source the environment file
 set -o allexport
+# shellcheck source=/dev/null
 source "$ENV_FILE"
 set +o allexport
 

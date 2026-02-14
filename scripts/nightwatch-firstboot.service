@@ -1,0 +1,16 @@
+[Unit]
+Description=Nightwatch First Boot Setup
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=!/opt/nightwatch/.firstboot-done
+
+[Service]
+Type=oneshot
+ExecStart=/opt/nightwatch/scripts/firstboot.sh
+RemainAfterExit=no
+StandardOutput=journal+console
+StandardError=journal+console
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

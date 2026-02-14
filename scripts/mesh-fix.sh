@@ -19,6 +19,7 @@ if [ ! -f "$ENV_FILE" ]; then
     exit 1
 fi
 set -o allexport
+# shellcheck source=/dev/null
 source "$ENV_FILE"
 set +o allexport
 
@@ -253,9 +254,9 @@ case "$1" in
         echo "== batman-adv =="
         if [ -d /sys/class/net/"$BAT_IFACE" ]; then
             echo "  Version: $(cat /sys/module/batman_adv/version 2>/dev/null || echo 'N/A')"
-            echo "  Algorithm: $(batctl meshif $BAT_IFACE ra 2>/dev/null || batctl ra 2>/dev/null || echo 'N/A')"
-            echo "  Gateway mode: $(batctl meshif $BAT_IFACE gw_mode 2>/dev/null || batctl gw_mode 2>/dev/null || echo 'N/A')"
-            echo "  IP: $(ip -4 addr show dev $BAT_IFACE 2>/dev/null | grep inet | awk '{print $2}' || echo 'none')"
+            echo "  Algorithm: $(batctl meshif "$BAT_IFACE" ra 2>/dev/null || batctl ra 2>/dev/null || echo 'N/A')"
+            echo "  Gateway mode: $(batctl meshif "$BAT_IFACE" gw_mode 2>/dev/null || batctl gw_mode 2>/dev/null || echo 'N/A')"
+            echo "  IP: $(ip -4 addr show dev "$BAT_IFACE" 2>/dev/null | grep inet | awk '{print $2}' || echo 'none')"
         else
             echo "  [!] $BAT_IFACE not found"
         fi
