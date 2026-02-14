@@ -105,12 +105,12 @@ fi
 
 section "1. Local Mesh Health"
 
-# batman-adv module loaded
-if lsmod | grep -q batman_adv; then
+# batman-adv loaded (module or built-in)
+if lsmod | grep -q batman_adv || [ -d /sys/module/batman_adv ]; then
     version=$(cat /sys/module/batman_adv/version 2>/dev/null || echo "unknown")
-    pass "batman-adv module loaded (v$version)"
+    pass "batman-adv available (v$version)"
 else
-    fail "batman-adv module not loaded"
+    fail "batman-adv not loaded"
 fi
 
 # bat0 interface exists and has IP
@@ -170,7 +170,9 @@ fi
 
 section "2. 802.11s Mesh Peers"
 
-peer_count=$(iw dev "$MESH_IFACE" station dump 2>/dev/null | grep -c "^Station" || echo "0")
+station_dump=$(iw dev "$MESH_IFACE" station dump 2>/dev/null || true)
+peer_count=$(echo "$station_dump" | grep -c "^Station" || true)
+peer_count=$((peer_count + 0))
 expected_peers=$((${#NODE_IPS[@]} - 1))
 
 if [ "$peer_count" -gt 0 ]; then
@@ -180,7 +182,8 @@ else
 fi
 
 # Check peer link states
-established=$(iw dev "$MESH_IFACE" station dump 2>/dev/null | grep "mesh plink:" | grep -c "ESTAB" || echo "0")
+established=$(echo "$station_dump" | grep "mesh plink:" | grep -c "ESTAB" || true)
+established=$((established + 0))
 if [ "$established" -gt 0 ]; then
     pass "$established peer link(s) ESTABLISHED"
 else
@@ -200,8 +203,9 @@ fi
 section "3. batman-adv Topology"
 
 # Neighbors (direct links)
-neighbor_count=$(batctl meshif "$BAT_IFACE" n 2>/dev/null | grep -cv "^\[B.A.T.M.A.N\|^$\|IF" || \
-                 batctl n 2>/dev/null | grep -cv "^\[B.A.T.M.A.N\|^$\|IF" || echo "0")
+neighbor_output=$(batctl meshif "$BAT_IFACE" n 2>/dev/null || batctl n 2>/dev/null || true)
+neighbor_count=$(echo "$neighbor_output" | grep -cv "^\[B.A.T.M.A.N\|^$\|IF" || true)
+neighbor_count=$((neighbor_count + 0))
 if [ "$neighbor_count" -gt 0 ]; then
     pass "batman-adv has $neighbor_count direct neighbor(s)"
 else
@@ -209,8 +213,9 @@ else
 fi
 
 # Originators (full mesh view)
-originator_count=$(batctl meshif "$BAT_IFACE" o 2>/dev/null | grep -cv "^\[B.A.T.M.A.N\|^$\|Originator" || \
-                   batctl o 2>/dev/null | grep -cv "^\[B.A.T.M.A.N\|^$\|Originator" || echo "0")
+originator_output=$(batctl meshif "$BAT_IFACE" o 2>/dev/null || batctl o 2>/dev/null || true)
+originator_count=$(echo "$originator_output" | grep -cv "^\[B.A.T.M.A.N\|^$\|Originator" || true)
+originator_count=$((originator_count + 0))
 if [ "$originator_count" -gt 0 ]; then
     pass "batman-adv sees $originator_count originator(s) in mesh"
 else
@@ -218,8 +223,9 @@ else
 fi
 
 # Gateway list
-gw_list=$(batctl meshif "$BAT_IFACE" gwl 2>/dev/null || batctl gwl 2>/dev/null || echo "")
-gw_count=$(echo "$gw_list" | grep -cv "^\[B.A.T.M.A.N\|^$\|Gateway" || echo "0")
+gw_list=$(batctl meshif "$BAT_IFACE" gwl 2>/dev/null || batctl gwl 2>/dev/null || true)
+gw_count=$(echo "$gw_list" | grep -cv "^\[B.A.T.M.A.N\|^$\|Gateway" || true)
+gw_count=$((gw_count + 0))
 if [ "$gw_count" -gt 0 ]; then
     pass "batman-adv sees $gw_count gateway(s)"
 elif [ "$MESH_GATEWAY" = "true" ]; then
@@ -243,17 +249,17 @@ for idx in "${!NODE_IPS[@]}"; do
 
     if [ "$ip" = "$LOCAL_IP" ]; then
         pass "$ip ($name) — this node"
-        ((reachable++))
+        ((reachable++)) || true
         continue
     fi
 
     if ping -c 2 -W 2 -I "$BAT_IFACE" "$ip" >/dev/null 2>&1; then
         rtt=$(ping -c 3 -W 2 -I "$BAT_IFACE" "$ip" 2>/dev/null | tail -1 | awk -F'/' '{print $5}')
         pass "$ip ($name) — reachable (avg ${rtt}ms)"
-        ((reachable++))
+        ((reachable++)) || true
     else
         fail "$ip ($name) — UNREACHABLE"
-        ((unreachable++))
+        ((unreachable++)) || true
     fi
 done
 
@@ -450,7 +456,8 @@ if pgrep -x hostapd >/dev/null 2>&1; then
     fi
 
     # Count connected clients
-    client_count=$(iw dev "$AP_IFACE" station dump 2>/dev/null | grep -c "^Station" || echo "0")
+    client_count=$(iw dev "$AP_IFACE" station dump 2>/dev/null | grep -c "^Station" || true)
+    client_count=$((client_count + 0))
     if [ "$client_count" -gt 0 ]; then
         pass "$client_count client(s) connected to AP '$ap_ssid'"
     else
