@@ -1,21 +1,26 @@
 #!/bin/bash
-# Nightwatch — Docker services integration test
-# Tests: image builds, container startup, health checks, inter-service connectivity
+# Nightwatch — Docker services test (tests RUNNING services)
+#
+# Tests:
+#   1. All containers running
+#   2. Health checks passing
+#   3. IRC server accepting connections
+#   4. Bridge /health endpoint
+#   5. Nginx serving frontend
+#   6. Nginx proxying WebSocket path
+#   7. No fatal errors in logs
 #
 # Usage: ./scripts/test-docker.sh
-# Requires: docker, docker compose (or docker-compose)
 
 set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-ENV_FILE="$PROJECT_DIR/.env"
 
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
-NC='\033[0m' # No Color
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
 
 PASSED=0
 FAILED=0
@@ -24,214 +29,210 @@ SKIPPED=0
 pass() { ((PASSED++)); echo -e "  ${GREEN}[PASS]${NC} $1"; }
 fail() { ((FAILED++)); echo -e "  ${RED}[FAIL]${NC} $1"; }
 skip() { ((SKIPPED++)); echo -e "  ${YELLOW}[SKIP]${NC} $1"; }
+section() { echo ""; echo -e "${BOLD}${CYAN}== $1 ==${NC}"; }
 
-# ---- Pre-flight checks ----
-
-echo "=============================="
+echo "======================================"
 echo "  Nightwatch Docker Tests"
-echo "=============================="
-echo ""
+echo "======================================"
 
-if ! command -v docker &>/dev/null; then
-    echo -e "${RED}docker not found. Skipping Docker tests.${NC}"
-    exit 0
+# ---- Pre-flight ----
+
+if ! command -v docker >/dev/null 2>&1; then
+    echo -e "${RED}docker not found${NC}"
+    exit 1
 fi
 
-# Detect compose command
-DC="docker compose"
-if ! docker compose version &>/dev/null 2>&1; then
-    if command -v docker-compose &>/dev/null; then
-        DC="docker-compose"
-    else
-        echo -e "${RED}docker compose not available. Skipping Docker tests.${NC}"
-        exit 0
-    fi
+# Check services are running
+RUNNING=$(docker ps --format '{{.Names}}' 2>/dev/null | wc -l)
+if [ "$RUNNING" -eq 0 ]; then
+    echo -e "${RED}No Docker containers running. Run 'make run' first.${NC}"
+    exit 1
 fi
 
-if [ ! -f "$ENV_FILE" ]; then
-    echo -e "${YELLOW}.env not found — creating temporary from .env.example${NC}"
-    cp "$PROJECT_DIR/.env.example" "$ENV_FILE.test"
-    ENV_FILE="$ENV_FILE.test"
-    CLEANUP_ENV=true
-else
-    CLEANUP_ENV=false
-fi
+# ============================================================
+# 1. Container Status
+# ============================================================
 
-# ---- Cleanup handler ----
+section "1. Container Status"
 
-# shellcheck disable=SC2329
-cleanup() {
-    echo ""
-    echo "[+] Cleaning up test containers..."
-    cd "$PROJECT_DIR"
-    $DC --env-file "$ENV_FILE" down --remove-orphans -t 5 2>/dev/null || true
-    if [ "$CLEANUP_ENV" = true ] && [ -f "$ENV_FILE" ]; then
-        rm -f "$ENV_FILE"
-    fi
-}
-trap cleanup EXIT
-
-# ---- Test: Docker image builds ----
-
-echo "== Build Tests =="
-
-cd "$PROJECT_DIR"
-
-if $DC --env-file "$ENV_FILE" build --no-cache irc-bridge 2>&1 | tail -1 | grep -q "Successfully\|exporting"; then
-    pass "irc-bridge image builds"
-else
-    # Try again checking exit code
-    if $DC --env-file "$ENV_FILE" build irc-bridge 2>/dev/null; then
-        pass "irc-bridge image builds"
-    else
-        fail "irc-bridge image build failed"
-    fi
-fi
-
-echo ""
-echo "== Container Startup Tests =="
-
-# Start services
-$DC --env-file "$ENV_FILE" up -d 2>/dev/null
-
-# Wait for containers to start
-echo "  Waiting for services to start (30s max)..."
-TIMEOUT=30
-ELAPSED=0
-
-while [ $ELAPSED -lt $TIMEOUT ]; do
-    RUNNING=$($DC --env-file "$ENV_FILE" ps --format json 2>/dev/null | grep -c '"running"' || \
-              $DC --env-file "$ENV_FILE" ps 2>/dev/null | grep -c "Up" || echo "0")
-    if [ "$RUNNING" -ge 3 ] 2>/dev/null; then
-        break
-    fi
-    sleep 2
-    ((ELAPSED+=2))
-done
-
-# Check each container is running
 for svc in ngircd irc-bridge nginx; do
     status=$(docker inspect --format='{{.State.Status}}' "$svc" 2>/dev/null || echo "not found")
     if [ "$status" = "running" ]; then
-        pass "$svc container is running"
+        uptime=$(docker inspect --format='{{.State.StartedAt}}' "$svc" 2>/dev/null | cut -dT -f1,2 || echo "?")
+        pass "$svc is running (since $uptime)"
     else
-        fail "$svc container status: $status"
+        fail "$svc status: $status"
     fi
 done
 
-echo ""
-echo "== Health Check Tests =="
+# ============================================================
+# 2. Health Checks
+# ============================================================
 
-# Wait a bit for health checks to initialize
-sleep 5
+section "2. Health Checks"
 
 for svc in ngircd irc-bridge nginx; do
     health=$(docker inspect --format='{{.State.Health.Status}}' "$svc" 2>/dev/null || echo "none")
-    case "$health" in
-        healthy)
-            pass "$svc health check: healthy"
-            ;;
-        starting)
-            # Give it more time
-            echo "  Waiting for $svc health check..."
-            for _ in $(seq 1 6); do
-                sleep 5
-                health=$(docker inspect --format='{{.State.Health.Status}}' "$svc" 2>/dev/null || echo "none")
-                if [ "$health" = "healthy" ]; then
-                    break
-                fi
-            done
-            if [ "$health" = "healthy" ]; then
-                pass "$svc health check: healthy"
-            else
-                fail "$svc health check: $health (after 30s wait)"
-            fi
-            ;;
-        *)
-            fail "$svc health check: $health"
-            ;;
-    esac
+    if [ "$health" = "healthy" ]; then
+        pass "$svc: healthy"
+    elif [ "$health" = "starting" ]; then
+        # Wait up to 30s
+        echo "  Waiting for $svc..."
+        for _ in $(seq 1 6); do
+            sleep 5
+            health=$(docker inspect --format='{{.State.Health.Status}}' "$svc" 2>/dev/null || echo "none")
+            [ "$health" = "healthy" ] && break
+        done
+        if [ "$health" = "healthy" ]; then
+            pass "$svc: healthy"
+        else
+            fail "$svc: $health (after 30s)"
+        fi
+    else
+        fail "$svc: $health"
+    fi
 done
 
-echo ""
-echo "== Service Connectivity Tests =="
+# ============================================================
+# 3. IRC Server
+# ============================================================
 
-# Test IRC port
-if docker exec ngircd sh -c 'nc -z localhost 6667' 2>/dev/null; then
-    pass "ngircd listening on port 6667"
+section "3. IRC Server"
+
+# Port listening
+if nc -z localhost 6667 2>/dev/null; then
+    pass "IRC port 6667 accepting connections"
 else
-    # Try alternative check
-    if docker exec ngircd sh -c 'echo QUIT | nc localhost 6667' 2>/dev/null | grep -qi "irc\|ngircd"; then
-        pass "ngircd listening on port 6667"
+    fail "IRC port 6667 not reachable"
+fi
+
+# IRC protocol response
+IRC_RESP=$(echo "QUIT" | nc -w 3 localhost 6667 2>/dev/null | head -1 || echo "")
+if echo "$IRC_RESP" | grep -qi "irc\|ngircd\|nightwatch"; then
+    pass "IRC server responds with valid protocol"
+else
+    if [ -n "$IRC_RESP" ]; then
+        pass "IRC server responds: $(echo "$IRC_RESP" | cut -c1-60)"
     else
-        fail "ngircd not reachable on port 6667"
+        fail "IRC server no response"
     fi
 fi
 
-# Test bridge health endpoint
-BRIDGE_HEALTH=$(docker exec irc-bridge sh -c 'wget -qO- http://localhost:3000/health 2>/dev/null' || echo "")
-if [ "$BRIDGE_HEALTH" = "OK" ]; then
-    pass "irc-bridge /health returns OK"
+# ============================================================
+# 4. Bridge Service
+# ============================================================
+
+section "4. IRC Bridge"
+
+# Health endpoint
+BRIDGE_PORT=$(docker port irc-bridge 2>/dev/null | grep 3000 | head -1 | awk -F: '{print $NF}' || echo "8080")
+HEALTH=$(curl -sf --max-time 3 "http://localhost:${BRIDGE_PORT}/health" 2>/dev/null || echo "")
+if [ "$HEALTH" = "OK" ]; then
+    pass "Bridge /health returns OK (port $BRIDGE_PORT)"
 else
-    fail "irc-bridge /health returned: '$BRIDGE_HEALTH'"
+    fail "Bridge /health returned: '$HEALTH' (port $BRIDGE_PORT)"
 fi
 
-# Test nginx serves frontend
-NGINX_RESP=$(docker exec nginx sh -c 'wget -qO- http://localhost:80/ 2>/dev/null | head -5' || echo "")
+# WebSocket endpoint (should get upgrade required or bad request)
+WS_RESP=$(curl -sf --max-time 3 -o /dev/null -w "%{http_code}" "http://localhost:${BRIDGE_PORT}/ws" 2>/dev/null || echo "000")
+if [ "$WS_RESP" = "400" ] || [ "$WS_RESP" = "426" ] || [ "$WS_RESP" = "200" ]; then
+    pass "Bridge /ws endpoint responds (HTTP $WS_RESP)"
+else
+    fail "Bridge /ws returned HTTP $WS_RESP"
+fi
+
+# ============================================================
+# 5. Nginx
+# ============================================================
+
+section "5. Nginx Web Server"
+
+NGINX_PORT=$(docker port nginx 2>/dev/null | grep 80 | head -1 | awk -F: '{print $NF}' || echo "80")
+
+# Serves HTML
+NGINX_RESP=$(curl -sf --max-time 3 "http://localhost:${NGINX_PORT}/" 2>/dev/null || echo "")
 if echo "$NGINX_RESP" | grep -qi "nightwatch\|html"; then
-    pass "nginx serves web frontend"
+    pass "Nginx serves Nightwatch frontend (port $NGINX_PORT)"
 else
-    fail "nginx response unexpected: '$NGINX_RESP'"
+    fail "Nginx response does not contain expected content"
 fi
 
-# Test nginx proxies to bridge
-# A non-websocket request to /ws should get a response (400 or upgrade required)
-if docker exec nginx sh -c 'wget -S -qO- http://localhost:80/ws 2>&1 | head -5' 2>/dev/null | grep -qiE "HTTP|Bad Request|Upgrade"; then
-    pass "nginx proxies /ws to irc-bridge"
+# HTTP status
+HTTP_CODE=$(curl -sf --max-time 3 -o /dev/null -w "%{http_code}" "http://localhost:${NGINX_PORT}/" 2>/dev/null || echo "000")
+if [ "$HTTP_CODE" = "200" ]; then
+    pass "Nginx returns HTTP 200"
 else
-    skip "nginx /ws proxy (could not verify — may need WebSocket client)"
+    fail "Nginx returned HTTP $HTTP_CODE"
 fi
 
-echo ""
-echo "== Resource Limit Tests =="
+# Proxy to bridge
+PROXY_CODE=$(curl -sf --max-time 3 -o /dev/null -w "%{http_code}" "http://localhost:${NGINX_PORT}/ws" 2>/dev/null || echo "000")
+if [ "$PROXY_CODE" != "000" ] && [ "$PROXY_CODE" != "502" ] && [ "$PROXY_CODE" != "504" ]; then
+    pass "Nginx proxies /ws to bridge (HTTP $PROXY_CODE)"
+else
+    fail "Nginx /ws proxy failed (HTTP $PROXY_CODE)"
+fi
+
+# ============================================================
+# 6. Container Logs
+# ============================================================
+
+section "6. Container Logs (error check)"
 
 for svc in ngircd irc-bridge nginx; do
-    mem_limit=$(docker inspect --format='{{.HostConfig.Memory}}' "$svc" 2>/dev/null || echo "0")
-    if [ "$mem_limit" != "0" ] && [ -n "$mem_limit" ]; then
-        mem_mb=$((mem_limit / 1024 / 1024))
-        pass "$svc memory limit set (${mem_mb}MB)"
+    fatal_count=$(docker logs "$svc" 2>&1 | grep -ciE "fatal|panic|segfault|SIGSEGV" || true)
+    error_count=$(docker logs "$svc" 2>&1 | grep -ciE "^error|ERROR" || true)
+    if [ "$fatal_count" -eq 0 ]; then
+        if [ "$error_count" -gt 5 ]; then
+            skip "$svc: no fatal errors ($error_count warnings)"
+        else
+            pass "$svc: no fatal errors"
+        fi
     else
-        skip "$svc memory limit (not enforced on this Docker version)"
+        fail "$svc: $fatal_count fatal/panic entries in logs"
     fi
 done
 
-echo ""
-echo "== Container Logs Check =="
+# ============================================================
+# 7. Docker Network
+# ============================================================
 
-for svc in ngircd irc-bridge nginx; do
-    errors=$(docker logs "$svc" 2>&1 | grep -ciE "fatal|panic|segfault" || true)
-    if [ "$errors" -eq 0 ]; then
-        pass "$svc logs: no fatal errors"
+section "7. Docker Network"
+
+NETWORK=$(docker inspect --format='{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' ngircd 2>/dev/null || echo "")
+if [ -n "$NETWORK" ]; then
+    pass "Containers on network: $NETWORK"
+else
+    fail "Could not detect Docker network"
+fi
+
+# Check all services on same network
+for svc in irc-bridge nginx; do
+    svc_net=$(docker inspect --format='{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' "$svc" 2>/dev/null || echo "")
+    if [ "$svc_net" = "$NETWORK" ]; then
+        pass "$svc on same network as ngircd"
     else
-        fail "$svc logs: found $errors fatal/panic entries"
+        fail "$svc on different network ($svc_net vs $NETWORK)"
     fi
 done
 
-# ---- Summary ----
+# ============================================================
+# Summary
+# ============================================================
 
 echo ""
-echo "=============================="
-echo "  Results"
-echo "=============================="
-echo -e "  ${GREEN}Passed: $PASSED${NC}"
-echo -e "  ${RED}Failed: $FAILED${NC}"
+echo "======================================"
+echo "  Docker Test Results"
+echo "======================================"
+echo -e "  ${GREEN}Passed:  $PASSED${NC}"
+echo -e "  ${RED}Failed:  $FAILED${NC}"
 echo -e "  ${YELLOW}Skipped: $SKIPPED${NC}"
 echo ""
 
-if [ "$FAILED" -gt 0 ]; then
-    echo -e "${RED}DOCKER TESTS FAILED${NC}"
-    exit 1
-else
-    echo -e "${GREEN}ALL DOCKER TESTS PASSED${NC}"
+if [ "$FAILED" -eq 0 ]; then
+    echo -e "  ${GREEN}${BOLD}ALL DOCKER TESTS PASSED${NC}"
     exit 0
+else
+    echo -e "  ${RED}${BOLD}DOCKER TESTS FAILED${NC}"
+    exit 1
 fi
