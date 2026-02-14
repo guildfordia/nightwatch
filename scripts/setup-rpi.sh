@@ -379,3 +379,9 @@ echo "    sudo reboot"
 echo "    cd $INSTALL_DIR && make run"
 echo "    make test"
 echo ""
+if [ "$PROJECT_DIR" != "$INSTALL_DIR" ]; then
+    echo -e "  ${YELLOW}Note:${NC} Nightwatch is now installed in $INSTALL_DIR"
+    echo "  You can remove the clone folder:"
+    echo "    rm -rf $PROJECT_DIR"
+    echo ""
+fi
