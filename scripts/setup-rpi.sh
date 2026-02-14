@@ -184,6 +184,40 @@ systemctl disable hostapd 2>/dev/null || true
 systemctl stop hostapd 2>/dev/null || true
 echo "[+] System hostapd disabled (we manage it ourselves)"
 
+# ---- Step 4b: Network routing (eth0 = hotspot, wlan0 = internet) ----
+
+echo ""
+echo "[4b/9] Configuring network routing..."
+
+DHCPCD_CONF="/etc/dhcpcd.conf"
+if [ -f "$DHCPCD_CONF" ]; then
+    # Only add if not already configured
+    if ! grep -q "# Nightwatch network config" "$DHCPCD_CONF"; then
+        cat >> "$DHCPCD_CONF" << 'NETEOF'
+
+# Nightwatch network config
+# eth0 is the GL.iNet hotspot (no internet) — do not use as default route
+interface eth0
+nogateway
+
+# wlan0 has internet — prefer it for default route
+interface wlan0
+metric 50
+
+# Fallback DNS when Tailscale resolver cannot reach upstream
+static domain_name_servers=8.8.8.8 1.1.1.1
+NETEOF
+        echo "[+] dhcpcd configured: eth0=no gateway, wlan0=preferred, DNS fallback=8.8.8.8"
+    else
+        echo "[+] dhcpcd already configured for Nightwatch"
+    fi
+else
+    echo "[!] /etc/dhcpcd.conf not found — skipping (NetworkManager may be in use)"
+fi
+
+# Apply immediately (don't wait for reboot)
+ip route replace default via "$(ip route show dev wlan0 | grep default | awk '{print $3}')" dev wlan0 metric 50 2>/dev/null || true
+
 # ---- Step 5: Copy project to /opt/nightwatch ----
 
 echo ""
