@@ -211,8 +211,28 @@ NETEOF
     else
         echo "[+] dhcpcd already configured for Nightwatch"
     fi
+elif command -v nmcli >/dev/null 2>&1; then
+    # NetworkManager: set eth0 to never-default and lower wlan0 route metric
+    ETH_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep 'eth0' | head -1 | cut -d: -f1)
+    WLAN_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep 'wlan0' | head -1 | cut -d: -f1)
+    if [ -n "$ETH_CON" ]; then
+        nmcli con mod "$ETH_CON" ipv4.never-default yes 2>/dev/null || true
+        echo "[+] NetworkManager: eth0 ($ETH_CON) set to never-default"
+    fi
+    if [ -n "$WLAN_CON" ]; then
+        nmcli con mod "$WLAN_CON" ipv4.route-metric 50 2>/dev/null || true
+        echo "[+] NetworkManager: wlan0 ($WLAN_CON) route metric set to 50"
+    fi
+    # Add fallback DNS
+    mkdir -p /etc/systemd/resolved.conf.d
+    cat > /etc/systemd/resolved.conf.d/nightwatch-fallback.conf << 'DNSEOF'
+[Resolve]
+FallbackDNS=8.8.8.8 1.1.1.1
+DNSEOF
+    systemctl restart systemd-resolved 2>/dev/null || true
+    echo "[+] Fallback DNS configured (8.8.8.8, 1.1.1.1)"
 else
-    echo "[!] /etc/dhcpcd.conf not found — skipping (NetworkManager may be in use)"
+    echo "[!] Neither dhcpcd nor NetworkManager found — skipping network config"
 fi
 
 # Apply immediately (don't wait for reboot)
@@ -284,7 +304,18 @@ echo "    • nightwatch-docker (IRC + bridge + nginx)"
 echo ""
 echo "[8/9] Building Docker images (this may take a few minutes)..."
 cd "$INSTALL_DIR"
-docker compose --env-file .env build
+
+# Detect docker compose command (v2 plugin vs v1 standalone)
+if docker compose version >/dev/null 2>&1; then
+    DC="docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+    DC="docker-compose"
+else
+    echo "[-] Neither 'docker compose' nor 'docker-compose' found!"
+    exit 1
+fi
+
+$DC --env-file .env build
 echo "[+] Docker images built"
 
 # ---- Step 9: Verify ----
