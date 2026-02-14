@@ -383,8 +383,10 @@ if [ "$PROJECT_DIR" != "$INSTALL_DIR" ]; then
     echo -e "  ${YELLOW}Note:${NC} Nightwatch is now installed in $INSTALL_DIR"
     read -rp "  Delete clone folder ($PROJECT_DIR)? [Y/n] " del_confirm
     if [[ ! "$del_confirm" =~ ^[Nn]$ ]]; then
+        cd /
         rm -rf "$PROJECT_DIR"
         echo "  [+] Deleted $PROJECT_DIR"
+        echo "  [+] Run: cd $INSTALL_DIR"
     fi
     echo ""
 fi
