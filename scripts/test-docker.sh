@@ -26,9 +26,9 @@ PASSED=0
 FAILED=0
 SKIPPED=0
 
-pass() { ((PASSED++)); echo -e "  ${GREEN}[PASS]${NC} $1"; }
-fail() { ((FAILED++)); echo -e "  ${RED}[FAIL]${NC} $1"; }
-skip() { ((SKIPPED++)); echo -e "  ${YELLOW}[SKIP]${NC} $1"; }
+pass() { ((PASSED++)) || true; echo -e "  ${GREEN}[PASS]${NC} $1"; }
+fail() { ((FAILED++)) || true; echo -e "  ${RED}[FAIL]${NC} $1"; }
+skip() { ((SKIPPED++)) || true; echo -e "  ${YELLOW}[SKIP]${NC} $1"; }
 section() { echo ""; echo -e "${BOLD}${CYAN}== $1 ==${NC}"; }
 
 echo "======================================"
