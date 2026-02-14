@@ -381,7 +381,10 @@ echo "    make test"
 echo ""
 if [ "$PROJECT_DIR" != "$INSTALL_DIR" ]; then
     echo -e "  ${YELLOW}Note:${NC} Nightwatch is now installed in $INSTALL_DIR"
-    echo "  You can remove the clone folder:"
-    echo "    rm -rf $PROJECT_DIR"
+    read -rp "  Delete clone folder ($PROJECT_DIR)? [Y/n] " del_confirm
+    if [[ ! "$del_confirm" =~ ^[Nn]$ ]]; then
+        rm -rf "$PROJECT_DIR"
+        echo "  [+] Deleted $PROJECT_DIR"
+    fi
     echo ""
 fi
