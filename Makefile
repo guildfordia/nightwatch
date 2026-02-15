@@ -71,25 +71,26 @@ run:
 	@sleep 3
 	@sudo systemctl --no-pager --full status nightwatch-mesh.service || true
 	@echo ""
+	@# Start node discovery
+	@echo "[+] Starting node discovery..."
+	@sudo systemctl start nightwatch-discovery.service 2>/dev/null || true
+	@echo ""
 	@# Start Docker apps
 	@echo "[+] Starting app services..."
 	@$(DC) --env-file $(ENV_FILE) up -d
 	@sleep 2
 	@echo ""
-	@# Quick connectivity check
+	@# Quick connectivity check — scan all possible mesh IPs (192.168.199.101-120)
 	@echo "[+] Quick connectivity check..."
 	@. ./$(ENV_FILE) 2>/dev/null; \
-	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
-		eval ip=\$$PI$${i}_MESH_IP; \
-		eval name=\$$PI$${i}_SERVER_NAME; \
-		[ -z "$$ip" ] && continue; \
-		if ip -4 addr show 2>/dev/null | grep -q "$$ip"; then \
-			echo "  [*] $$ip ($$name) — this node"; \
+	LOCAL=$${MESH_IP%/*}; \
+	for i in $$(seq 1 20); do \
+		ip="192.168.199.$$((100 + i))"; \
+		if [ "$$ip" = "$$LOCAL" ]; then \
+			echo "  [*] $$ip (node $$i) — this node"; \
 		elif ping -c 1 -W 1 "$$ip" >/dev/null 2>&1; then \
 			rtt=$$(ping -c 1 -W 1 "$$ip" 2>/dev/null | grep 'time=' | sed 's/.*time=//'); \
-			echo "  [+] $$ip ($$name) — reachable ($$rtt)"; \
-		else \
-			echo "  [-] $$ip ($$name) — unreachable"; \
+			echo "  [+] $$ip (node $$i) — reachable ($$rtt)"; \
 		fi; \
 	done
 	@echo ""
@@ -104,6 +105,7 @@ run:
 stop:
 	@echo "[+] Stopping Nightwatch..."
 	@$(DC) --env-file $(ENV_FILE) down 2>/dev/null || true
+	@sudo systemctl stop nightwatch-discovery.service 2>/dev/null || true
 	@sudo systemctl stop nightwatch-mesh.service 2>/dev/null || true
 	@echo "[+] Nightwatch stopped"
 

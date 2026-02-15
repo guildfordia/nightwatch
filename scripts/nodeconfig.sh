@@ -70,11 +70,11 @@ if [ -f "$ENV_FILE" ]; then
     EXISTING_NUM="${PI_NUMBER:-}"
     if [ "$EXISTING_NUM" = "$NODE_NUM" ]; then
         log ".env already configured for node $NODE_NUM — skipping generation"
-        # Still regenerate ngircd config in case node list changed
-        if [ -x "$NIGHTWATCH_DIR/scripts/setup-distributed-irc.sh" ]; then
-            cd "$NIGHTWATCH_DIR"
-            if [ ! -f "ngircd/ngircd.conf" ]; then
-                log "Generating ngircd.conf..."
+        # Generate ngircd.conf if missing (discovery daemon will update peers later)
+        if [ ! -f "$NIGHTWATCH_DIR/ngircd/ngircd.conf" ]; then
+            if [ -x "$NIGHTWATCH_DIR/scripts/setup-distributed-irc.sh" ]; then
+                cd "$NIGHTWATCH_DIR"
+                log "Generating initial ngircd.conf..."
                 "$NIGHTWATCH_DIR/scripts/setup-distributed-irc.sh"
             fi
         fi

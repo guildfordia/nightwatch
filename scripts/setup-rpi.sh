@@ -140,7 +140,8 @@ apt-get install -y -qq \
     curl \
     git \
     fping \
-    netcat-openbsd
+    netcat-openbsd \
+    socat
 echo "[+] Packages installed"
 
 # ---- Step 3: Docker Compose ----
@@ -297,6 +298,7 @@ echo "[7/9] Installing systemd services..."
 # Generate service files with actual project path
 sed "s|/opt/nightwatch|$INSTALL_DIR|g" "$INSTALL_DIR/scripts/nightwatch-nodeconfig.service" > /etc/systemd/system/nightwatch-nodeconfig.service
 sed "s|/opt/nightwatch|$INSTALL_DIR|g" "$INSTALL_DIR/scripts/nightwatch-mesh.service" > /etc/systemd/system/nightwatch-mesh.service
+sed "s|/opt/nightwatch|$INSTALL_DIR|g" "$INSTALL_DIR/scripts/nightwatch-discovery.service" > /etc/systemd/system/nightwatch-discovery.service
 
 # Docker service needs docker compose detection too
 if docker compose version >/dev/null 2>&1; then
@@ -313,11 +315,13 @@ sed -e "s|/opt/nightwatch|$INSTALL_DIR|g" \
 systemctl daemon-reload
 systemctl enable nightwatch-nodeconfig.service
 systemctl enable nightwatch-mesh.service
+systemctl enable nightwatch-discovery.service
 systemctl enable nightwatch-docker.service
 
 echo "[+] Services installed and enabled:"
 echo "    • nightwatch-nodeconfig (generates config from hostname)"
 echo "    • nightwatch-mesh (802.11s + batman-adv + AP)"
+echo "    • nightwatch-discovery (UDP broadcast node discovery)"
 echo "    • nightwatch-docker (IRC + bridge + nginx)"
 
 # ---- Step 8: Build Docker images ----
@@ -345,7 +349,7 @@ echo ""
 echo "[9/9] Verifying installation..."
 
 ERRORS=0
-for f in .env scripts/mesh-fix.sh scripts/nodeconfig.sh docker-compose.yml irc-bridge-go/Dockerfile html/index.html ngircd/ngircd.conf; do
+for f in .env scripts/mesh-fix.sh scripts/nodeconfig.sh scripts/node-discovery.sh docker-compose.yml irc-bridge-go/Dockerfile html/index.html ngircd/ngircd.conf; do
     if [ -f "$INSTALL_DIR/$f" ]; then
         echo -e "  ${GREEN}[OK]${NC} $f"
     else
@@ -354,7 +358,7 @@ for f in .env scripts/mesh-fix.sh scripts/nodeconfig.sh docker-compose.yml irc-b
     fi
 done
 
-for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-docker; do
+for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch-docker; do
     if systemctl is-enabled "$svc" >/dev/null 2>&1; then
         echo -e "  ${GREEN}[OK]${NC} $svc.service enabled"
     else

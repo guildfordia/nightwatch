@@ -100,7 +100,8 @@ apt-get install -y -qq \
     curl \
     git \
     fping \
-    netcat-openbsd
+    netcat-openbsd \
+    socat
 echo "[+] System packages installed"
 
 # ---- Step 3: Install Docker Compose ----

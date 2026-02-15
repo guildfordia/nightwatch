@@ -65,27 +65,21 @@ BRIDGE_PORT="${BRIDGE_PORT:-8080}"
 NGINX_PORT="${NGINX_PORT:-80}"
 LOCAL_IP="${MESH_IP%/*}"
 
-# Build node list from .env (PI1_MESH_IP, PI2_MESH_IP, ...)
+# Node list: all possible mesh IPs (192.168.199.101-120, max 20 nodes)
 declare -a NODE_IPS=()
 declare -a NODE_NAMES=()
 for i in $(seq 1 20); do
-    ip_var="PI${i}_MESH_IP"
-    name_var="PI${i}_SERVER_NAME"
-    ip="${!ip_var:-}"
-    name="${!name_var:-node${i}}"
-    if [ -n "$ip" ]; then
-        NODE_IPS+=("$ip")
-        NODE_NAMES+=("$name")
-    fi
+    NODE_IPS+=("192.168.199.$((100 + i))")
+    NODE_NAMES+=("node${i}")
 done
 
 echo "======================================"
 echo "  Nightwatch Mesh Integration Test"
 echo "======================================"
 echo ""
-echo "  This node:       $LOCAL_IP (Pi #${PI_NUMBER:-?})"
-echo "  Configured nodes: ${#NODE_IPS[@]}"
-echo "  Mode:            $([ "$QUICK_MODE" = true ] && echo 'quick' || echo 'full')"
+echo "  This node:  $LOCAL_IP (node #${PI_NUMBER:-?})"
+echo "  Scanning:   192.168.199.101-120 (max 20 nodes)"
+echo "  Mode:       $([ "$QUICK_MODE" = true ] && echo 'quick' || echo 'full')"
 echo ""
 
 # ---- Check we're running as root ----
@@ -166,41 +160,49 @@ fi
 
 section "2. Node Discovery"
 
+# Check if discovery daemon is running
+if systemctl is-active nightwatch-discovery.service >/dev/null 2>&1; then
+    pass "Discovery daemon running"
+    PEER_FILE="/tmp/nightwatch-peers"
+    if [ -f "$PEER_FILE" ] && [ -s "$PEER_FILE" ]; then
+        peer_count=$(wc -l < "$PEER_FILE")
+        pass "Discovery daemon knows $peer_count peer(s)"
+    else
+        skip "Discovery daemon has no peers yet"
+    fi
+else
+    warn "Discovery daemon not running"
+fi
+
 declare -a LIVE_IPS=()
 declare -a LIVE_NAMES=()
 
-if [ ${#NODE_IPS[@]} -le 1 ]; then
-    echo -e "  Only this node is configured. Skipping remote node tests."
-    skip "No other nodes configured in .env"
-else
-    for idx in "${!NODE_IPS[@]}"; do
-        ip="${NODE_IPS[$idx]}"
-        name="${NODE_NAMES[$idx]}"
+echo "  Scanning 192.168.199.101-120..."
+for idx in "${!NODE_IPS[@]}"; do
+    ip="${NODE_IPS[$idx]}"
+    name="${NODE_NAMES[$idx]}"
 
-        if [ "$ip" = "$LOCAL_IP" ]; then
-            continue
-        fi
-
-        if ping -c 1 -W 2 "$ip" >/dev/null 2>&1; then
-            rtt=$(ping -c 1 -W 2 "$ip" 2>/dev/null | grep 'time=' | sed 's/.*time=//' || echo "?")
-            echo -e "  ${GREEN}[ONLINE]${NC}  $ip ($name) — ${rtt}"
-            LIVE_IPS+=("$ip")
-            LIVE_NAMES+=("$name")
-        else
-            echo -e "  ${YELLOW}[OFFLINE]${NC} $ip ($name)"
-        fi
-    done
-
-    live_count=${#LIVE_IPS[@]}
-    total_remote=$((${#NODE_IPS[@]} - 1))
-    echo ""
-    echo "  Discovered: $live_count / $total_remote remote node(s) online"
-
-    if [ "$live_count" -gt 0 ]; then
-        pass "$live_count remote node(s) reachable"
-    else
-        warn "No remote nodes reachable (this node is alone)"
+    # Skip self
+    if [ "$ip" = "$LOCAL_IP" ]; then
+        continue
     fi
+
+    if ping -c 1 -W 1 "$ip" >/dev/null 2>&1; then
+        rtt=$(ping -c 1 -W 1 "$ip" 2>/dev/null | grep 'time=' | sed 's/.*time=//' || echo "?")
+        echo -e "  ${GREEN}[ONLINE]${NC}  $ip ($name) — ${rtt}"
+        LIVE_IPS+=("$ip")
+        LIVE_NAMES+=("$name")
+    fi
+done
+
+live_count=${#LIVE_IPS[@]}
+echo ""
+if [ "$live_count" -gt 0 ]; then
+    echo "  Discovered: $live_count remote node(s)"
+    pass "$live_count remote node(s) reachable"
+else
+    echo "  No other nodes found on the mesh"
+    skip "This node is alone"
 fi
 
 # ============================================================
