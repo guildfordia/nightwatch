@@ -160,6 +160,14 @@ fi
 
 section "2. Node Discovery"
 
+# Check for node/IP conflicts
+CONFLICT_FILE="/tmp/nightwatch-conflict"
+if [ -f "$CONFLICT_FILE" ]; then
+    fail "NODE CONFLICT: $(cat "$CONFLICT_FILE")"
+else
+    pass "No node conflicts detected"
+fi
+
 # Check if discovery daemon is running
 if systemctl is-active nightwatch-discovery.service >/dev/null 2>&1; then
     pass "Discovery daemon running"
