@@ -6,6 +6,7 @@ services:
       - ./.env
     volumes:
       - ./ngircd:/config
+      - ./ngircd/ngircd.conf:/etc/ngircd/ngircd.conf
     ports:
       - "${IRC_PORT}:${IRC_PORT}"
     restart: unless-stopped
