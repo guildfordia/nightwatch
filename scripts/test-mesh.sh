@@ -245,21 +245,28 @@ fi
 
 section "4. batman-adv Topology"
 
-# Neighbors (direct links)
+# Neighbors — only count mesh interface (MESH_IFACE) neighbors, not bridged AP clients
 neighbor_output=$(batctl meshif "$BAT_IFACE" n 2>/dev/null || batctl n 2>/dev/null || true)
-neighbor_count=$(echo "$neighbor_output" | grep -cv "^\[B.A.T.M.A.N\|^$\|IF" || true)
-neighbor_count=$((neighbor_count + 0))
-if [ "$neighbor_count" -gt 0 ]; then
-    pass "batman-adv has $neighbor_count direct neighbor(s)"
+mesh_neighbor_count=$(echo "$neighbor_output" | grep -c "$MESH_IFACE" || true)
+mesh_neighbor_count=$((mesh_neighbor_count + 0))
+total_neighbor_count=$(echo "$neighbor_output" | grep -cv "^\[B.A.T.M.A.N\|^$\|IF" || true)
+total_neighbor_count=$((total_neighbor_count + 0))
+if [ "$mesh_neighbor_count" -gt 0 ]; then
+    extra=""
+    bridged=$((total_neighbor_count - mesh_neighbor_count))
+    if [ "$bridged" -gt 0 ]; then
+        extra=" (+$bridged bridged client(s))"
+    fi
+    pass "batman-adv has $mesh_neighbor_count mesh neighbor(s)${extra}"
 elif [ ${#LIVE_IPS[@]} -gt 0 ]; then
-    fail "No batman-adv neighbors (but live nodes exist)"
+    fail "No batman-adv mesh neighbors (but live nodes exist)"
 else
     skip "No batman-adv neighbors (no other nodes online)"
 fi
 
-# Originators (full mesh view)
+# Originators — count only best routes (* prefix = unique originator)
 originator_output=$(batctl meshif "$BAT_IFACE" o 2>/dev/null || batctl o 2>/dev/null || true)
-originator_count=$(echo "$originator_output" | grep -cv "^\[B.A.T.M.A.N\|^$\|Originator" || true)
+originator_count=$(echo "$originator_output" | grep -c "^ \*" || true)
 originator_count=$((originator_count + 0))
 if [ "$originator_count" -gt 0 ]; then
     pass "batman-adv sees $originator_count originator(s) in mesh"
@@ -269,9 +276,9 @@ else
     skip "No batman-adv originators (no other nodes online)"
 fi
 
-# Gateway list
+# Gateway list — only count lines with actual MAC addresses
 gw_list=$(batctl meshif "$BAT_IFACE" gwl 2>/dev/null || batctl gwl 2>/dev/null || true)
-gw_count=$(echo "$gw_list" | grep -cv "^\[B.A.T.M.A.N\|^$\|Gateway" || true)
+gw_count=$(echo "$gw_list" | grep -cE "([0-9a-f]{2}:){5}[0-9a-f]{2}" || true)
 gw_count=$((gw_count + 0))
 if [ "$gw_count" -gt 0 ]; then
     pass "batman-adv sees $gw_count gateway(s)"
@@ -365,7 +372,7 @@ for idx in "${!LIVE_IPS[@]}"; do
         fail "  Bridge /health: '$health'"
     fi
 
-    nginx_code=$(curl -sf --max-time 5 -o /dev/null -w "%{http_code}" "http://${ip}:${NGINX_PORT}/" 2>/dev/null || echo "000")
+    nginx_code=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" "http://${ip}:${NGINX_PORT}/" 2>/dev/null || echo "000")
     if [ "$nginx_code" = "200" ]; then
         pass "  Nginx (port $NGINX_PORT) returns HTTP 200"
     elif [ "$nginx_code" != "000" ]; then
@@ -508,13 +515,13 @@ if [ "${MESH_GATEWAY:-false}" = "true" ]; then
 else
     if [ "$gw_count" -gt 0 ]; then
         pass "Gateway available in mesh ($gw_count gateway(s))"
-        if ping -c 2 -W 5 8.8.8.8 >/dev/null 2>&1; then
-            pass "Internet reachable via mesh gateway"
-        else
-            warn "Internet not reachable (gateway may not be sharing)"
-        fi
     else
-        skip "No gateway in mesh"
+        skip "No gateway in mesh (nodes use their own uplink)"
+    fi
+    if ping -c 2 -W 5 8.8.8.8 >/dev/null 2>&1; then
+        pass "Internet reachable"
+    else
+        warn "Internet not reachable"
     fi
 fi
 
