@@ -75,7 +75,8 @@ run:
 	@echo "[+] Starting node discovery..."
 	@sudo systemctl start nightwatch-discovery.service 2>/dev/null || true
 	@echo ""
-	@# Generate IRC config before starting Docker (ensures config is not the default sample)
+	@# Fix ngircd/ permissions (Docker creates it as root) and generate config
+	@sudo chown -R $$(id -u):$$(id -g) ngircd/ 2>/dev/null || true
 	@scripts/setup-distributed-irc.sh
 	@echo ""
 	@# Start Docker apps

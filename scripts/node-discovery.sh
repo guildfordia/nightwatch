@@ -217,11 +217,17 @@ update_irc_config() {
 
     generate_irc_config
 
-    # Restart ngircd to pick up new config
-    # (linuxserver/ngircd uses s6-init as PID 1, so SIGHUP doesn't reach ngircd)
+    # Reload ngircd config inside the container
+    # Send SIGHUP directly to the ngircd process (not PID 1 which is s6-init)
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -q ngircd; then
-        docker restart ngircd 2>/dev/null || true
-        log "Restarted ngircd (config reload)"
+        # Try sending HUP to ngircd process directly
+        if docker exec ngircd pkill -HUP ngircd 2>/dev/null; then
+            log "Sent HUP to ngircd process (config reload)"
+        else
+            # Fallback: restart container
+            docker restart ngircd 2>/dev/null || true
+            log "Restarted ngircd (config reload)"
+        fi
     fi
 }
 
