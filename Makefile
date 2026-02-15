@@ -11,12 +11,11 @@
 
 # -------- Config --------
 ENV_FILE   := .env
-INSTALL_DIR := /opt/nightwatch
 
 # Auto-detect docker compose v2 vs v1
 DC := $(shell if docker compose version >/dev/null 2>&1; then echo "docker compose"; elif command -v docker-compose >/dev/null 2>&1; then echo "docker-compose"; else echo "docker compose"; fi)
 
-.PHONY: install run stop test update status logs help clean monitor
+.PHONY: install run stop test update status logs help clean monitor blink
 
 .DEFAULT_GOAL := help
 
@@ -36,6 +35,7 @@ help:
 	@echo "  make logs      Follow Docker logs"
 	@echo "  make clean     Remove containers and volumes"
 	@echo "  make monitor   Live dashboard (refreshes every 5s)"
+	@echo "  make blink     Blink onboard LED to identify this Pi"
 	@echo ""
 	@echo "First time on a new Pi:"
 	@echo "  git clone https://github.com/guildfordia/nightwatch.git"
@@ -73,12 +73,12 @@ run:
 	@echo ""
 	@# Start Docker apps
 	@echo "[+] Starting app services..."
-	@cd $(INSTALL_DIR) && $(DC) --env-file $(ENV_FILE) up -d
+	@$(DC) --env-file $(ENV_FILE) up -d
 	@sleep 2
 	@echo ""
 	@# Quick connectivity check
 	@echo "[+] Quick connectivity check..."
-	@. $(INSTALL_DIR)/$(ENV_FILE) 2>/dev/null; \
+	@. ./$(ENV_FILE) 2>/dev/null; \
 	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
 		eval ip=\$$PI$${i}_MESH_IP; \
 		eval name=\$$PI$${i}_SERVER_NAME; \
@@ -103,7 +103,7 @@ run:
 # -------- stop --------
 stop:
 	@echo "[+] Stopping Nightwatch..."
-	@cd $(INSTALL_DIR) && $(DC) --env-file $(ENV_FILE) down 2>/dev/null || true
+	@$(DC) --env-file $(ENV_FILE) down 2>/dev/null || true
 	@sudo systemctl stop nightwatch-mesh.service 2>/dev/null || true
 	@echo "[+] Nightwatch stopped"
 
@@ -125,28 +125,16 @@ update:
 	@echo "  Nightwatch — Update"
 	@echo "====================================="
 	@echo ""
-	@echo "[1/5] Stopping services..."
+	@echo "[1/4] Stopping services..."
 	@$(MAKE) stop 2>/dev/null || true
 	@echo ""
-	@echo "[2/5] Pulling latest code..."
+	@echo "[2/4] Pulling latest code..."
 	@git pull
 	@echo ""
-	@echo "[3/5] Syncing to $(INSTALL_DIR)..."
-	@sudo rsync -a --delete \
-		--exclude='.git' \
-		--exclude='.env' \
-		--exclude='ngircd/ngircd.conf' \
-		--exclude='*.log' \
-		--exclude='.DS_Store' \
-		--exclude='.firstboot-done' \
-		. $(INSTALL_DIR)/
-	@sudo chmod +x $(INSTALL_DIR)/scripts/*.sh
-	@echo "[+] Code synced (node config preserved)"
+	@echo "[3/4] Rebuilding Docker images..."
+	@$(DC) --env-file $(ENV_FILE) build
 	@echo ""
-	@echo "[4/5] Rebuilding Docker images..."
-	@cd $(INSTALL_DIR) && sudo $(DC) --env-file $(ENV_FILE) build
-	@echo ""
-	@echo "[5/5] Restarting..."
+	@echo "[4/4] Restarting..."
 	@$(MAKE) run
 	@echo ""
 	@echo "[+] Update complete."
@@ -158,7 +146,6 @@ status:
 	@echo "====================================="
 	@echo ""
 	@sudo scripts/mesh-fix.sh status 2>/dev/null || \
-		sudo $(INSTALL_DIR)/scripts/mesh-fix.sh status 2>/dev/null || \
 		echo "[!] Mesh status unavailable"
 	@echo ""
 	@echo "== Docker Services =="
@@ -166,14 +153,30 @@ status:
 
 # -------- logs --------
 logs:
-	@cd $(INSTALL_DIR) && $(DC) logs -f
+	@$(DC) logs -f
 
 # -------- clean --------
 clean:
 	@echo "[+] Removing containers and volumes..."
-	@cd $(INSTALL_DIR) && $(DC) --env-file $(ENV_FILE) down -v 2>/dev/null || true
+	@$(DC) --env-file $(ENV_FILE) down -v 2>/dev/null || true
 	@docker system prune -f
 	@echo "[+] Clean"
+
+# -------- blink --------
+# Blink the onboard ACT LED to physically identify this Pi
+blink:
+	@echo "Blinking LED for 10 seconds — look for the flashing green light..."
+	@sudo sh -c 'LED=/sys/class/leds/ACT; \
+		if [ ! -d "$$LED" ]; then LED=/sys/class/leds/led0; fi; \
+		if [ ! -d "$$LED" ]; then echo "No LED found at /sys/class/leds/ACT or led0"; exit 1; fi; \
+		ORIG=$$(cat "$$LED/trigger" | grep -oP "\[\K[^\]]+"); \
+		echo none > "$$LED/trigger"; \
+		for i in $$(seq 1 20); do \
+			echo 1 > "$$LED/brightness"; sleep 0.25; \
+			echo 0 > "$$LED/brightness"; sleep 0.25; \
+		done; \
+		echo "$$ORIG" > "$$LED/trigger"'
+	@echo "Done."
 
 # -------- monitor --------
 monitor:
@@ -181,8 +184,7 @@ monitor:
 		clear; \
 		echo "=== NIGHTWATCH MONITOR === ($$(date))  Ctrl+C to exit"; \
 		echo ""; \
-		sudo scripts/mesh-fix.sh status 2>/dev/null || \
-			sudo $(INSTALL_DIR)/scripts/mesh-fix.sh status 2>/dev/null || true; \
+		sudo scripts/mesh-fix.sh status 2>/dev/null || true; \
 		echo ""; \
 		echo "== Docker Services =="; \
 		docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || true; \

@@ -17,7 +17,12 @@
 
 set -euo pipefail
 
-NIGHTWATCH_DIR="/opt/nightwatch"
+# Read project path from /etc/nightwatch.conf (written by setup-rpi.sh)
+if [ -f /etc/nightwatch.conf ]; then
+    # shellcheck source=/dev/null
+    source /etc/nightwatch.conf
+fi
+NIGHTWATCH_DIR="${NIGHTWATCH_DIR:-/opt/nightwatch}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'

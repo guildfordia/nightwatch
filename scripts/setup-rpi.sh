@@ -7,7 +7,7 @@
 #   3. Installs all system packages
 #   4. Installs Docker + Docker Compose
 #   5. Loads batman-adv, disables system hostapd
-#   6. Copies project to /opt/nightwatch
+#   6. Saves project path to /etc/nightwatch.conf
 #   7. Generates .env + ngircd.conf from node number
 #   8. Installs systemd services (nodeconfig, mesh, docker)
 #   9. Builds Docker images
@@ -27,7 +27,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-INSTALL_DIR="/opt/nightwatch"
+INSTALL_DIR="$PROJECT_DIR"
 
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -238,23 +238,13 @@ fi
 # Apply immediately (don't wait for reboot)
 ip route replace default via "$(ip route show dev wlan0 | grep default | awk '{print $3}')" dev wlan0 metric 50 2>/dev/null || true
 
-# ---- Step 5: Copy project to /opt/nightwatch ----
+# ---- Step 5: Register project path ----
 
 echo ""
-echo "[5/9] Installing Nightwatch to $INSTALL_DIR..."
-mkdir -p "$INSTALL_DIR"
-rsync -a --delete \
-    --exclude='.git' \
-    --exclude='.env' \
-    --exclude='ngircd/ngircd.conf' \
-    --exclude='*.log' \
-    --exclude='.DS_Store' \
-    --exclude='node_modules' \
-    --exclude='irc-bridge-go/irc-bridge' \
-    "$PROJECT_DIR/" "$INSTALL_DIR/"
-
+echo "[5/9] Registering Nightwatch directory..."
+echo "NIGHTWATCH_DIR=$INSTALL_DIR" > /etc/nightwatch.conf
 chmod +x "$INSTALL_DIR"/scripts/*.sh
-echo "[+] Project installed to $INSTALL_DIR"
+echo "[+] Project path saved to /etc/nightwatch.conf ($INSTALL_DIR)"
 
 # ---- Step 6: Generate .env ----
 
@@ -285,9 +275,21 @@ fi
 echo ""
 echo "[7/9] Installing systemd services..."
 
-cp "$INSTALL_DIR/scripts/nightwatch-nodeconfig.service" /etc/systemd/system/
-cp "$INSTALL_DIR/scripts/nightwatch-mesh.service" /etc/systemd/system/
-cp "$INSTALL_DIR/scripts/nightwatch-docker.service" /etc/systemd/system/
+# Generate service files with actual project path
+sed "s|/opt/nightwatch|$INSTALL_DIR|g" "$INSTALL_DIR/scripts/nightwatch-nodeconfig.service" > /etc/systemd/system/nightwatch-nodeconfig.service
+sed "s|/opt/nightwatch|$INSTALL_DIR|g" "$INSTALL_DIR/scripts/nightwatch-mesh.service" > /etc/systemd/system/nightwatch-mesh.service
+
+# Docker service needs docker compose detection too
+if docker compose version >/dev/null 2>&1; then
+    DC_BIN="/usr/bin/docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+    DC_BIN="$(command -v docker-compose)"
+else
+    DC_BIN="/usr/bin/docker compose"
+fi
+sed -e "s|/opt/nightwatch|$INSTALL_DIR|g" \
+    -e "s|/usr/bin/docker compose|$DC_BIN|g" \
+    "$INSTALL_DIR/scripts/nightwatch-docker.service" > /etc/systemd/system/nightwatch-docker.service
 
 systemctl daemon-reload
 systemctl enable nightwatch-nodeconfig.service
@@ -376,17 +378,7 @@ echo "  AP SSID:  $(grep ^AP_SSID "$ENV_FILE" | cut -d= -f2)"
 echo ""
 echo -e "  ${BOLD}Next steps:${NC}"
 echo "    sudo reboot"
-echo "    cd $INSTALL_DIR && make run"
+echo "    cd $INSTALL_DIR"
+echo "    make run"
 echo "    make test"
 echo ""
-if [ "$PROJECT_DIR" != "$INSTALL_DIR" ]; then
-    echo -e "  ${YELLOW}Note:${NC} Nightwatch is now installed in $INSTALL_DIR"
-    read -rp "  Delete clone folder ($PROJECT_DIR)? [Y/n] " del_confirm
-    if [[ ! "$del_confirm" =~ ^[Nn]$ ]]; then
-        cd /
-        rm -rf "$PROJECT_DIR"
-        echo "  [+] Deleted $PROJECT_DIR"
-        echo "  [+] Run: cd $INSTALL_DIR"
-    fi
-    echo ""
-fi

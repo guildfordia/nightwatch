@@ -13,12 +13,17 @@
 
 set -euo pipefail
 
-NIGHTWATCH_DIR="/opt/nightwatch"
+LOG_TAG="nightwatch-nodeconfig"
+log() { echo "[nodeconfig] $1"; logger -t "$LOG_TAG" "$1" 2>/dev/null || true; }
+
+# Read project path from /etc/nightwatch.conf (written by setup-rpi.sh)
+if [ -f /etc/nightwatch.conf ]; then
+    # shellcheck source=/dev/null
+    source /etc/nightwatch.conf
+fi
+NIGHTWATCH_DIR="${NIGHTWATCH_DIR:-/opt/nightwatch}"
 ENV_FILE="$NIGHTWATCH_DIR/.env"
 ENV_TEMPLATE="$NIGHTWATCH_DIR/.env.example"
-LOG_TAG="nightwatch-nodeconfig"
-
-log() { echo "[nodeconfig] $1"; logger -t "$LOG_TAG" "$1" 2>/dev/null || true; }
 
 if [ ! -d "$NIGHTWATCH_DIR" ]; then
     log "Error: $NIGHTWATCH_DIR not found"

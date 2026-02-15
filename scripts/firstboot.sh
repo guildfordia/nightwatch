@@ -2,7 +2,7 @@
 # Nightwatch — First boot autonomous setup
 # This script runs ONCE on the Pi's first boot, then disables itself.
 #
-# It expects the project to already be at /opt/nightwatch (copied by prepare-sdcard.sh)
+# It expects the project path in /etc/nightwatch.conf (written by setup-rpi.sh)
 # and a valid .env to be present with this node's configuration.
 #
 # What it does:
@@ -18,9 +18,14 @@
 
 set -euo pipefail
 
-NIGHTWATCH_DIR="/opt/nightwatch"
+# Read project path from /etc/nightwatch.conf (written by setup-rpi.sh)
+if [ -f /etc/nightwatch.conf ]; then
+    # shellcheck source=/dev/null
+    source /etc/nightwatch.conf
+fi
+NIGHTWATCH_DIR="${NIGHTWATCH_DIR:-/opt/nightwatch}"
 LOG_FILE="/var/log/nightwatch-firstboot.log"
-STAMP_FILE="/opt/nightwatch/.firstboot-done"
+STAMP_FILE="$NIGHTWATCH_DIR/.firstboot-done"
 
 # Redirect all output to log + console
 exec > >(tee -a "$LOG_FILE") 2>&1
@@ -172,7 +177,14 @@ echo "[+] Mesh service installed and enabled"
 echo ""
 echo "[7/9] Building Docker images (this may take a few minutes)..."
 cd "$NIGHTWATCH_DIR"
-docker compose --env-file .env build
+if docker compose version >/dev/null 2>&1; then
+    DC="docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+    DC="docker-compose"
+else
+    DC="docker compose"
+fi
+$DC --env-file .env build
 echo "[+] Docker images built"
 
 # ---- Step 8: Start everything ----
@@ -183,7 +195,7 @@ systemctl start nightwatch-mesh.service
 sleep 5
 
 echo "[+] Starting Docker services..."
-docker compose --env-file .env up -d
+$DC --env-file .env up -d
 sleep 3
 echo "[+] Services started"
 
