@@ -296,6 +296,7 @@ echo ""
 echo "[7/9] Installing systemd services..."
 
 # Generate service files with actual project path
+cp "$INSTALL_DIR/scripts/nightwatch-dns.service" /etc/systemd/system/nightwatch-dns.service
 sed "s|/opt/nightwatch|$INSTALL_DIR|g" "$INSTALL_DIR/scripts/nightwatch-nodeconfig.service" > /etc/systemd/system/nightwatch-nodeconfig.service
 sed "s|/opt/nightwatch|$INSTALL_DIR|g" "$INSTALL_DIR/scripts/nightwatch-mesh.service" > /etc/systemd/system/nightwatch-mesh.service
 sed "s|/opt/nightwatch|$INSTALL_DIR|g" "$INSTALL_DIR/scripts/nightwatch-discovery.service" > /etc/systemd/system/nightwatch-discovery.service
@@ -313,12 +314,14 @@ sed -e "s|/opt/nightwatch|$INSTALL_DIR|g" \
     "$INSTALL_DIR/scripts/nightwatch-docker.service" > /etc/systemd/system/nightwatch-docker.service
 
 systemctl daemon-reload
+systemctl enable nightwatch-dns.service
 systemctl enable nightwatch-nodeconfig.service
 systemctl enable nightwatch-mesh.service
 systemctl enable nightwatch-discovery.service
 systemctl enable nightwatch-docker.service
 
 echo "[+] Services installed and enabled:"
+echo "    • nightwatch-dns (ensures 8.8.8.8 in resolv.conf)"
 echo "    • nightwatch-nodeconfig (generates config from hostname)"
 echo "    • nightwatch-mesh (802.11s + batman-adv + AP)"
 echo "    • nightwatch-discovery (UDP broadcast node discovery)"
