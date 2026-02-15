@@ -223,13 +223,25 @@ elif command -v nmcli >/dev/null 2>&1; then
         nmcli con mod "$WLAN_CON" ipv4.route-metric 50 2>/dev/null || true
         echo "[+] NetworkManager: wlan0 ($WLAN_CON) route metric set to 50"
     fi
-    # Add fallback DNS
+    # Add DNS servers directly to wlan0 connection (survives Tailscale overriding resolv.conf)
+    if [ -n "$WLAN_CON" ]; then
+        nmcli con mod "$WLAN_CON" ipv4.dns "8.8.8.8 1.1.1.1" 2>/dev/null || true
+        nmcli con mod "$WLAN_CON" ipv4.ignore-auto-dns no 2>/dev/null || true
+        echo "[+] NetworkManager: DNS 8.8.8.8 added to wlan0"
+    fi
+    # Also add fallback via systemd-resolved
     mkdir -p /etc/systemd/resolved.conf.d
     cat > /etc/systemd/resolved.conf.d/nightwatch-fallback.conf << 'DNSEOF'
 [Resolve]
 FallbackDNS=8.8.8.8 1.1.1.1
 DNSEOF
     systemctl restart systemd-resolved 2>/dev/null || true
+    # Force resolv.conf to include real DNS alongside Tailscale
+    if grep -q "100.100.100.100" /etc/resolv.conf 2>/dev/null; then
+        if ! grep -q "8.8.8.8" /etc/resolv.conf 2>/dev/null; then
+            echo "nameserver 8.8.8.8" >> /etc/resolv.conf
+        fi
+    fi
     echo "[+] Fallback DNS configured (8.8.8.8, 1.1.1.1)"
 else
     echo "[!] Neither dhcpcd nor NetworkManager found — skipping network config"
@@ -237,6 +249,13 @@ fi
 
 # Apply immediately (don't wait for reboot)
 ip route replace default via "$(ip route show dev wlan0 | grep default | awk '{print $3}')" dev wlan0 metric 50 2>/dev/null || true
+# Ensure DNS works right now (Tailscale puts 100.100.100.100 which can't resolve when upstream is down)
+if grep -q "100.100.100.100" /etc/resolv.conf 2>/dev/null; then
+    if ! grep -q "8.8.8.8" /etc/resolv.conf 2>/dev/null; then
+        echo "nameserver 8.8.8.8" >> /etc/resolv.conf
+        echo "[+] Added 8.8.8.8 to /etc/resolv.conf (Tailscale workaround)"
+    fi
+fi
 
 # ---- Step 5: Register project path ----
 
