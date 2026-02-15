@@ -75,6 +75,9 @@ run:
 	@echo "[+] Starting node discovery..."
 	@sudo systemctl start nightwatch-discovery.service 2>/dev/null || true
 	@echo ""
+	@# Generate IRC config before starting Docker (ensures config is not the default sample)
+	@scripts/setup-distributed-irc.sh
+	@echo ""
 	@# Start Docker apps
 	@echo "[+] Starting app services..."
 	@$(DC) --env-file $(ENV_FILE) up -d
