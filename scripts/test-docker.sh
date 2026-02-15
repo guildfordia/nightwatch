@@ -134,7 +134,7 @@ else
 fi
 
 # WebSocket endpoint (should get upgrade required or bad request)
-WS_RESP=$(curl -sf --max-time 3 -o /dev/null -w "%{http_code}" "http://localhost:${BRIDGE_PORT}/ws" 2>/dev/null || echo "000")
+WS_RESP=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" "http://localhost:${BRIDGE_PORT}/ws" 2>/dev/null || echo "000")
 if [ "$WS_RESP" = "400" ] || [ "$WS_RESP" = "426" ] || [ "$WS_RESP" = "200" ]; then
     pass "Bridge /ws endpoint responds (HTTP $WS_RESP)"
 else
@@ -158,7 +158,7 @@ else
 fi
 
 # HTTP status
-HTTP_CODE=$(curl -sf --max-time 3 -o /dev/null -w "%{http_code}" "http://localhost:${NGINX_PORT}/" 2>/dev/null || echo "000")
+HTTP_CODE=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" "http://localhost:${NGINX_PORT}/" 2>/dev/null || echo "000")
 if [ "$HTTP_CODE" = "200" ]; then
     pass "Nginx returns HTTP 200"
 else
@@ -166,7 +166,7 @@ else
 fi
 
 # Proxy to bridge
-PROXY_CODE=$(curl -sf --max-time 3 -o /dev/null -w "%{http_code}" "http://localhost:${NGINX_PORT}/ws" 2>/dev/null || echo "000")
+PROXY_CODE=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" "http://localhost:${NGINX_PORT}/ws" 2>/dev/null || echo "000")
 if [ "$PROXY_CODE" != "000" ] && [ "$PROXY_CODE" != "502" ] && [ "$PROXY_CODE" != "504" ]; then
     pass "Nginx proxies /ws to bridge (HTTP $PROXY_CODE)"
 else
