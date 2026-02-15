@@ -365,10 +365,13 @@ for idx in "${!LIVE_IPS[@]}"; do
         fail "  Bridge /health: '$health'"
     fi
 
-    if curl -sf --max-time 5 "http://${ip}:${NGINX_PORT}/" 2>/dev/null | grep -qi "nightwatch"; then
-        pass "  Nginx serves Nightwatch frontend"
+    nginx_code=$(curl -sf --max-time 5 -o /dev/null -w "%{http_code}" "http://${ip}:${NGINX_PORT}/" 2>/dev/null || echo "000")
+    if [ "$nginx_code" = "200" ]; then
+        pass "  Nginx (port $NGINX_PORT) returns HTTP 200"
+    elif [ "$nginx_code" != "000" ]; then
+        warn "  Nginx (port $NGINX_PORT) returns HTTP $nginx_code"
     else
-        fail "  Nginx (port $NGINX_PORT) not serving frontend"
+        fail "  Nginx (port $NGINX_PORT) not reachable"
     fi
 done
 

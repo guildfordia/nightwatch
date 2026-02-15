@@ -60,33 +60,9 @@ CONFLICT_FILE="/tmp/nightwatch-conflict"
 
 log() { echo "[discovery] $(date '+%H:%M:%S') $1"; }
 
-# ---- IP conflict detection ----
-check_ip_conflict() {
-    # ARP-ping our own IP — if someone replies, there's a conflict
-    if command -v arping >/dev/null 2>&1; then
-        log "Checking for IP conflict on $LOCAL_IP..."
-        # Send 3 ARP probes, wait 1s each. arping exits 0 if someone replies.
-        if arping -D -c 3 -w 3 -I "$BAT_IFACE" "$LOCAL_IP" 2>/dev/null; then
-            log "No IP conflict detected"
-            rm -f "$CONFLICT_FILE"
-        else
-            log "WARNING: IP CONFLICT — another device is using $LOCAL_IP!"
-            echo "IP conflict: $LOCAL_IP is already in use on $BAT_IFACE" > "$CONFLICT_FILE"
-            return 1
-        fi
-    else
-        # No arping, try fping as fallback
-        if command -v fping >/dev/null 2>&1; then
-            if fping -c 1 -t 1000 "$LOCAL_IP" 2>/dev/null | grep -q "bytes"; then
-                log "WARNING: IP CONFLICT — another device is using $LOCAL_IP!"
-                echo "IP conflict: $LOCAL_IP is already in use" > "$CONFLICT_FILE"
-                return 1
-            fi
-        fi
-        log "No arping/fping available — skipping IP conflict check"
-    fi
-    return 0
-}
+# Note: IP conflict detection is done via beacon monitoring, not ARP.
+# When a beacon arrives with our own node number from a different IP,
+# we log a conflict to /tmp/nightwatch-conflict.
 
 # ---- Beacon sender (runs in background) ----
 send_beacons() {
@@ -262,14 +238,7 @@ case "${1:-start}" in
             exit 1
         fi
 
-        # Check for IP conflicts before starting
-        if ! check_ip_conflict; then
-            log "ERROR: Cannot start — IP conflict detected on $LOCAL_IP"
-            log "Another device on the mesh has the same IP. Change PI_NUMBER in .env."
-            exit 1
-        fi
-
-        # Clean peer file
+        # Clean conflict/peer files
         rm -f "$CONFLICT_FILE"
         > "$PEER_FILE"
 
