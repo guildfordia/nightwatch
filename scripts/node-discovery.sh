@@ -154,6 +154,8 @@ Listen = 0.0.0.0
 MotdPhrase = Nightwatch mesh node $NODE_NUM
 ServerUID = abc
 ServerGID = abc
+
+[Limits]
 MaxConnections = 150
 MaxConnectionsIP = 25
 MaxJoins = 3
@@ -161,20 +163,14 @@ MaxNickLength = 12
 PingTimeout = 300
 PongTimeout = 60
 IdleTimeout = 900
+MaxChannelNameLength = 15
+MaxTopicLength = 80
+MaxAwayLen = 40
+MaxListSize = 100
 
 [Options]
 RequireAuthPing = no
 PAM = no
-Bind = 0.0.0.0
-Port = 6667
-MaxChannels = 1
-MaxListSize = 100
-
-[Limits]
-MaxNickLength = 12
-MaxChannelNameLength = 15
-MaxTopicLength = 80
-MaxAwayLen = 40
 
 [Channel]
 name = #nightwatch
