@@ -409,7 +409,22 @@ if [ "$QUICK_MODE" = false ] && [ ${#LIVE_IPS[@]} -gt 0 ]; then
         TEST_MSG="MESHTEST_$(date +%s)_$$"
         TEST_NICK="testbot$$"
 
-        # Connect to LOCAL IRC, join channel, send test message
+        # Start RECEIVER first on remote node — give it time to connect and join
+        RECV_OUTPUT=$(mktemp)
+        {
+            echo "NICK recvbot$$"
+            echo "USER recvbot$$ 0 * :Mesh Recv Bot"
+            sleep 3
+            echo "JOIN #nightwatch"
+            sleep 10
+            echo "QUIT :recv done"
+        } | nc -w 15 "$REMOTE_IP" "$IRC_PORT" > "$RECV_OUTPUT" 2>&1 &
+        RECV_PID=$!
+
+        # Wait for receiver to connect and join channel
+        sleep 5
+
+        # Then SEND on local node
         {
             echo "NICK $TEST_NICK"
             echo "USER $TEST_NICK 0 * :Mesh Test Bot"
@@ -421,18 +436,6 @@ if [ "$QUICK_MODE" = false ] && [ ${#LIVE_IPS[@]} -gt 0 ]; then
             echo "QUIT :test done"
         } | nc -w 8 localhost "$IRC_PORT" >/dev/null 2>&1 &
         SEND_PID=$!
-
-        # Connect to REMOTE IRC, join channel, listen for the test message
-        RECV_OUTPUT=$(mktemp)
-        {
-            echo "NICK recvbot$$"
-            echo "USER recvbot$$ 0 * :Mesh Recv Bot"
-            sleep 2
-            echo "JOIN #nightwatch"
-            sleep 5
-            echo "QUIT :recv done"
-        } | nc -w 10 "$REMOTE_IP" "$IRC_PORT" > "$RECV_OUTPUT" 2>&1 &
-        RECV_PID=$!
 
         # Wait for both to finish
         wait $SEND_PID 2>/dev/null || true
