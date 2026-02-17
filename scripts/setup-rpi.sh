@@ -416,11 +416,35 @@ echo "[+] Docker images built"
 
 echo ""
 echo "[9/10] Configuring GL.iNet router..."
-read -rp "  Configure the GL.iNet router now? [Y/n] " router_confirm
-if [[ ! "$router_confirm" =~ ^[Nn]$ ]]; then
-    "$INSTALL_DIR/scripts/setup-router.sh" || echo -e "${YELLOW}[!] Router setup failed — you can re-run later: sudo scripts/setup-router.sh${NC}"
+
+# Check if router is already configured by SSHing to the configured IP
+# and verifying the WiFi SSID matches what we want
+ROUTER_CONFIGURED_IP="${ROUTER_CONFIGURED_IP:-192.168.8.100}"
+ROUTER_PASSWORD_CHECK=$(grep '^ROUTER_PASSWORD=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)
+WIFI_SSID_CHECK=$(grep '^WIFI_SSID=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)
+ROUTER_ALREADY_CONFIGURED=false
+
+if [ -n "$ROUTER_PASSWORD_CHECK" ] && [ "$ROUTER_PASSWORD_CHECK" != "CHANGE_ME_BEFORE_DEPLOY" ] && command -v sshpass >/dev/null 2>&1; then
+    # Temporarily give eth0 an IP to reach the router
+    ip addr add 192.168.8.2/24 dev eth0 2>/dev/null || true
+    ip link set eth0 up 2>/dev/null || true
+    sleep 1
+    if ping -c 1 -W 2 "$ROUTER_CONFIGURED_IP" >/dev/null 2>&1; then
+        SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o LogLevel=ERROR"
+        CURRENT_SSID=$(sshpass -p "$ROUTER_PASSWORD_CHECK" ssh $SSH_OPTS root@"$ROUTER_CONFIGURED_IP" \
+            "uci get wireless.@wifi-iface[0].ssid 2>/dev/null" 2>/dev/null || echo "")
+        if [ "$CURRENT_SSID" = "$WIFI_SSID_CHECK" ]; then
+            ROUTER_ALREADY_CONFIGURED=true
+        fi
+    fi
+    ip addr del 192.168.8.2/24 dev eth0 2>/dev/null || true
+fi
+
+if [ "$ROUTER_ALREADY_CONFIGURED" = true ]; then
+    echo -e "  ${GREEN}[+] Router already configured (SSID: $CURRENT_SSID at $ROUTER_CONFIGURED_IP)${NC}"
+    echo "  Skipping. To reconfigure: sudo scripts/setup-router.sh"
 else
-    echo "[i] Skipping router setup. Run later: sudo scripts/setup-router.sh"
+    "$INSTALL_DIR/scripts/setup-router.sh" || echo -e "${YELLOW}[!] Router setup failed — you can re-run later: sudo scripts/setup-router.sh${NC}"
 fi
 
 # ---- Step 10: Verify ----
