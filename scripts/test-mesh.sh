@@ -58,8 +58,9 @@ source "$ENV_FILE"
 set +o allexport
 
 BAT_IFACE="${BAT_IFACE:-bat0}"
+BR_IFACE="${BR_IFACE:-br0}"
 MESH_IFACE="${MESH_IFACE:-wlan1}"
-AP_IFACE="${AP_IFACE:-wlan0}"
+AP_IFACE="${AP_IFACE:-eth0}"
 IRC_PORT="${IRC_PORT:-6667}"
 BRIDGE_PORT="${BRIDGE_PORT:-8080}"
 NGINX_PORT="${NGINX_PORT:-80}"
@@ -110,16 +111,22 @@ else
     fail "$BAT_IFACE interface not found"
 fi
 
-bat_ip=$(ip -4 addr show dev "$BAT_IFACE" 2>/dev/null | grep -oP 'inet \K[0-9.]+' || echo "")
-if [ -n "$bat_ip" ]; then
-    pass "$BAT_IFACE has IP: $bat_ip"
-    if [ "$bat_ip" = "$LOCAL_IP" ]; then
-        pass "$BAT_IFACE IP matches MESH_IP ($LOCAL_IP)"
+# Mesh IP lives on br0 (Linux bridge over bat0 + eth0)
+mesh_ip_iface="$BR_IFACE"
+if [ ! -d "/sys/class/net/$BR_IFACE" ]; then
+    # Fallback: maybe IP is still on bat0 (no bridge yet)
+    mesh_ip_iface="$BAT_IFACE"
+fi
+mesh_ip_actual=$(ip -4 addr show dev "$mesh_ip_iface" 2>/dev/null | grep -oP 'inet \K[0-9.]+' || echo "")
+if [ -n "$mesh_ip_actual" ]; then
+    pass "$mesh_ip_iface has IP: $mesh_ip_actual"
+    if [ "$mesh_ip_actual" = "$LOCAL_IP" ]; then
+        pass "$mesh_ip_iface IP matches MESH_IP ($LOCAL_IP)"
     else
-        fail "$BAT_IFACE IP ($bat_ip) does not match MESH_IP ($LOCAL_IP)"
+        fail "$mesh_ip_iface IP ($mesh_ip_actual) does not match MESH_IP ($LOCAL_IP)"
     fi
 else
-    fail "$BAT_IFACE has no IPv4 address"
+    fail "No mesh IP found on $BR_IFACE or $BAT_IFACE"
 fi
 
 # Mesh interface in 802.11s mode
@@ -463,26 +470,34 @@ fi
 # 8. Access Point
 # ============================================================
 
-section "8. Client Bridge ($AP_IFACE)"
+section "8. Client Bridge ($BR_IFACE)"
 
-# Check if AP_IFACE (eth0 = GL.iNet router) is bridged into batman-adv
-bat_ifaces_now=$(batctl meshif "$BAT_IFACE" if 2>/dev/null || batctl if 2>/dev/null || echo "")
-if echo "$bat_ifaces_now" | grep -q "$AP_IFACE"; then
-    pass "$AP_IFACE is bridged into batman-adv"
-else
-    fail "$AP_IFACE not bridged into batman-adv (router clients won't reach mesh)"
-fi
+# Check if Linux bridge br0 exists and has the right ports
+if [ -d "/sys/class/net/$BR_IFACE" ]; then
+    pass "$BR_IFACE bridge exists"
 
-# Check if the interface is up
-if [ -d "/sys/class/net/$AP_IFACE" ]; then
-    ap_state=$(cat "/sys/class/net/$AP_IFACE/operstate" 2>/dev/null || echo "unknown")
-    if [ "$ap_state" = "up" ]; then
-        pass "$AP_IFACE is up"
+    br_state=$(cat "/sys/class/net/$BR_IFACE/operstate" 2>/dev/null || echo "unknown")
+    if [ "$br_state" = "up" ]; then
+        pass "$BR_IFACE is up"
     else
-        warn "$AP_IFACE state: $ap_state"
+        warn "$BR_IFACE state: $br_state"
+    fi
+
+    # Check bat0 is a bridge port
+    if [ -d "/sys/class/net/$BR_IFACE/brif/$BAT_IFACE" ]; then
+        pass "$BAT_IFACE is a port of $BR_IFACE"
+    else
+        fail "$BAT_IFACE not in $BR_IFACE (mesh traffic won't reach bridge)"
+    fi
+
+    # Check eth0 is a bridge port
+    if [ -d "/sys/class/net/$BR_IFACE/brif/$AP_IFACE" ]; then
+        pass "$AP_IFACE is a port of $BR_IFACE"
+    else
+        fail "$AP_IFACE not in $BR_IFACE (router clients won't reach mesh)"
     fi
 else
-    fail "$AP_IFACE interface not found"
+    fail "$BR_IFACE bridge not found (eth0 and bat0 are not bridged)"
 fi
 
 # ============================================================

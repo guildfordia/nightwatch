@@ -130,11 +130,11 @@ apt-get update -qq
 apt-get install -y -qq \
     docker.io \
     batctl \
+    bridge-utils \
     iproute2 \
     iw \
     wireless-tools \
     net-tools \
-    hostapd \
     wpasupplicant \
     iptables \
     curl \
@@ -211,6 +211,18 @@ NETEOF
         echo "[+] dhcpcd configured: static DNS 8.8.8.8 + 1.1.1.1"
     else
         echo "[+] dhcpcd DNS already configured for Nightwatch"
+    fi
+    # Tell dhcpcd to ignore eth0 and bat0 — they are bridge ports managed by mesh-fix.sh
+    # Without this, dhcpcd tries to get a DHCP lease on eth0, conflicting with br0
+    if ! grep -q "denyinterfaces eth0" "$DHCPCD_CONF"; then
+        cat >> "$DHCPCD_CONF" << 'DENYEOF'
+
+# Nightwatch bridge — dhcpcd must not manage these (br0 bridge handles them)
+denyinterfaces eth0 bat0 br0
+DENYEOF
+        echo "[+] dhcpcd: eth0/bat0/br0 excluded (bridge ports)"
+    else
+        echo "[+] dhcpcd already excludes eth0"
     fi
 elif command -v nmcli >/dev/null 2>&1; then
     # NetworkManager: add static DNS to eth0 connection
@@ -396,7 +408,7 @@ echo ""
 echo "  Node:     #$NODE_NUM ($NEW_HOSTNAME)"
 echo "  Mesh IP:  $MESH_IP"
 echo "  Gateway:  $IS_GATEWAY"
-echo "  Client bridge: eth0 (GL.iNet router)"
+echo "  Bridge:   br0 (bat0 + eth0 → GL.iNet router)"
 echo ""
 echo -e "  ${BOLD}Next steps:${NC}"
 echo "    sudo reboot"
