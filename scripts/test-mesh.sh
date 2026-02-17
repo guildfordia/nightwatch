@@ -463,29 +463,26 @@ fi
 # 8. Access Point
 # ============================================================
 
-section "8. Access Point"
+section "8. Client Bridge ($AP_IFACE)"
 
-if pgrep -x hostapd >/dev/null 2>&1; then
-    pass "hostapd is running"
+# Check if AP_IFACE (eth0 = GL.iNet router) is bridged into batman-adv
+bat_ifaces_now=$(batctl meshif "$BAT_IFACE" if 2>/dev/null || batctl if 2>/dev/null || echo "")
+if echo "$bat_ifaces_now" | grep -q "$AP_IFACE"; then
+    pass "$AP_IFACE is bridged into batman-adv"
+else
+    fail "$AP_IFACE not bridged into batman-adv (router clients won't reach mesh)"
+fi
 
-    ap_ssid="${AP_SSID:-Nightwatch}"
-    # Check if AP interface is in batman
-    if echo "$bat_ifaces" | grep -q "$AP_IFACE"; then
-        pass "$AP_IFACE is bridged into batman-adv"
+# Check if the interface is up
+if [ -d "/sys/class/net/$AP_IFACE" ]; then
+    ap_state=$(cat "/sys/class/net/$AP_IFACE/operstate" 2>/dev/null || echo "unknown")
+    if [ "$ap_state" = "up" ]; then
+        pass "$AP_IFACE is up"
     else
-        fail "$AP_IFACE not bridged into batman-adv (clients won't reach mesh)"
-    fi
-
-    # Count connected clients
-    client_count=$(iw dev "$AP_IFACE" station dump 2>/dev/null | grep -c "^Station" || true)
-    client_count=$((client_count + 0))
-    if [ "$client_count" -gt 0 ]; then
-        pass "$client_count client(s) connected to AP '$ap_ssid'"
-    else
-        skip "No clients currently connected to AP '$ap_ssid'"
+        warn "$AP_IFACE state: $ap_state"
     fi
 else
-    fail "hostapd is not running (AP is down)"
+    fail "$AP_IFACE interface not found"
 fi
 
 # ============================================================
