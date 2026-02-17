@@ -119,7 +119,19 @@ setup_client_bridge() {
     # For ethernet (eth0 = GL.iNet router), we use a Linux bridge that
     # connects bat0 and eth0 at layer 2. The bridge gets the mesh IP.
 
-    # Stop dhcpcd from managing eth0 (it would fight over the IP)
+    # Ensure dhcpcd won't manage bridge ports (self-healing: adds on first run)
+    DHCPCD_CONF="/etc/dhcpcd.conf"
+    if [ -f "$DHCPCD_CONF" ] && ! grep -q "denyinterfaces.*eth0" "$DHCPCD_CONF"; then
+        echo "[+] Adding denyinterfaces to $DHCPCD_CONF..."
+        cat >> "$DHCPCD_CONF" << 'DENYEOF'
+
+# Nightwatch bridge — dhcpcd must not manage these (br0 bridge handles them)
+denyinterfaces eth0 bat0 br0
+DENYEOF
+        systemctl restart dhcpcd 2>/dev/null || true
+    fi
+
+    # Release any existing DHCP lease on eth0
     if command -v dhcpcd >/dev/null 2>&1; then
         dhcpcd --release "$AP_IFACE" 2>/dev/null || true
     fi
