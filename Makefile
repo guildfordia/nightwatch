@@ -108,6 +108,11 @@ run:
 # -------- stop --------
 stop:
 	@echo "[+] Stopping Nightwatch..."
+	@# Stop containers one at a time (avoids memory spike on Pi 3 with 1GB RAM)
+	@$(DC) --env-file $(ENV_FILE) stop -t 15 nginx 2>/dev/null || true
+	@$(DC) --env-file $(ENV_FILE) stop -t 15 irc-bridge 2>/dev/null || true
+	@$(DC) --env-file $(ENV_FILE) stop -t 15 ngircd 2>/dev/null || true
+	@$(DC) --env-file $(ENV_FILE) rm -f nginx irc-bridge ngircd 2>/dev/null || true
 	@$(DC) --env-file $(ENV_FILE) down 2>/dev/null || true
 	@sudo systemctl stop nightwatch-discovery.service 2>/dev/null || true
 	@sudo systemctl stop nightwatch-mesh.service 2>/dev/null || true
@@ -126,18 +131,31 @@ test:
 
 # -------- update --------
 # Pull latest code, rebuild Docker images, restart
+# NOTE: git pull runs BEFORE stopping anything — make stop kills wpa_supplicant
+# which takes down the internet connection needed for git pull.
 update:
 	@echo "====================================="
 	@echo "  Nightwatch — Update"
 	@echo "====================================="
 	@echo ""
-	@echo "[1/4] Stopping services..."
-	@$(MAKE) stop 2>/dev/null || true
+	@echo "[1/4] Pulling latest code..."
+	@if git ls-remote --exit-code origin HEAD >/dev/null 2>&1; then \
+		git pull; \
+	else \
+		echo "  [!] Remote unreachable (offline/mesh-only) — skipping git pull"; \
+		echo "  [i] Using code already on disk"; \
+	fi
 	@echo ""
-	@echo "[2/4] Pulling latest code..."
-	@git pull
+	@echo "[2/4] Stopping containers..."
+	@$(DC) --env-file $(ENV_FILE) stop -t 15 nginx 2>/dev/null || true
+	@$(DC) --env-file $(ENV_FILE) stop -t 15 irc-bridge 2>/dev/null || true
+	@$(DC) --env-file $(ENV_FILE) stop -t 15 ngircd 2>/dev/null || true
+	@$(DC) --env-file $(ENV_FILE) rm -f nginx irc-bridge ngircd 2>/dev/null || true
+	@$(DC) --env-file $(ENV_FILE) down 2>/dev/null || true
 	@echo ""
 	@echo "[3/4] Rebuilding Docker images..."
+	@# Free memory before build — Go compiler is heavy on Pi 3 (1GB RAM)
+	@sync && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null || true
 	@$(DC) --env-file $(ENV_FILE) build
 	@echo ""
 	@echo "[4/4] Restarting..."

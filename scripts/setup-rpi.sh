@@ -192,43 +192,31 @@ echo "[4b/9] Configuring network routing..."
 
 DHCPCD_CONF="/etc/dhcpcd.conf"
 if [ -f "$DHCPCD_CONF" ]; then
-    # Only add if not already configured
-    if ! grep -q "# Nightwatch network config" "$DHCPCD_CONF"; then
+    # Remove old broken Nightwatch config if present (had nogateway on eth0)
+    if grep -q "# Nightwatch network config" "$DHCPCD_CONF"; then
+        sed -i '/# Nightwatch network config/,/^$/d' "$DHCPCD_CONF"
+        # Also clean up any leftover directives
+        sed -i '/# eth0 is the GL.iNet/d; /# wlan0 has internet/d; /# Fallback DNS when Tailscale/d' "$DHCPCD_CONF"
+        echo "[+] Removed old Nightwatch dhcpcd config"
+    fi
+    if ! grep -q "# Nightwatch DNS" "$DHCPCD_CONF"; then
         cat >> "$DHCPCD_CONF" << 'NETEOF'
 
-# Nightwatch network config
-# eth0 is the GL.iNet hotspot (no internet) — do not use as default route
-interface eth0
-nogateway
-
-# wlan0 has internet — prefer it for default route
-interface wlan0
-metric 50
-
-# Fallback DNS when Tailscale resolver cannot reach upstream
+# Nightwatch DNS — hardcode DNS so we don't depend on DHCP-provided nameservers
 static domain_name_servers=8.8.8.8 1.1.1.1
 NETEOF
-        echo "[+] dhcpcd configured: eth0=no gateway, wlan0=preferred, DNS fallback=8.8.8.8"
+        echo "[+] dhcpcd configured: static DNS 8.8.8.8 + 1.1.1.1"
     else
-        echo "[+] dhcpcd already configured for Nightwatch"
+        echo "[+] dhcpcd DNS already configured for Nightwatch"
     fi
 elif command -v nmcli >/dev/null 2>&1; then
-    # NetworkManager: set eth0 to never-default and lower wlan0 route metric
+    # NetworkManager: add static DNS to eth0 connection
     ETH_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep 'eth0' | head -1 | cut -d: -f1)
-    WLAN_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep 'wlan0' | head -1 | cut -d: -f1)
     if [ -n "$ETH_CON" ]; then
-        nmcli con mod "$ETH_CON" ipv4.never-default yes 2>/dev/null || true
-        echo "[+] NetworkManager: eth0 ($ETH_CON) set to never-default"
-    fi
-    if [ -n "$WLAN_CON" ]; then
-        nmcli con mod "$WLAN_CON" ipv4.route-metric 50 2>/dev/null || true
-        echo "[+] NetworkManager: wlan0 ($WLAN_CON) route metric set to 50"
-    fi
-    # Add DNS servers directly to wlan0 connection (survives Tailscale overriding resolv.conf)
-    if [ -n "$WLAN_CON" ]; then
-        nmcli con mod "$WLAN_CON" ipv4.dns "8.8.8.8 1.1.1.1" 2>/dev/null || true
-        nmcli con mod "$WLAN_CON" ipv4.ignore-auto-dns no 2>/dev/null || true
-        echo "[+] NetworkManager: DNS 8.8.8.8 added to wlan0"
+        # Undo old never-default if set
+        nmcli con mod "$ETH_CON" ipv4.never-default no 2>/dev/null || true
+        nmcli con mod "$ETH_CON" ipv4.dns "8.8.8.8 1.1.1.1" 2>/dev/null || true
+        echo "[+] NetworkManager: eth0 ($ETH_CON) DNS set to 8.8.8.8 + 1.1.1.1"
     fi
     # Also add fallback via systemd-resolved
     mkdir -p /etc/systemd/resolved.conf.d
@@ -237,26 +225,31 @@ elif command -v nmcli >/dev/null 2>&1; then
 FallbackDNS=8.8.8.8 1.1.1.1
 DNSEOF
     systemctl restart systemd-resolved 2>/dev/null || true
-    # Force resolv.conf to include real DNS alongside Tailscale
-    if grep -q "100.100.100.100" /etc/resolv.conf 2>/dev/null; then
-        if ! grep -q "8.8.8.8" /etc/resolv.conf 2>/dev/null; then
-            echo "nameserver 8.8.8.8" >> /etc/resolv.conf
-        fi
-    fi
     echo "[+] Fallback DNS configured (8.8.8.8, 1.1.1.1)"
 else
     echo "[!] Neither dhcpcd nor NetworkManager found — skipping network config"
 fi
 
 # Apply immediately (don't wait for reboot)
-ip route replace default via "$(ip route show dev wlan0 | grep default | awk '{print $3}')" dev wlan0 metric 50 2>/dev/null || true
-# Ensure DNS works right now (Tailscale puts 100.100.100.100 which can't resolve when upstream is down)
-if grep -q "100.100.100.100" /etc/resolv.conf 2>/dev/null; then
-    if ! grep -q "8.8.8.8" /etc/resolv.conf 2>/dev/null; then
-        echo "nameserver 8.8.8.8" >> /etc/resolv.conf
-        echo "[+] Added 8.8.8.8 to /etc/resolv.conf (Tailscale workaround)"
-    fi
+
+# Tell Tailscale to stop overwriting /etc/resolv.conf
+if command -v tailscale >/dev/null 2>&1; then
+    tailscale set --accept-dns=false 2>/dev/null || true
+    echo "[+] Tailscale DNS disabled (--accept-dns=false)"
 fi
+
+# Make /etc/resolv.conf immutable so nothing can overwrite it
+# (Tailscale, dhcpcd, NetworkManager all fight over this file)
+chattr -i /etc/resolv.conf 2>/dev/null || true
+cat > /etc/resolv.conf << 'DNSEOF'
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+DNSEOF
+chattr +i /etc/resolv.conf
+echo "[+] /etc/resolv.conf locked (immutable) with 8.8.8.8 + 1.1.1.1"
+
+# Restart dhcpcd to pick up new config (removes old nogateway on eth0)
+systemctl restart dhcpcd 2>/dev/null || true
 
 # ---- Step 5: Register project path ----
 
@@ -296,7 +289,6 @@ echo ""
 echo "[7/9] Installing systemd services..."
 
 # Generate service files with actual project path
-cp "$INSTALL_DIR/scripts/nightwatch-dns.service" /etc/systemd/system/nightwatch-dns.service
 sed "s|/opt/nightwatch|$INSTALL_DIR|g" "$INSTALL_DIR/scripts/nightwatch-nodeconfig.service" > /etc/systemd/system/nightwatch-nodeconfig.service
 sed "s|/opt/nightwatch|$INSTALL_DIR|g" "$INSTALL_DIR/scripts/nightwatch-mesh.service" > /etc/systemd/system/nightwatch-mesh.service
 sed "s|/opt/nightwatch|$INSTALL_DIR|g" "$INSTALL_DIR/scripts/nightwatch-discovery.service" > /etc/systemd/system/nightwatch-discovery.service
@@ -314,14 +306,15 @@ sed -e "s|/opt/nightwatch|$INSTALL_DIR|g" \
     "$INSTALL_DIR/scripts/nightwatch-docker.service" > /etc/systemd/system/nightwatch-docker.service
 
 systemctl daemon-reload
-systemctl enable nightwatch-dns.service
+# Remove old DNS workaround service if present (Tailscale --accept-dns=false is the proper fix)
+systemctl disable nightwatch-dns.service 2>/dev/null || true
+rm -f /etc/systemd/system/nightwatch-dns.service
 systemctl enable nightwatch-nodeconfig.service
 systemctl enable nightwatch-mesh.service
 systemctl enable nightwatch-discovery.service
 systemctl enable nightwatch-docker.service
 
 echo "[+] Services installed and enabled:"
-echo "    • nightwatch-dns (ensures 8.8.8.8 in resolv.conf)"
 echo "    • nightwatch-nodeconfig (generates config from hostname)"
 echo "    • nightwatch-mesh (802.11s + batman-adv + AP)"
 echo "    • nightwatch-discovery (UDP broadcast node discovery)"

@@ -316,7 +316,6 @@ func handleWebSocket(hub *Hub, limiter *RateLimiter, w http.ResponseWriter, r *h
 
 	ircConn.Write([]byte(fmt.Sprintf("NICK %s\r\n", nick)))
 	ircConn.Write([]byte(fmt.Sprintf("USER %s 0 * :Web User\r\n", nick)))
-	ircConn.Write([]byte(fmt.Sprintf("JOIN %s\r\n", ircChannel)))
 
 	client := &Client{
 		ws:   ws,

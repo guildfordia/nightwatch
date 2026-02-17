@@ -474,22 +474,21 @@
       handleMessage(data) {
         const lines = data.split('\r\n').filter(line => line.trim());
         lines.forEach(line => {
-          // RPL_WELCOME
-          if (line.includes(' 001 ') || line.includes('Welcome to the')) {
+          // RPL_WELCOME — extract real nick from ":server 001 <nick> :Welcome..."
+          if (line.includes(' 001 ')) {
+            const parts = line.split(' ');
+            const idx001 = parts.indexOf('001');
+            if (idx001 !== -1 && parts[idx001 + 1]) {
+              this.nickname = parts[idx001 + 1];
+              this.updatePrompt();
+            }
             this.registered = true;
             this.inputField.disabled = false;
             this.updateStatus('active');
-            this.addSystemMessage('Registration successful');
-            // Auto join and request names list
+            this.addSystemMessage(`Connected as ${this.nickname}`);
+            // Join channel and request user list — NAMES will populate users
             this.send(`JOIN ${this.channel}`);
             this.send(`NAMES ${this.channel}`);
-
-            if (!this.users.includes(this.nickname)) {
-              this.users.push(this.nickname);
-              this.userCount = this.users.length;
-              this.updateUserList();
-            }
-            this.addJoinPart(`${this.nickname} has joined ${this.channel}`);
           }
           // Nickname in use
           else if (line.includes(' 433 ')) {
@@ -500,8 +499,10 @@
           }
           // Names list
           else if (line.includes(' 353 ')) {
-            const names = line.split(':').pop().trim().split(' ');
-            this.users = names.filter(name => name.trim() && !name.includes('.irc') && !name.includes('nightwatch'));
+            const names = line.split(':').pop().trim().split(' ')
+              .map(name => name.replace(/^[@+~&%]/, '')) // strip IRC prefix chars
+              .filter(name => name.trim() && !name.includes('.irc') && !name.includes('nightwatch'));
+            this.users = names;
             this.userCount = this.users.length;
             this.updateStatus();
             this.updateUserList();
@@ -543,11 +544,12 @@
             const match = line.match(/:([^!]+)![^ ]+ JOIN/);
             if (match) {
               const nick = match[1];
-              if (nick !== this.nickname && !this.users.includes(nick)) {
+              if (!this.users.includes(nick)) {
                 this.users.push(nick);
                 this.userCount = this.users.length;
                 this.updateUserList();
               }
+              // Don't show "joined" for ourselves — "Connected as X" is enough
               if (nick !== this.nickname) {
                 this.addJoinPart(`${nick} has joined ${this.channel}`);
               }
@@ -672,7 +674,6 @@
         this.userList.appendChild(header);
 
         const displayUsers = new Set();
-        displayUsers.add(this.nickname);
 
         this.users.forEach(ircUser => {
           // Filter out IRC server names, keep all real users (including webuser*)

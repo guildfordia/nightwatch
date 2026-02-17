@@ -1,6 +1,9 @@
 FROM golang:1.21-bullseye AS builder
 
 ENV CGO_ENABLED=0
+# Limit Go compiler memory usage for Pi 3 (1GB RAM)
+ENV GOGC=50
+ENV GOMEMLIMIT=400MiB
 
 WORKDIR /app
 
@@ -8,9 +11,9 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source and build
+# Copy source and build (single compilation unit, -p 1 = one package at a time)
 COPY main.go ./
-RUN go build -ldflags="-s -w" -o main .
+RUN go build -p 1 -ldflags="-s -w" -o main .
 
 # Use alpine for minimal image size (~5MB vs ~80MB with debian)
 FROM alpine:3.19

@@ -247,14 +247,17 @@ case "$1" in
         # Bring down bat0
         ip link set "$BAT_IFACE" down 2>/dev/null || true
 
-        # Leave mesh
-        killall wpa_supplicant 2>/dev/null || true
+        # Leave mesh (only kill mesh wpa_supplicant, not the one managing internet on wlan0)
+        pkill -f "nightwatch-mesh-wpa" 2>/dev/null || true
         iw dev "$MESH_IFACE" mesh leave 2>/dev/null || true
         ip addr flush dev "$MESH_IFACE" 2>/dev/null || true
         ip link set "$MESH_IFACE" down 2>/dev/null || true
 
-        # Clean up AP
-        ip link set "$AP_IFACE" down 2>/dev/null || true
+        # Clean up AP — only bring down if hostapd was running on it
+        # (don't kill wlan0 if it's providing internet via wpa_supplicant)
+        if pgrep -x hostapd > /dev/null 2>&1; then
+            ip link set "$AP_IFACE" down 2>/dev/null || true
+        fi
 
         # Remove gateway NAT rules
         iptables -t nat -F POSTROUTING 2>/dev/null || true
