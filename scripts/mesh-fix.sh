@@ -160,6 +160,28 @@ DENYEOF
     echo "[+] Ports: $BAT_IFACE (mesh) + $AP_IFACE (router)"
 }
 
+start_dnsmasq() {
+    DNSMASQ_CONF="$PROJECT_DIR/dnsmasq/dnsmasq.conf"
+    DNSMASQ_PID="/var/run/dnsmasq-nightwatch.pid"
+
+    # Kill any existing Nightwatch dnsmasq instance
+    if [ -f "$DNSMASQ_PID" ]; then
+        kill "$(cat "$DNSMASQ_PID")" 2>/dev/null || true
+        rm -f "$DNSMASQ_PID"
+    fi
+
+    # Also stop the system dnsmasq to avoid port conflicts
+    systemctl stop dnsmasq 2>/dev/null || true
+
+    if [ -f "$DNSMASQ_CONF" ]; then
+        echo "[+] Starting dnsmasq (DHCP + captive portal DNS on $BR_IFACE)..."
+        dnsmasq --conf-file="$DNSMASQ_CONF"
+        echo "[+] dnsmasq running — WiFi clients will get IPs and captive portal"
+    else
+        echo "[!] dnsmasq config not found at $DNSMASQ_CONF — run 'make install' to generate"
+    fi
+}
+
 setup_gateway() {
     if [ "$MESH_GATEWAY" = "true" ]; then
         echo "[+] Configuring this node as a mesh gateway..."
@@ -196,6 +218,7 @@ case "$1" in
         setup_mesh_interface
         setup_batman
         setup_client_bridge || echo "[!] Client bridge setup failed — mesh still operational"
+        start_dnsmasq
         setup_gateway
 
         echo ""
@@ -208,6 +231,13 @@ case "$1" in
 
     stop)
         echo "[+] Stopping Nightwatch mesh network..."
+
+        # Stop dnsmasq
+        DNSMASQ_PID="/var/run/dnsmasq-nightwatch.pid"
+        if [ -f "$DNSMASQ_PID" ]; then
+            kill "$(cat "$DNSMASQ_PID")" 2>/dev/null || true
+            rm -f "$DNSMASQ_PID"
+        fi
 
         # Tear down Linux bridge
         ip link set "$BR_IFACE" down 2>/dev/null || true
@@ -257,6 +287,20 @@ case "$1" in
             echo "  Ports: $(ls /sys/class/net/"$BR_IFACE"/brif/ 2>/dev/null | tr '\n' ' ' || echo 'none')"
         else
             echo "  [!] $BR_IFACE not found"
+        fi
+
+        echo ""
+        echo "== dnsmasq (DHCP + captive portal) =="
+        DNSMASQ_PID="/var/run/dnsmasq-nightwatch.pid"
+        if [ -f "$DNSMASQ_PID" ] && kill -0 "$(cat "$DNSMASQ_PID")" 2>/dev/null; then
+            echo "  Status: running (PID $(cat "$DNSMASQ_PID"))"
+            LEASES="/var/lib/misc/dnsmasq.leases"
+            if [ -f "$LEASES" ]; then
+                lease_count=$(wc -l < "$LEASES")
+                echo "  Active leases: $lease_count"
+            fi
+        else
+            echo "  [!] dnsmasq not running"
         fi
 
         echo ""
