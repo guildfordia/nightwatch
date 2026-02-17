@@ -58,6 +58,8 @@ run:
 	@echo "====================================="
 	@echo "  Nightwatch — Starting"
 	@echo "====================================="
+	@# Ensure scripts are executable
+	@chmod +x scripts/*.sh 2>/dev/null || true
 	@# Ensure mesh service is installed
 	@if [ ! -f /etc/systemd/system/nightwatch-mesh.service ]; then \
 		echo "[!] Not installed yet. Run 'make install' first."; \
@@ -145,6 +147,8 @@ update:
 		echo "  [!] Remote unreachable (offline/mesh-only) — skipping git pull"; \
 		echo "  [i] Using code already on disk"; \
 	fi
+	@# Ensure scripts are executable (git can lose +x on some setups)
+	@chmod +x scripts/*.sh 2>/dev/null || true
 	@echo ""
 	@echo "[2/4] Stopping containers..."
 	@$(DC) --env-file $(ENV_FILE) stop -t 15 nginx 2>/dev/null || true
