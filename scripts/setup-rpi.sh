@@ -170,7 +170,7 @@ systemctl start docker
 usermod -aG docker "$REAL_USER"
 echo "[+] Docker ready ($REAL_USER added to docker group)"
 
-# ---- Step 4: batman-adv + hostapd ----
+# ---- Step 4: batman-adv ----
 
 echo ""
 echo "[4/9] Setting up batman-adv..."
@@ -180,12 +180,15 @@ if ! grep -q "^batman-adv" /etc/modules 2>/dev/null; then
 fi
 echo "[+] batman-adv version: $(cat /sys/module/batman_adv/version 2>/dev/null || echo 'loads on boot')"
 
-systemctl unmask hostapd 2>/dev/null || true
+# Disable hostapd — AP is handled by the external GL.iNet router, not the Pi
 systemctl disable hostapd 2>/dev/null || true
 systemctl stop hostapd 2>/dev/null || true
-echo "[+] System hostapd disabled (we manage it ourselves)"
 
-# ---- Step 4b: Network routing (eth0 = hotspot, wlan0 = internet) ----
+# ---- Step 4b: Network routing ----
+# Architecture:
+#   wlan0 = internet + Tailscale (WiFi client, never touch)
+#   wlan1 = 802.11s mesh (USB dongle, batman-adv)
+#   eth0  = GL.iNet router (external AP for clients, bridged into batman-adv)
 
 echo ""
 echo "[4b/9] Configuring network routing..."
@@ -393,7 +396,7 @@ echo ""
 echo "  Node:     #$NODE_NUM ($NEW_HOSTNAME)"
 echo "  Mesh IP:  $MESH_IP"
 echo "  Gateway:  $IS_GATEWAY"
-echo "  AP SSID:  $(grep ^AP_SSID "$ENV_FILE" | cut -d= -f2)"
+echo "  Client bridge: eth0 (GL.iNet router)"
 echo ""
 echo -e "  ${BOLD}Next steps:${NC}"
 echo "    sudo reboot"

@@ -120,64 +120,18 @@ setup_batman() {
     echo "[+] batman-adv $BAT_IFACE is up with IP ${MESH_IP%/*}"
 }
 
-setup_ap() {
-    echo "[+] Configuring access point on $AP_IFACE..."
+setup_client_bridge() {
+    echo "[+] Bridging $AP_IFACE into batman-adv (client access via external router)..."
 
-    # Stop any existing hostapd
-    killall hostapd 2>/dev/null || true
+    # Ensure the interface is up
+    ip link set "$AP_IFACE" up 2>/dev/null || true
     sleep 1
 
-    # Generate hostapd config
-    local HOSTAPD_CONF="/tmp/nightwatch-hostapd.conf"
-    cat > "$HOSTAPD_CONF" << APEOF
-interface=$AP_IFACE
-driver=nl80211
-ssid=$AP_SSID
-hw_mode=g
-channel=$AP_CHANNEL
-wmm_enabled=0
-macaddr_acl=0
-auth_algs=1
-ignore_broadcast_ssid=0
-APEOF
+    # Remove any IP address from AP_IFACE — batman interfaces must not have IPs
+    # (the router handles DHCP/IP, bat0 has the mesh IP)
+    ip addr flush dev "$AP_IFACE" 2>/dev/null || true
 
-    if [ -n "$AP_PASSWORD" ] && [ ${#AP_PASSWORD} -ge 8 ]; then
-        cat >> "$HOSTAPD_CONF" << APEOF
-wpa=2
-wpa_passphrase=$AP_PASSWORD
-wpa_key_mgmt=WPA-PSK
-wpa_pairwise=TKIP
-rsn_pairwise=CCMP
-APEOF
-        echo "[+] AP '$AP_SSID' configured with WPA2 password"
-    else
-        echo "[+] AP '$AP_SSID' configured as open network (no password)"
-    fi
-
-    # Start hostapd (with safety checks)
-    if ! command -v hostapd >/dev/null 2>&1; then
-        echo "[-] hostapd not installed! Install with: sudo apt-get install -y hostapd"
-        echo "[-] AP will not be available, but mesh still works"
-        return 1
-    fi
-
-    # Bring up AP interface
-    ip link set "$AP_IFACE" down 2>/dev/null || true
-    sleep 1
-    ip link set "$AP_IFACE" up
-    sleep 1
-
-    # Start hostapd first — it sets the interface to AP mode
-    timeout 10 hostapd -B "$HOSTAPD_CONF"
-    local hostapd_rc=$?
-    if [ $hostapd_rc -ne 0 ]; then
-        echo "[-] hostapd failed to start (exit code $hostapd_rc)"
-        echo "[-] AP will not be available, but mesh still works"
-        return 1
-    fi
-    sleep 2
-
-    # Now bridge AP interface into batman-adv (must be after hostapd starts)
+    # Bridge into batman-adv so clients on the router can reach the mesh
     local bridged=false
     for attempt in 1 2 3; do
         if batctl meshif "$BAT_IFACE" if add "$AP_IFACE" 2>/dev/null || \
@@ -190,12 +144,11 @@ APEOF
     done
 
     if $bridged; then
-        echo "[+] $AP_IFACE bridged into $BAT_IFACE"
+        echo "[+] $AP_IFACE bridged into $BAT_IFACE — router clients can reach mesh"
     else
-        echo "[-] Failed to bridge $AP_IFACE into $BAT_IFACE — AP clients won't reach mesh"
+        echo "[-] Failed to bridge $AP_IFACE into $BAT_IFACE"
+        return 1
     fi
-
-    echo "[+] Access point '$AP_SSID' is broadcasting"
 }
 
 setup_gateway() {
@@ -233,22 +186,19 @@ case "$1" in
         load_batman_module
         setup_mesh_interface
         setup_batman
-        setup_ap || echo "[!] AP setup failed — mesh still operational without WiFi hotspot"
+        setup_client_bridge || echo "[!] Client bridge setup failed — mesh still operational"
         setup_gateway
 
         echo ""
         echo "====================================="
         echo "  Mesh network is UP"
         echo "  Mesh IP: ${MESH_IP%/*}"
-        echo "  AP SSID: $AP_SSID"
+        echo "  Client bridge: $AP_IFACE"
         echo "====================================="
         ;;
 
     stop)
         echo "[+] Stopping Nightwatch mesh network..."
-
-        # Stop hostapd
-        killall hostapd 2>/dev/null || true
 
         # Remove interfaces from batman
         batctl meshif "$BAT_IFACE" if del "$AP_IFACE" 2>/dev/null || \
@@ -259,17 +209,14 @@ case "$1" in
         # Bring down bat0
         ip link set "$BAT_IFACE" down 2>/dev/null || true
 
-        # Leave mesh (only kill mesh wpa_supplicant, not the one managing internet on wlan0)
+        # Leave mesh (only kill mesh wpa_supplicant, not internet wpa_supplicant)
         pkill -f "nightwatch-mesh-wpa" 2>/dev/null || true
         iw dev "$MESH_IFACE" mesh leave 2>/dev/null || true
         ip addr flush dev "$MESH_IFACE" 2>/dev/null || true
         ip link set "$MESH_IFACE" down 2>/dev/null || true
 
-        # Clean up AP — only bring down if hostapd was running on it
-        # (don't kill wlan0 if it's providing internet via wpa_supplicant)
-        if pgrep -x hostapd > /dev/null 2>&1; then
-            ip link set "$AP_IFACE" down 2>/dev/null || true
-        fi
+        # NOTE: wlan0 and eth0 are never touched here — wlan0 provides internet,
+        # eth0 connects to the external router (both must stay up)
 
         # Remove gateway NAT rules
         iptables -t nat -F POSTROUTING 2>/dev/null || true
@@ -317,14 +264,11 @@ case "$1" in
         batctl meshif "$BAT_IFACE" gwl 2>/dev/null || batctl gwl 2>/dev/null || echo "  (none)"
 
         echo ""
-        echo "== Access Point ($AP_IFACE) =="
-        if pgrep -x hostapd > /dev/null 2>&1; then
-            echo "  Status: running"
-            echo "  SSID: $AP_SSID"
-            echo "  Clients:"
-            iw dev "$AP_IFACE" station dump 2>/dev/null | grep -E "Station|signal:" | sed 's/^/    /' || echo "    (none)"
+        echo "== Client Bridge ($AP_IFACE) =="
+        if batctl meshif "$BAT_IFACE" if 2>/dev/null | grep -q "$AP_IFACE"; then
+            echo "  Status: $AP_IFACE bridged into $BAT_IFACE"
         else
-            echo "  [!] hostapd not running"
+            echo "  [!] $AP_IFACE NOT bridged into $BAT_IFACE"
         fi
 
         echo ""
