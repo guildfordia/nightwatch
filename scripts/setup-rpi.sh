@@ -303,8 +303,10 @@ if grep -q "CHANGE_ME_BEFORE_DEPLOY" "$ENV_FILE"; then
     echo ""
     read -rsp "  IRC link password: " IRC_PWD
     echo ""
-    sed -i "s/^ROUTER_PASSWORD=.*/ROUTER_PASSWORD=$ROUTER_PWD/" "$ENV_FILE"
-    sed -i "s/^IRC_LINK_PASSWORD=.*/IRC_LINK_PASSWORD=$IRC_PWD/" "$ENV_FILE"
+    # Single-quote passwords in .env to prevent $, !, etc. from being
+    # interpreted by docker compose or bash
+    sed -i "s/^ROUTER_PASSWORD=.*/ROUTER_PASSWORD='$ROUTER_PWD'/" "$ENV_FILE"
+    sed -i "s/^IRC_LINK_PASSWORD=.*/IRC_LINK_PASSWORD='$IRC_PWD'/" "$ENV_FILE"
 fi
 
 echo "[+] .env generated (PI_NUMBER=$NODE_NUM, MESH_IP=$MESH_IP, GATEWAY=$IS_GATEWAY)"
