@@ -154,14 +154,6 @@ APEOF
         echo "[+] AP '$AP_SSID' configured as open network (no password)"
     fi
 
-    # Bring up AP interface
-    ip link set "$AP_IFACE" down 2>/dev/null || true
-    ip link set "$AP_IFACE" up
-
-    # Add AP interface to batman-adv (bridges client traffic into mesh)
-    batctl meshif "$BAT_IFACE" if add "$AP_IFACE" 2>/dev/null || \
-        batctl if add "$AP_IFACE" 2>/dev/null || true
-
     # Start hostapd (with safety checks)
     if ! command -v hostapd >/dev/null 2>&1; then
         echo "[-] hostapd not installed! Install with: sudo apt-get install -y hostapd"
@@ -169,11 +161,13 @@ APEOF
         return 1
     fi
 
-    # Kill any stale hostapd first
-    killall hostapd 2>/dev/null || true
+    # Bring up AP interface
+    ip link set "$AP_IFACE" down 2>/dev/null || true
+    sleep 1
+    ip link set "$AP_IFACE" up
     sleep 1
 
-    # Start with timeout to prevent freeze
+    # Start hostapd first — it sets the interface to AP mode
     timeout 10 hostapd -B "$HOSTAPD_CONF"
     local hostapd_rc=$?
     if [ $hostapd_rc -ne 0 ]; then
@@ -181,7 +175,25 @@ APEOF
         echo "[-] AP will not be available, but mesh still works"
         return 1
     fi
-    sleep 1
+    sleep 2
+
+    # Now bridge AP interface into batman-adv (must be after hostapd starts)
+    local bridged=false
+    for attempt in 1 2 3; do
+        if batctl meshif "$BAT_IFACE" if add "$AP_IFACE" 2>/dev/null || \
+           batctl if add "$AP_IFACE" 2>/dev/null; then
+            bridged=true
+            break
+        fi
+        echo "[!] batctl if add $AP_IFACE attempt $attempt failed, retrying..."
+        sleep 2
+    done
+
+    if $bridged; then
+        echo "[+] $AP_IFACE bridged into $BAT_IFACE"
+    else
+        echo "[-] Failed to bridge $AP_IFACE into $BAT_IFACE — AP clients won't reach mesh"
+    fi
 
     echo "[+] Access point '$AP_SSID' is broadcasting"
 }
