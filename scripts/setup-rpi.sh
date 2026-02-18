@@ -474,18 +474,20 @@ for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch
 done
 
 echo ""
-echo "[+] Verifying mesh support on wireless interfaces..."
-for iface in $(iw dev 2>/dev/null | grep Interface | awk '{print $2}'); do
-    phy=$(iw dev "$iface" info 2>/dev/null | grep wiphy | awk '{print $2}')
-    if [ -n "$phy" ]; then
-        mesh_support=$(iw phy "phy${phy}" info 2>/dev/null | grep "mesh point" || true)
-        if [ -n "$mesh_support" ]; then
-            echo -e "  ${GREEN}[OK]${NC} $iface (phy${phy}): mesh point supported"
-        else
-            echo -e "  ${YELLOW}[!]${NC}  $iface (phy${phy}): mesh point NOT supported"
-        fi
+MESH_IFACE_CHECK="${MESH_IFACE:-wlan1}"
+echo "[+] Verifying mesh support on $MESH_IFACE_CHECK..."
+phy=$(iw dev "$MESH_IFACE_CHECK" info 2>/dev/null | grep wiphy | awk '{print $2}')
+if [ -n "$phy" ]; then
+    mesh_support=$(iw phy "phy${phy}" info 2>/dev/null | grep "mesh point" || true)
+    if [ -n "$mesh_support" ]; then
+        echo -e "  ${GREEN}[OK]${NC} $MESH_IFACE_CHECK (phy${phy}): mesh point supported"
+    else
+        echo -e "  ${RED}[FAIL]${NC} $MESH_IFACE_CHECK (phy${phy}): mesh point NOT supported — wrong USB dongle?"
+        ((ERRORS++))
     fi
-done
+else
+    echo -e "  ${YELLOW}[!]${NC} $MESH_IFACE_CHECK not found — is the USB WiFi dongle plugged in?"
+fi
 
 # ---- Done ----
 
