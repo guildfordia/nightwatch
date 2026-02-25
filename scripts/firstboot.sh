@@ -2,23 +2,31 @@
 # Nightwatch — First boot autonomous setup
 # This script runs ONCE on the Pi's first boot, then disables itself.
 #
-# It expects the project path in /etc/nightwatch.conf (written by setup-rpi.sh)
-# and a valid .env to be present with this node's configuration.
+# It expects the project to be at /opt/nightwatch (or path in /etc/nightwatch.conf)
+# and a valid .env to be present with this node's configuration (passwords baked in).
 #
 # What it does:
 #   1. Wait for network (to apt install)
 #   2. Install all system dependencies
 #   3. Install Docker + Docker Compose
-#   4. Load batman-adv, disable system hostapd
-#   5. Setup distributed IRC config
-#   6. Install mesh systemd service
-#   7. Build Docker images
-#   8. Start mesh + services
-#   9. Disable this firstboot service
+#   4. Load batman-adv, disable system hostapd/dnsmasq
+#   5. Configure dhcpcd + DNS (resolv.conf locked)
+#   6. Install Tailscale (if TAILSCALE_AUTH_KEY set)
+#   7. Setup distributed IRC config
+#   8. Generate dnsmasq config
+#   9. Install all systemd services (nodeconfig, mesh, discovery, docker)
+#  10. Build Docker images
+#  11. Start everything
+#  12. Disable this firstboot service
+#
+# Designed for the "flash and forget" workflow:
+#   1. Flash Pi OS with Pi Imager (set hostname, SSH, WiFi, user)
+#   2. Run prepare-sdcard.sh to bake project + secrets onto the card
+#   3. Boot — this script does the rest, fully unattended
 
 set -euo pipefail
 
-# Read project path from /etc/nightwatch.conf (written by setup-rpi.sh)
+# Read project path from /etc/nightwatch.conf
 if [ -f /etc/nightwatch.conf ]; then
     # shellcheck source=/dev/null
     source /etc/nightwatch.conf
@@ -56,18 +64,23 @@ if [ ! -f ".env" ]; then
     exit 1
 fi
 
-# Load config for logging
+# Load config
 set -o allexport
 # shellcheck source=/dev/null
 source .env
 set +o allexport
 
+# Detect the real user (not root)
+REAL_USER=$(find /home/ -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | head -1)
+REAL_USER="${REAL_USER:-pi}"
+
 echo "[+] Node: Pi #${PI_NUMBER:-?} — IP: ${MESH_IP:-?}"
+echo "[+] User: $REAL_USER"
 echo ""
 
 # ---- Step 1: Wait for network ----
 
-echo "[1/9] Waiting for network..."
+echo "[1/12] Waiting for network..."
 TRIES=0
 MAX_TRIES=30
 while ! ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; do
@@ -85,29 +98,35 @@ echo "[+] Network is up"
 # ---- Step 2: Install system packages ----
 
 echo ""
-echo "[2/9] Installing system packages..."
+echo "[2/12] Installing system packages..."
 apt-get update -qq
 apt-get install -y -qq \
     docker.io \
     batctl \
+    bridge-utils \
+    dnsmasq \
     iproute2 \
     iw \
     wireless-tools \
     net-tools \
-    hostapd \
     wpasupplicant \
     iptables \
     curl \
     git \
     fping \
     netcat-openbsd \
-    socat
+    socat \
+    sshpass
 echo "[+] System packages installed"
+
+# Disable system dnsmasq — we start our own instance on br0 via mesh-fix.sh
+systemctl disable dnsmasq 2>/dev/null || true
+systemctl stop dnsmasq 2>/dev/null || true
 
 # ---- Step 3: Install Docker Compose ----
 
 echo ""
-echo "[3/9] Installing Docker Compose..."
+echo "[3/12] Installing Docker Compose..."
 if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
     ARCH=$(uname -m)
     case "$ARCH" in
@@ -130,31 +149,101 @@ systemctl enable docker
 systemctl start docker
 
 # Add default user to docker group
-DEFAULT_USER=$(find /home/ -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | head -1)
-if [ -n "$DEFAULT_USER" ]; then
-    usermod -aG docker "$DEFAULT_USER"
-    echo "[+] Added $DEFAULT_USER to docker group"
+if [ -n "$REAL_USER" ]; then
+    usermod -aG docker "$REAL_USER"
+    echo "[+] Added $REAL_USER to docker group"
 fi
 
-# ---- Step 4: Setup batman-adv & hostapd ----
+# ---- Step 4: Setup batman-adv ----
 
 echo ""
-echo "[4/9] Setting up batman-adv..."
+echo "[4/12] Setting up batman-adv..."
 modprobe batman-adv || true
 if ! grep -q "^batman-adv" /etc/modules 2>/dev/null; then
     echo "batman-adv" >> /etc/modules
 fi
-echo "[+] batman-adv version: $(cat /sys/module/batman_adv/version 2>/dev/null || echo 'loading on next boot')"
+echo "[+] batman-adv version: $(cat /sys/module/batman_adv/version 2>/dev/null || echo 'loads on boot')"
 
-echo "[+] Disabling system hostapd service..."
-systemctl unmask hostapd 2>/dev/null || true
+# Disable system services we don't need
 systemctl disable hostapd 2>/dev/null || true
 systemctl stop hostapd 2>/dev/null || true
 
-# ---- Step 5: Setup distributed IRC ----
+# ---- Step 5: Configure network (dhcpcd + DNS) ----
 
 echo ""
-echo "[5/9] Setting up distributed IRC..."
+echo "[5/12] Configuring network routing..."
+
+DHCPCD_CONF="/etc/dhcpcd.conf"
+if [ -f "$DHCPCD_CONF" ]; then
+    # Static DNS
+    if ! grep -q "# Nightwatch DNS" "$DHCPCD_CONF"; then
+        cat >> "$DHCPCD_CONF" << 'NETEOF'
+
+# Nightwatch DNS — hardcode DNS so we don't depend on DHCP-provided nameservers
+static domain_name_servers=8.8.8.8 1.1.1.1
+NETEOF
+        echo "[+] dhcpcd configured: static DNS 8.8.8.8 + 1.1.1.1"
+    fi
+    # Deny bridge port interfaces
+    if ! grep -q "denyinterfaces eth0" "$DHCPCD_CONF"; then
+        cat >> "$DHCPCD_CONF" << 'DENYEOF'
+
+# Nightwatch bridge — dhcpcd must not manage these (br0 bridge handles them)
+denyinterfaces eth0 bat0 br0
+DENYEOF
+        echo "[+] dhcpcd: eth0/bat0/br0 excluded (bridge ports)"
+    fi
+fi
+
+# Lock /etc/resolv.conf (prevents Tailscale, dhcpcd, etc. from overwriting)
+chattr -i /etc/resolv.conf 2>/dev/null || true
+cat > /etc/resolv.conf << 'DNSEOF'
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+DNSEOF
+chattr +i /etc/resolv.conf
+echo "[+] /etc/resolv.conf locked (immutable) with 8.8.8.8 + 1.1.1.1"
+
+# Restart dhcpcd to pick up config
+systemctl restart dhcpcd 2>/dev/null || true
+
+# ---- Step 6: Install Tailscale ----
+
+echo ""
+echo "[6/12] Tailscale setup..."
+TAILSCALE_AUTH_KEY="${TAILSCALE_AUTH_KEY:-}"
+
+if [ -n "$TAILSCALE_AUTH_KEY" ]; then
+    if ! command -v tailscale >/dev/null 2>&1; then
+        echo "[+] Installing Tailscale..."
+        curl -fsSL https://tailscale.com/install.sh | sh
+        echo "[+] Tailscale installed"
+    else
+        echo "[+] Tailscale already installed"
+    fi
+
+    systemctl enable tailscaled
+    systemctl start tailscaled
+
+    # Join the tailnet unattended with the auth key
+    echo "[+] Joining tailnet with auth key..."
+    tailscale up --auth-key="$TAILSCALE_AUTH_KEY" --accept-routes --hostname="$(hostname)"
+
+    # Disable Tailscale DNS (we manage DNS ourselves)
+    tailscale set --accept-dns=false 2>/dev/null || true
+
+    # Wait for connection
+    sleep 3
+    TAILSCALE_IP=$(tailscale ip --4 2>/dev/null || echo "pending")
+    echo "[+] Tailscale connected: $TAILSCALE_IP"
+else
+    echo "[+] No TAILSCALE_AUTH_KEY set — skipping Tailscale"
+fi
+
+# ---- Step 7: Setup distributed IRC config ----
+
+echo ""
+echo "[7/12] Setting up distributed IRC..."
 if [ -x scripts/setup-distributed-irc.sh ]; then
     cd "$NIGHTWATCH_DIR"
     scripts/setup-distributed-irc.sh
@@ -163,20 +252,100 @@ else
     echo "[!] setup-distributed-irc.sh not found, skipping"
 fi
 
-# ---- Step 6: Install mesh systemd service ----
+# ---- Step 8: Generate dnsmasq config ----
 
 echo ""
-echo "[6/9] Installing mesh service..."
-chmod +x scripts/mesh-fix.sh
-cp scripts/nightwatch-mesh.service /etc/systemd/system/nightwatch-mesh.service
+echo "[8/12] Generating dnsmasq config..."
+NODE_NUM="${PI_NUMBER:-1}"
+DHCP_START=$((200 + (NODE_NUM - 1) * 5 + 1))
+DHCP_END=$((200 + (NODE_NUM - 1) * 5 + 5))
+MESH_IP_PLAIN="${MESH_IP%/*}"
+mkdir -p "$NIGHTWATCH_DIR/dnsmasq"
+cat > "$NIGHTWATCH_DIR/dnsmasq/dnsmasq.conf" << DNSEOF
+# Nightwatch dnsmasq — DHCP + captive portal DNS for WiFi clients
+# Auto-generated by firstboot.sh — do not edit manually
+
+# Only listen on the mesh bridge
+interface=br0
+bind-interfaces
+
+# DHCP range for WiFi clients (each node gets 5 addresses to avoid conflicts)
+dhcp-range=192.168.199.${DHCP_START},192.168.199.${DHCP_END},255.255.255.0,1h
+
+# Tell clients to use this node as gateway and DNS
+dhcp-option=3,${MESH_IP_PLAIN}
+dhcp-option=6,${MESH_IP_PLAIN}
+
+# Redirect ALL DNS to this node (captive portal)
+address=/#/${MESH_IP_PLAIN}
+
+# Don't read /etc/resolv.conf (we handle all DNS ourselves)
+no-resolv
+
+# Don't poll /etc/resolv.conf for changes
+no-poll
+
+# Log DHCP leases (useful for debugging)
+log-dhcp
+
+# PID file for mesh-fix.sh to manage
+pid-file=/var/run/dnsmasq-nightwatch.pid
+DNSEOF
+echo "[+] dnsmasq.conf generated (DHCP: .${DHCP_START}-.${DHCP_END})"
+
+# ---- Step 9: Install systemd services ----
+
+echo ""
+echo "[9/12] Installing systemd services..."
+
+# Ensure scripts are executable
+chmod +x "$NIGHTWATCH_DIR"/scripts/*.sh
+
+# Detect docker compose command
+if docker compose version >/dev/null 2>&1; then
+    DC_BIN="/usr/bin/docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+    DC_BIN="$(command -v docker-compose)"
+else
+    DC_BIN="/usr/bin/docker compose"
+fi
+
+# Install service files (replace /opt/nightwatch with actual path)
+sed "s|/opt/nightwatch|$NIGHTWATCH_DIR|g" \
+    "$NIGHTWATCH_DIR/scripts/nightwatch-nodeconfig.service" > /etc/systemd/system/nightwatch-nodeconfig.service
+
+sed "s|/opt/nightwatch|$NIGHTWATCH_DIR|g" \
+    "$NIGHTWATCH_DIR/scripts/nightwatch-mesh.service" > /etc/systemd/system/nightwatch-mesh.service
+
+sed "s|/opt/nightwatch|$NIGHTWATCH_DIR|g" \
+    "$NIGHTWATCH_DIR/scripts/nightwatch-discovery.service" > /etc/systemd/system/nightwatch-discovery.service
+
+sed -e "s|/opt/nightwatch|$NIGHTWATCH_DIR|g" \
+    -e "s|/usr/bin/docker compose|$DC_BIN|g" \
+    "$NIGHTWATCH_DIR/scripts/nightwatch-docker.service" > /etc/systemd/system/nightwatch-docker.service
+
 systemctl daemon-reload
-systemctl enable nightwatch-mesh.service
-echo "[+] Mesh service installed and enabled"
 
-# ---- Step 7: Build Docker images ----
+# Remove old DNS workaround if present
+systemctl disable nightwatch-dns.service 2>/dev/null || true
+rm -f /etc/systemd/system/nightwatch-dns.service
+
+# Enable all services
+systemctl enable nightwatch-nodeconfig.service
+systemctl enable nightwatch-mesh.service
+systemctl enable nightwatch-discovery.service
+systemctl enable nightwatch-docker.service
+
+echo "[+] Services installed and enabled:"
+echo "    - nightwatch-nodeconfig (generates config from hostname)"
+echo "    - nightwatch-mesh (802.11s + batman-adv + bridge)"
+echo "    - nightwatch-discovery (UDP broadcast node discovery)"
+echo "    - nightwatch-docker (IRC + bridge + nginx)"
+
+# ---- Step 10: Build Docker images ----
 
 echo ""
-echo "[7/9] Building Docker images (this may take a few minutes)..."
+echo "[10/12] Building Docker images (this may take a few minutes)..."
 cd "$NIGHTWATCH_DIR"
 if docker compose version >/dev/null 2>&1; then
     DC="docker compose"
@@ -188,22 +357,25 @@ fi
 $DC --env-file .env build
 echo "[+] Docker images built"
 
-# ---- Step 8: Start everything ----
+# ---- Step 11: Start everything ----
 
 echo ""
-echo "[8/9] Starting mesh network..."
+echo "[11/12] Starting mesh network..."
 systemctl start nightwatch-mesh.service
 sleep 5
+
+echo "[+] Starting node discovery..."
+systemctl start nightwatch-discovery.service 2>/dev/null || true
 
 echo "[+] Starting Docker services..."
 $DC --env-file .env up -d
 sleep 3
 echo "[+] Services started"
 
-# ---- Step 9: Mark complete & disable firstboot ----
+# ---- Step 12: Mark complete & disable firstboot ----
 
 echo ""
-echo "[9/9] Finalizing..."
+echo "[12/12] Finalizing..."
 
 # Create stamp file
 date > "$STAMP_FILE"
@@ -212,13 +384,22 @@ echo "Pi #${PI_NUMBER} — ${MESH_IP}" >> "$STAMP_FILE"
 # Disable firstboot service (we don't need it again)
 systemctl disable nightwatch-firstboot.service 2>/dev/null || true
 
+# Get Tailscale IP if available
+TS_IP=""
+if command -v tailscale >/dev/null 2>&1; then
+    TS_IP=$(tailscale ip --4 2>/dev/null || echo "")
+fi
+
 echo ""
 echo "======================================"
 echo "  Nightwatch First Boot Complete!"
-echo "  Node:    Pi #${PI_NUMBER}"
-echo "  Mesh IP: ${MESH_IP}"
-echo "  AP SSID: ${AP_SSID:-Nightwatch}"
+echo "  Node:       Pi #${PI_NUMBER}"
+echo "  Mesh IP:    ${MESH_IP}"
+echo "  AP SSID:    ${WIFI_SSID:-Nightwatch}"
+if [ -n "$TS_IP" ]; then
+echo "  Tailscale:  ${TS_IP}"
+fi
 echo ""
-echo "  Web UI:  http://${MESH_IP%/*}"
-echo "  Log:     $LOG_FILE"
+echo "  Web UI:     http://${MESH_IP_PLAIN}"
+echo "  Log:        $LOG_FILE"
 echo "======================================"

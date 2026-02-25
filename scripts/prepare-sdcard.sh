@@ -10,17 +10,25 @@
 #   - Set WiFi (temporary — for first boot internet access to install packages)
 #
 # Usage:
-#   ./scripts/prepare-sdcard.sh <node_number> [sdcard_root]
+#   ./scripts/prepare-sdcard.sh <node_number> [sdcard_root] [options]
 #
 # Examples:
 #   ./scripts/prepare-sdcard.sh 1                    # Auto-detect SD card mount
 #   ./scripts/prepare-sdcard.sh 2 /Volumes/rootfs    # macOS explicit path
 #   ./scripts/prepare-sdcard.sh 3 /media/user/rootfs # Linux explicit path
+#   ./scripts/prepare-sdcard.sh 1 --gateway           # Mark as gateway node
+#   ./scripts/prepare-sdcard.sh 1 --yes               # Skip confirmation prompt
 #
 # What it does:
 #   1. Copies the entire project to /opt/nightwatch/ on the SD card
-#   2. Generates a node-specific .env file
-#   3. Installs the firstboot service (runs on first boot)
+#   2. Generates a node-specific .env file (with passwords baked in)
+#   3. Writes /etc/nightwatch.conf on the SD card
+#   4. Installs the firstboot service (runs on first boot — installs everything)
+#
+# Secrets:
+#   The script prompts for passwords and Tailscale auth key, then bakes them
+#   into the .env on the SD card. You can also set them via environment:
+#     ROUTER_PASSWORD=xxx IRC_LINK_PASSWORD=yyy TAILSCALE_AUTH_KEY=zzz ./scripts/prepare-sdcard.sh 1
 
 set -euo pipefail
 
@@ -38,16 +46,25 @@ NC='\033[0m'
 # ---- Usage ----
 
 usage() {
-    echo "Usage: $0 <node_number> [sdcard_rootfs_path]"
+    echo "Usage: $0 <node_number> [sdcard_rootfs_path] [options]"
     echo ""
     echo "  node_number:  Pi number (1, 2, 3, ...) — must match .env.example config"
     echo "  sdcard_path:  Path to the SD card's rootfs partition (auto-detected if omitted)"
+    echo ""
+    echo "Options:"
+    echo "  --gateway     Mark this node as the internet gateway"
+    echo "  --yes         Skip confirmation prompts"
     echo ""
     echo "Examples:"
     echo "  $0 1                          # Auto-detect SD card"
     echo "  $0 2 /Volumes/rootfs          # macOS"
     echo "  $0 3 /media/\$USER/rootfs      # Linux"
     echo "  $0 1 --gateway                # Mark node as gateway (internet sharing)"
+    echo ""
+    echo "Environment variables (optional — skips password prompts):"
+    echo "  ROUTER_PASSWORD     GL.iNet router admin password"
+    echo "  IRC_LINK_PASSWORD   IRC federation password (same on all nodes)"
+    echo "  TAILSCALE_AUTH_KEY  Tailscale pre-auth key (from admin console)"
     exit 1
 }
 
@@ -58,12 +75,14 @@ fi
 NODE_NUM="$1"
 GATEWAY_MODE=false
 SD_ROOT=""
+AUTO_YES=false
 
 # Parse args
 shift
 while [ $# -gt 0 ]; do
     case "$1" in
         --gateway) GATEWAY_MODE=true ;;
+        --yes|-y)  AUTO_YES=true ;;
         *)         SD_ROOT="$1" ;;
     esac
     shift
@@ -161,7 +180,33 @@ NODE_NAME="${!NAME_VAR:-node${NODE_NUM}.nightwatch.irc}"
 if [ -z "$NODE_IP" ]; then
     # Generate IP from node number
     NODE_IP="192.168.199.$((100 + NODE_NUM))"
-    echo -e "${YELLOW}[!] PI${NODE_NUM}_MESH_IP not in .env.example — using $NODE_IP${NC}"
+fi
+
+# ---- Prompt for secrets ----
+
+# Router password
+if [ -z "${ROUTER_PASSWORD:-}" ] || [ "$ROUTER_PASSWORD" = "CHANGE_ME_BEFORE_DEPLOY" ]; then
+    echo ""
+    echo -e "${BOLD}Set passwords for this deployment:${NC}"
+    echo -e "${YELLOW}(These are baked into the SD card — same values for all nodes)${NC}"
+    echo ""
+    read -rsp "  GL.iNet router admin password: " ROUTER_PASSWORD
+    echo ""
+fi
+
+# IRC link password
+if [ -z "${IRC_LINK_PASSWORD:-}" ] || [ "$IRC_LINK_PASSWORD" = "CHANGE_ME_BEFORE_DEPLOY" ]; then
+    read -rsp "  IRC federation password (same on ALL nodes): " IRC_LINK_PASSWORD
+    echo ""
+fi
+
+# Tailscale auth key
+if [ -z "${TAILSCALE_AUTH_KEY:-}" ]; then
+    echo ""
+    echo -e "  ${CYAN}Tailscale auth key (optional — enables remote SSH access)${NC}"
+    echo -e "  ${CYAN}Generate at: https://login.tailscale.com/admin/settings/keys${NC}"
+    echo -e "  ${CYAN}Use a reusable key so multiple Pis can join.${NC}"
+    read -rp "  Tailscale auth key (or press Enter to skip): " TAILSCALE_AUTH_KEY
 fi
 
 echo ""
@@ -173,22 +218,25 @@ echo "  Node:       Pi #$NODE_NUM"
 echo "  Name:       $NODE_NAME"
 echo "  Mesh IP:    $NODE_IP"
 echo "  Gateway:    $GATEWAY_MODE"
+echo "  Tailscale:  $([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo 'yes (auth key set)' || echo 'no')"
 echo "  SD card:    $SD_ROOT"
 echo ""
 
 # Confirm
-echo -e "${YELLOW}This will write to $SD_ROOT/opt/nightwatch/${NC}"
-read -rp "Continue? [y/N] " confirm
-if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-    echo "Aborted."
-    exit 0
+if [ "$AUTO_YES" != true ]; then
+    echo -e "${YELLOW}This will write to $SD_ROOT/opt/nightwatch/${NC}"
+    read -rp "Continue? [y/N] " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        echo "Aborted."
+        exit 0
+    fi
 fi
 
 echo ""
 
 # ---- Step 1: Copy project ----
 
-echo "[1/4] Copying project to SD card..."
+echo "[1/5] Copying project to SD card..."
 DEST="$SD_ROOT/opt/nightwatch"
 sudo mkdir -p "$DEST"
 
@@ -197,17 +245,19 @@ sudo rsync -a --delete \
     --exclude='.git' \
     --exclude='.env' \
     --exclude='ngircd/ngircd.conf' \
+    --exclude='dnsmasq/dnsmasq.conf' \
     --exclude='*.log' \
     --exclude='.DS_Store' \
     --exclude='node_modules' \
     --exclude='irc-bridge-go/irc-bridge' \
+    --exclude='.firstboot-done' \
     "$PROJECT_DIR/" "$DEST/"
 
 echo "[+] Project copied to $DEST"
 
 # ---- Step 2: Generate node-specific .env ----
 
-echo "[2/4] Generating .env for Pi #$NODE_NUM..."
+echo "[2/5] Generating .env for Pi #$NODE_NUM..."
 
 # Build the .env by modifying the template
 ENV_DEST="$DEST/.env"
@@ -222,6 +272,11 @@ if [ "$GATEWAY_MODE" = true ]; then
     sudo sed -i.bak "s/^# INET_IFACE=eth0/INET_IFACE=eth0/" "$ENV_DEST"
 fi
 
+# Bake in secrets (single-quote to prevent $ expansion in bash/docker-compose)
+sudo sed -i.bak "s/^ROUTER_PASSWORD=.*/ROUTER_PASSWORD='${ROUTER_PASSWORD}'/" "$ENV_DEST"
+sudo sed -i.bak "s/^IRC_LINK_PASSWORD=.*/IRC_LINK_PASSWORD='${IRC_LINK_PASSWORD}'/" "$ENV_DEST"
+sudo sed -i.bak "s/^TAILSCALE_AUTH_KEY=.*/TAILSCALE_AUTH_KEY=${TAILSCALE_AUTH_KEY:-}/" "$ENV_DEST"
+
 # Clean up sed backup files
 sudo rm -f "$ENV_DEST.bak"
 
@@ -229,14 +284,25 @@ echo "[+] .env written:"
 echo "    PI_NUMBER=$NODE_NUM"
 echo "    MESH_IP=$NODE_IP"
 echo "    MESH_GATEWAY=$GATEWAY_MODE"
+echo "    ROUTER_PASSWORD=***"
+echo "    IRC_LINK_PASSWORD=***"
+echo "    TAILSCALE_AUTH_KEY=$([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo '***' || echo '(empty)')"
 
-# ---- Step 3: Install firstboot service ----
+# ---- Step 3: Write /etc/nightwatch.conf ----
 
-echo "[3/4] Installing firstboot service..."
+echo "[3/5] Writing nightwatch.conf..."
+echo "NIGHTWATCH_DIR=/opt/nightwatch" | sudo tee "$SD_ROOT/etc/nightwatch.conf" > /dev/null
+echo "[+] /etc/nightwatch.conf written"
+
+# ---- Step 4: Install firstboot service ----
+
+echo "[4/5] Installing firstboot service..."
 sudo chmod +x "$DEST/scripts/firstboot.sh"
 sudo chmod +x "$DEST/scripts/mesh-fix.sh"
 sudo chmod +x "$DEST/scripts/setup-rpi.sh"
 sudo chmod +x "$DEST/scripts/setup-distributed-irc.sh"
+sudo chmod +x "$DEST/scripts/nodeconfig.sh"
+sudo chmod +x "$DEST/scripts/node-discovery.sh"
 
 # Copy systemd service
 sudo cp "$DEST/scripts/nightwatch-firstboot.service" \
@@ -249,17 +315,22 @@ sudo ln -sf /etc/systemd/system/nightwatch-firstboot.service \
 
 echo "[+] Firstboot service installed and enabled"
 
-# ---- Step 4: Verify ----
+# ---- Step 5: Verify ----
 
-echo "[4/4] Verifying..."
+echo "[5/5] Verifying..."
 
 ERRORS=0
-for f in .env scripts/firstboot.sh scripts/mesh-fix.sh docker-compose.yml irc-bridge-go/Dockerfile html/index.html; do
+for f in .env .env.example scripts/firstboot.sh scripts/mesh-fix.sh scripts/nodeconfig.sh scripts/node-discovery.sh scripts/setup-distributed-irc.sh docker-compose.yml irc-bridge-go/Dockerfile html/index.html; do
     if [ ! -f "$DEST/$f" ]; then
         echo -e "  ${RED}[MISS] $f${NC}"
         ((ERRORS++))
     fi
 done
+
+if [ ! -f "$SD_ROOT/etc/nightwatch.conf" ]; then
+    echo -e "  ${RED}[MISS] /etc/nightwatch.conf${NC}"
+    ((ERRORS++))
+fi
 
 if [ ! -L "$SD_ROOT/etc/systemd/system/multi-user.target.wants/nightwatch-firstboot.service" ]; then
     echo -e "  ${RED}[MISS] firstboot service symlink${NC}"
@@ -282,19 +353,24 @@ echo ""
 echo "  Node:       Pi #$NODE_NUM ($NODE_NAME)"
 echo "  Mesh IP:    $NODE_IP"
 echo "  Gateway:    $GATEWAY_MODE"
+echo "  Tailscale:  $([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo 'yes' || echo 'no')"
 echo ""
 echo -e "  ${BOLD}Next steps:${NC}"
 echo "  1. Eject the SD card safely"
 echo "  2. Insert into the Raspberry Pi"
-echo "  3. Connect Ethernet (for first boot package install)"
-echo "     OR ensure Pi Imager WiFi config gives internet access"
-echo "  4. Power on — setup runs automatically (~5-10 min)"
-echo "  5. Monitor progress: ssh into Pi, then:"
+echo "  3. Power on — first boot setup runs automatically (~10-15 min)"
+echo "     It needs internet (WiFi configured in Pi Imager, or Ethernet)"
+echo ""
+echo -e "  ${BOLD}Monitor progress (after Pi boots):${NC}"
+echo "     ssh into the Pi, then:"
 echo "     journalctl -f -u nightwatch-firstboot"
 echo "     tail -f /var/log/nightwatch-firstboot.log"
 echo ""
 echo "  After first boot completes, the Pi will:"
-echo "  • Start the mesh network automatically on every boot"
-echo "  • Start Docker services (IRC, bridge, web UI)"
-echo "  • Broadcast WiFi hotspot '${AP_SSID:-Nightwatch}'"
+echo "  - Start the mesh network automatically on every boot"
+echo "  - Start Docker services (IRC, bridge, web UI)"
+echo "  - Broadcast WiFi hotspot '${WIFI_SSID:-Nightwatch}'"
+if [ -n "${TAILSCALE_AUTH_KEY:-}" ]; then
+echo "  - Be accessible remotely via Tailscale"
+fi
 echo ""

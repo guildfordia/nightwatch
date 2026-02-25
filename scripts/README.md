@@ -1,157 +1,258 @@
-# 🔧 Nightwatch Chat Scripts
+# NIGHTWATCH - Decentralized Mesh Chat
 
-## 📜 Available Scripts
+![Nightwatch Banner](https://img.shields.io/badge/NIGHTWATCH-Mesh%20Network%20Terminal-blue?style=for-the-badge)
 
-### 🚀 `deploy-pi-zero.sh`
-**Complete Pi Zero 2 W deployment and optimization script**
+A resilient chat system for off-grid communication using 802.11s + batman-adv mesh networking. Zero infrastructure required — just power, Raspberry Pis, and cheap travel routers.
 
-**Usage:**
-```bash
-chmod +x scripts/deploy-pi-zero.sh
-./scripts/deploy-pi-zero.sh
+## Architecture
+
+```
+                           802.11s mesh (wlan1, USB dongle)
+                          /            |             \
+                       [Pi 1]       [Pi 2]         [Pi 3]  ...  [Pi N]
+                        bat0          bat0           bat0          bat0
+                         |             |              |             |
+                        br0           br0            br0           br0
+                       / | \         / | \          / | \         / | \
+                    eth0 IRC nginx eth0 IRC nginx eth0 ...     eth0 ...
+                     |               |              |             |
+                  GL.iNet         GL.iNet        GL.iNet       GL.iNet
+                  router          router         router        router
+                  (WiFi AP)       (WiFi AP)      (WiFi AP)     (WiFi AP)
+                     |               |              |             |
+                  clients         clients        clients       clients
+
+   Optional: one node has wlan0 → internet (gateway mode)
 ```
 
-**What it does:**
-- ✅ System optimization for 100 users
-- ✅ Swap configuration (512MB)
-- ✅ Network parameter tuning
-- ✅ GPU memory optimization
-- ✅ Docker optimization for ARM
-- ✅ Service cleanup (bluetooth, etc.)
-- ✅ Full Nightwatch deployment
-- ✅ Verification and monitoring setup
+Each Pi runs:
+- **wlan1** (USB dongle) — 802.11s mesh with batman-adv for multi-hop routing
+- **bat0** — batman-adv virtual interface, carries all mesh traffic
+- **br0** — Linux bridge joining bat0 + eth0, holds the mesh IP
+- **eth0** — connected to GL.iNet router (dumb AP mode) for client WiFi
+- **wlan0** (onboard) — reserved for internet/Tailscale (not used by mesh)
+- **Docker** — ngircd (IRC), irc-bridge (Go WebSocket), nginx (web frontend)
 
-**First-time setup on Pi Zero 2 W - use this script!**
+Users connect to any router's WiFi and access the same chat. Traffic routes through the mesh automatically via batman-adv.
 
----
+### Node Discovery & IRC Federation
 
-### ⚡ `update-nightwatch.sh`
-**Quick update script for code changes**
+Nodes find each other automatically:
+1. **Discovery daemon** broadcasts UDP beacons on bat0 every 30s
+2. When a new peer is found, `ngircd.conf` is regenerated with `[Server]` link blocks
+3. ngircd reloads — IRC servers federate and `#nightwatch` syncs across all nodes
+4. Peers that stop beaconing expire after 90s and are removed
 
-**Usage:**
+Federation requires `IRC_LINK_PASSWORD` to match on **all nodes**.
+
+## Features
+
+- **802.11s + batman-adv** — real multi-hop mesh routing (not just single-hop ad-hoc)
+- **SAE encryption** — optional WPA3-level security on mesh links
+- **Automatic peer discovery** — UDP broadcast, no manual config
+- **IRC federation** — linked servers across nodes, messages sync everywhere
+- **Self-healing** — routes around failed nodes in seconds
+- **Gateway support** — one node can share internet to the whole mesh
+- **GL.iNet router per node** — cheap travel router as WiFi AP (no hostapd needed)
+- **Linux bridge (br0)** — bat0 + eth0 bridged so router clients reach the mesh
+- **dnsmasq DHCP** — Pi serves DHCP to WiFi clients on br0
+- **Client roaming** — users move between routers seamlessly (same Layer 2 domain)
+- **Terminal-style web UI** — clean, fast, works on any device
+- **Integration test suite** — `make test` verifies mesh, services, and cross-node IRC
+- **Scales to 20 nodes**
+
+## Hardware Requirements
+
+### Per Node
+- **Raspberry Pi 4** (recommended) or Pi 3B+
+- **USB WiFi dongle** with 802.11s mesh support (AR9271, MT7612U, or RT5370 chipset)
+- **GL.iNet GL-MT300N-V2** travel router (or similar, connected via ethernet)
+- **MicroSD card** (32GB+ Class 10)
+- **Power supply**
+
+### Recommended Dongles
+| Dongle | Chipset | Driver | Price | Notes |
+|--------|---------|--------|-------|-------|
+| Generic AR9271 | AR9271 | ath9k_htc | ~$10 | Cheapest, widely tested |
+| ALFA AWUS036ACM | MT7612U | mt76 | ~$35 | Best performance, dual-band |
+| Generic RT5370 | RT5370 | rt2800usb | ~$5 | Budget option |
+
+Verify mesh support: `iw phy phy1 info | grep "mesh point"` (check phy for wlan1, not wlan0)
+
+### Gateway Node (optional)
+- Internet connection via wlan0 or ethernet (for the gateway node)
+
+## Quick Start
+
 ```bash
-chmod +x scripts/update-nightwatch.sh
-./scripts/update-nightwatch.sh
+# 1. Clone on each Pi
+git clone https://github.com/guildfordia/nightwatch.git
+cd nightwatch
+
+# 2. Install (installs packages, configures mesh, sets up router, builds Docker images)
+make install
+
+# 3. Start mesh + services
+make run
+
+# 4. Verify everything works
+make test
 ```
 
-**What it does:**
-- 🔄 Stops containers
-- 🔨 Rebuilds with latest code
-- ▶️ Restarts services
-- 📊 Shows status
+`make install` is interactive — it prompts for node number, gateway mode, and passwords. It also auto-configures the GL.iNet router as a dumb AP.
 
-**For updates after initial deployment**
+## Configuration (.env)
 
----
+Auto-generated by `make install`. Each Pi needs a unique `PI_NUMBER` and `MESH_IP`:
 
-### 📊 `monitor.sh`
-**Real-time resource monitoring**
-
-**Usage:**
 ```bash
-chmod +x scripts/monitor.sh
-./scripts/monitor.sh
+# ── Node Identity (unique per node) ──
+PI_NUMBER=1
+MESH_IP=192.168.199.101
+
+# ── Mesh Network ──
+MESH_IFACE=wlan1
+MESH_ID=nightwatch
+FREQ=2412
+# MESH_SAE_PASSWORD=your-mesh-secret    # Optional: WPA3 mesh encryption
+
+# ── Client Access (GL.iNet router on eth0) ──
+AP_IFACE=eth0
+
+# ── Gateway (set on the node with internet) ──
+MESH_GATEWAY=false
+# INET_IFACE=wlan0
+
+# ── GL.iNet Router ──
+ROUTER_IP=192.168.8.1
+ROUTER_CONFIGURED_IP=192.168.8.100
+ROUTER_PASSWORD=<set-during-install>
+WIFI_SSID=Nightwatch
+WIFI_PASSWORD=Nightwatch
+
+# ── Docker Services ──
+IRC_PORT=6667
+BRIDGE_PORT=8080
+NGINX_PORT=80
+DOCKER_NETWORK=nightwatch-net
+
+# ── IRC Federation ──
+# Must be IDENTICAL on all nodes for server linking to work
+IRC_LINK_PASSWORD=<set-during-install>
 ```
 
-**Shows:**
-- 💾 Memory usage
-- 🖥️ CPU usage
-- 💿 Disk usage
-- 🐳 Container stats
-- 🌐 Connection counts
-- 📈 Load averages
+## Management
 
-**Run regularly to track performance**
-
----
-
-## 🎯 Quick Commands
-
-### First Time Setup (Pi Zero 2 W):
 ```bash
-# 1. Extract project
-tar -xzf nightwatch-optimized.tar.gz
-cd Mesh-Nightwatch
-
-# 2. Run full deployment
-./scripts/deploy-pi-zero.sh
-
-# 3. Monitor
-./scripts/monitor.sh
+make install     # First-time setup (run once per Pi)
+make run         # Start mesh + Docker services
+make stop        # Stop everything
+make test        # Full integration test (mesh, Docker, IRC cross-node)
+make update      # Pull latest code, rebuild, restart
+make status      # Show mesh and service status
+make logs        # Follow Docker logs
+make clean       # Remove containers and volumes
+make monitor     # Live dashboard (refreshes every 5s)
+make blink       # Blink onboard LED to identify this Pi
 ```
 
-### Code Updates:
+## How the Mesh Works
+
+1. **802.11s** creates wireless links between neighboring nodes (wlan1, USB dongle)
+2. **batman-adv** (kernel module) builds a Layer 2 mesh on top — handles multi-hop routing, topology discovery, and self-healing
+3. **br0** (Linux bridge) joins bat0 + eth0, giving them a shared IP (192.168.199.10X)
+4. **GL.iNet router** on eth0 acts as a dumb WiFi AP — clients connect to it and land on br0
+5. **dnsmasq** on the Pi serves DHCP to clients on br0
+6. **Docker services** (IRC, bridge, nginx) bind to 0.0.0.0, reachable via br0's IP
+7. **Node discovery** broadcasts on bat0, auto-configures ngircd federation
+8. A user on any router's WiFi can reach any service on any node
+
+## Multi-Node Deployment
+
+| Node | PI_NUMBER | MESH_IP | Role |
+|------|-----------|---------|------|
+| Node 1 | 1 | 192.168.199.101 | Regular |
+| Node 2 | 2 | 192.168.199.102 | Regular |
+| Node 3 | 3 | 192.168.199.103 | Gateway (MESH_GATEWAY=true) |
+| ... | ... | ... | ... |
+
+1. Flash each Pi with Raspberry Pi OS Lite
+2. Run `make install` on each (it prompts for node number + passwords)
+3. Ensure `IRC_LINK_PASSWORD` is the **same** on all nodes
+4. `make run` on each node
+5. Nodes auto-discover and mesh. Users connect to any router's WiFi.
+
+## Troubleshooting
+
 ```bash
-# Quick rebuild and restart
-./scripts/update-nightwatch.sh
+# Full integration test (31 checks)
+make test
+
+# Quick status
+make status
+
+# batman-adv not loading?
+sudo modprobe batman-adv
+lsmod | grep batman
+
+# No mesh peers?
+iw dev wlan1 info              # Should show "type mesh point"
+iw dev wlan1 station dump      # Should show peer stations
+sudo batctl meshif bat0 n      # batman-adv neighbors
+
+# br0 bridge issues?
+bridge link show               # Should show bat0 and eth0
+ip addr show br0               # Should have 192.168.199.10X
+
+# IRC federation broken?
+docker logs ngircd 2>&1 | grep -i "bad password\|server\|link"
+# If "Bad password" → IRC_LINK_PASSWORD doesn't match between nodes
+
+# No clients getting DHCP?
+sudo systemctl status dnsmasq
+cat /var/lib/misc/dnsmasq.leases
+
+# Docker services not reachable?
+docker ps                      # All 3 should be healthy
+curl http://localhost/          # Nginx
+curl http://localhost:8080/health  # Bridge
+nc -z localhost 6667           # IRC
 ```
 
-### Monitoring:
-```bash
-# One-time check
-./scripts/monitor.sh
+## Security
 
-# Continuous monitoring
-watch ./scripts/monitor.sh
+- **Mesh encryption**: Set `MESH_SAE_PASSWORD` in `.env` for WPA3-level SAE on all mesh links
+- **WiFi encryption**: Router broadcasts WPA2 (set via `WIFI_PASSWORD`)
+- **IRC federation**: `IRC_LINK_PASSWORD` secures server-to-server links
+- **Secrets in .env**: File is gitignored, never committed
+- **Generated configs**: `ngircd.conf` is regenerated by the discovery daemon (link passwords never in git)
+- **Local-only traffic**: All mesh traffic stays on the mesh, never touches internet
 
-# Docker stats
-watch docker stats
-```
+## TODO
 
-### Troubleshooting:
-```bash
-# Check logs
-docker-compose logs
+- [ ] Fix IRC federation password sync — ensure `IRC_LINK_PASSWORD` is set identically during `make install` on all nodes (currently easy to mismatch)
+- [ ] Add federation health check to `make test` — detect "Bad password" loop before attempting cross-node messaging (in progress)
+- [ ] Investigate frozen Pi issue — nodes 2 and 3 become unresponsive and require hard reboot
+- [ ] Add `make sync-config` command to push `.env` secrets to all reachable nodes via mesh
+- [ ] Add captive portal — redirect new WiFi clients to the chat page automatically
+- [ ] Support channel persistence — IRC history survives container restarts
+- [ ] Add mesh network map to web UI — show topology, latency, and node status
+- [ ] Improve `make update` for offline/mesh-only nodes (currently skips git pull gracefully)
+- [ ] Add monitoring/alerting — detect and notify when nodes go offline
+- [ ] Document SD card imaging workflow for mass deployment (`scripts/build-image.sh`, `scripts/prepare-sdcard.sh`)
 
-# Restart everything
-docker-compose restart
+## Contributing
 
-# Clean rebuild
-./scripts/update-nightwatch.sh
+1. Fork the repository
+2. Create feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit changes
+4. Open Pull Request
 
-# Emergency cleanup
-docker system prune -af
-```
+## License
 
-## 📋 Performance Expectations
+MIT License — see [LICENSE](LICENSE)
 
-| Users | Memory Usage | Performance |
-|-------|--------------|-------------|
-| 25    | ~80MB       | Smooth      |
-| 50    | ~120MB      | Good        |
-| 75    | ~180MB      | Manageable  |
-| 100   | ~250MB      | At capacity |
+## Support
 
-## 🔧 Manual Commands
-
-If you prefer manual control:
-
-```bash
-# System optimization
-sudo dphys-swapfile swapoff
-sudo sed -i 's/CONF_SWAPSIZE=.*/CONF_SWAPSIZE=512/' /etc/dphys-swapfile
-sudo dphys-swapfile setup && sudo dphys-swapfile swapon
-
-# Deploy Nightwatch
-docker-compose down --volumes
-docker-compose build --no-cache
-docker-compose up -d
-
-# Monitor
-docker stats
-```
-
-## 🆘 Emergency Recovery
-
-If something goes wrong:
-
-```bash
-# Stop everything
-docker-compose down
-
-# Clean Docker
-docker system prune -af --volumes
-
-# Restart deployment
-./scripts/deploy-pi-zero.sh
-``` 
+- [GitHub Issues](https://github.com/guildfordia/nightwatch/issues)
+- [GitHub Discussions](https://github.com/guildfordia/nightwatch/discussions)

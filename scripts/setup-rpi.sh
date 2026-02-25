@@ -231,13 +231,16 @@ DENYEOF
         echo "[+] dhcpcd already excludes eth0"
     fi
 elif command -v nmcli >/dev/null 2>&1; then
-    # NetworkManager: add static DNS to eth0 connection
+    # NetworkManager: configure eth0 — no default route (it's a bridge port to GL.iNet AP)
     ETH_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep 'eth0' | head -1 | cut -d: -f1)
     if [ -n "$ETH_CON" ]; then
-        # Undo old never-default if set
-        nmcli con mod "$ETH_CON" ipv4.never-default no 2>/dev/null || true
+        # eth0 must NOT add a default route — it connects to the GL.iNet AP (no internet)
+        # Without this, eth0's route (metric 100) wins over wlan0 (metric 600) and
+        # all traffic goes to the GL.iNet bridge which has no upstream internet.
+        nmcli con mod "$ETH_CON" ipv4.never-default yes 2>/dev/null || true
         nmcli con mod "$ETH_CON" ipv4.dns "8.8.8.8 1.1.1.1" 2>/dev/null || true
-        echo "[+] NetworkManager: eth0 ($ETH_CON) DNS set to 8.8.8.8 + 1.1.1.1"
+        nmcli con up "$ETH_CON" 2>/dev/null || true
+        echo "[+] NetworkManager: eth0 ($ETH_CON) — never-default route, DNS 8.8.8.8 + 1.1.1.1"
     fi
     # Also add fallback via systemd-resolved
     mkdir -p /etc/systemd/resolved.conf.d

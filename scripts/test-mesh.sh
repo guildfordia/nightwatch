@@ -307,12 +307,17 @@ if [ "$QUICK_MODE" = false ] && [ ${#LIVE_IPS[@]} -gt 0 ]; then
         ip="${LIVE_IPS[$idx]}"
         name="${LIVE_NAMES[$idx]}"
 
-        result=$(ping -c 5 -W 2 -I "$BAT_IFACE" "$ip" 2>/dev/null | tail -1 || echo "")
+        # Ping via br0 (bridge over bat0 + eth0) — bat0 no longer has an IP
+        ping_iface="$BR_IFACE"
+        if [ ! -d "/sys/class/net/$BR_IFACE" ]; then
+            ping_iface="$BAT_IFACE"
+        fi
+        result=$(ping -c 5 -W 2 -I "$ping_iface" "$ip" 2>/dev/null | tail -1 || echo "")
         if echo "$result" | grep -q "/"; then
             min=$(echo "$result" | awk -F'/' '{print $4}')
             avg=$(echo "$result" | awk -F'/' '{print $5}')
             max=$(echo "$result" | awk -F'/' '{print $6}')
-            loss=$(ping -c 5 -W 2 -I "$BAT_IFACE" "$ip" 2>/dev/null | grep "packet loss" | awk -F',' '{print $3}' | tr -d ' ')
+            loss=$(ping -c 5 -W 2 -I "$ping_iface" "$ip" 2>/dev/null | grep "packet loss" | awk -F',' '{print $3}' | tr -d ' ')
             echo -e "    → $ip ($name): min=${min}ms avg=${avg}ms max=${max}ms $loss"
             # Flag high latency
             avg_int=${avg%.*}
@@ -320,7 +325,7 @@ if [ "$QUICK_MODE" = false ] && [ ${#LIVE_IPS[@]} -gt 0 ]; then
                 warn "$ip latency high (${avg}ms avg)"
             fi
         else
-            echo -e "    → $ip ($name): ${RED}unreachable over bat0${NC}"
+            echo -e "    → $ip ($name): ${RED}unreachable over $ping_iface${NC}"
         fi
     done
 else
@@ -411,51 +416,91 @@ if [ "$QUICK_MODE" = false ] && [ ${#LIVE_IPS[@]} -gt 0 ]; then
     if [ -z "$REMOTE_IP" ]; then
         skip "No remote IRC server reachable"
     else
-        echo "  Testing: send on $LOCAL_IP → verify on $REMOTE_IP ($REMOTE_NAME)"
+        # Pre-check: verify IRC servers are actually federated before messaging test
+        FED_OK=true
+        irc_logs=$(docker logs ngircd --since 5m 2>&1 || true)
 
-        TEST_MSG="MESHTEST_$(date +%s)_$$"
-        TEST_NICK="testbot$$"
-
-        # Start RECEIVER first on remote node — give it time to connect and join
-        RECV_OUTPUT=$(mktemp)
-        {
-            echo "NICK recvbot$$"
-            echo "USER recvbot$$ 0 * :Mesh Recv Bot"
-            sleep 3
-            echo "JOIN #nightwatch"
-            sleep 10
-            echo "QUIT :recv done"
-        } | nc -w 15 "$REMOTE_IP" "$IRC_PORT" > "$RECV_OUTPUT" 2>&1 &
-        RECV_PID=$!
-
-        # Wait for receiver to connect and join channel
-        sleep 5
-
-        # Then SEND on local node
-        {
-            echo "NICK $TEST_NICK"
-            echo "USER $TEST_NICK 0 * :Mesh Test Bot"
-            sleep 2
-            echo "JOIN #nightwatch"
-            sleep 1
-            echo "PRIVMSG #nightwatch :$TEST_MSG"
-            sleep 2
-            echo "QUIT :test done"
-        } | nc -w 8 localhost "$IRC_PORT" >/dev/null 2>&1 &
-        SEND_PID=$!
-
-        # Wait for both to finish
-        wait $SEND_PID 2>/dev/null || true
-        wait $RECV_PID 2>/dev/null || true
-
-        # Check if remote received the message
-        if grep -q "$TEST_MSG" "$RECV_OUTPUT" 2>/dev/null; then
-            pass "Message delivered across mesh: $LOCAL_IP → $REMOTE_IP"
-        else
-            fail "Message not received on $REMOTE_IP (IRC federation may need time)"
+        # Check for bad password errors (federation broken)
+        if echo "$irc_logs" | grep -q "Bad password"; then
+            fail "IRC federation broken: server link password mismatch (check IRC_LINK_PASSWORD in .env on all nodes)"
+            FED_OK=false
         fi
 
-        rm -f "$RECV_OUTPUT"
+        # Check if any server link is established by querying ngircd via IRC LINKS command
+        LINKS_OUTPUT=$(mktemp)
+        {
+            echo "NICK fedcheck$$"
+            echo "USER fedcheck$$ 0 * :Federation Check"
+            sleep 2
+            echo "LINKS"
+            sleep 2
+            echo "QUIT :check done"
+        } | nc -w 8 localhost "$IRC_PORT" > "$LINKS_OUTPUT" 2>&1 || true
+
+        # Count linked servers (LINKS replies are RPL_LINKS 364, end is RPL_ENDOFLINKS 365)
+        linked_servers=$(grep -c " 364 " "$LINKS_OUTPUT" 2>/dev/null || true)
+        linked_servers=$((linked_servers + 0))
+
+        if [ "$linked_servers" -le 1 ]; then
+            # Only see ourselves (or nothing) — no remote servers linked
+            if [ "$FED_OK" = true ]; then
+                fail "IRC servers not linked (no federation peers connected)"
+            fi
+            FED_OK=false
+        else
+            pass "IRC federation active ($linked_servers server(s) linked)"
+        fi
+        rm -f "$LINKS_OUTPUT"
+
+        if [ "$FED_OK" = false ]; then
+            skip "Cross-node messaging (federation not established)"
+        else
+            echo "  Testing: send on $LOCAL_IP → verify on $REMOTE_IP ($REMOTE_NAME)"
+
+            TEST_MSG="MESHTEST_$(date +%s)_$$"
+            TEST_NICK="testbot$$"
+
+            # Start RECEIVER first on remote node — give it time to connect and join
+            RECV_OUTPUT=$(mktemp)
+            {
+                echo "NICK recvbot$$"
+                echo "USER recvbot$$ 0 * :Mesh Recv Bot"
+                sleep 4
+                echo "JOIN #nightwatch"
+                sleep 15
+                echo "QUIT :recv done"
+            } | nc -w 22 "$REMOTE_IP" "$IRC_PORT" > "$RECV_OUTPUT" 2>&1 &
+            RECV_PID=$!
+
+            # Wait for receiver to fully connect, register, and join channel
+            sleep 8
+
+            # Then SEND on local node
+            {
+                echo "NICK $TEST_NICK"
+                echo "USER $TEST_NICK 0 * :Mesh Test Bot"
+                sleep 3
+                echo "JOIN #nightwatch"
+                sleep 2
+                echo "PRIVMSG #nightwatch :$TEST_MSG"
+                sleep 3
+                echo "QUIT :test done"
+            } | nc -w 12 localhost "$IRC_PORT" >/dev/null 2>&1 &
+            SEND_PID=$!
+
+            # Wait for both to finish
+            wait $SEND_PID 2>/dev/null || true
+            wait $RECV_PID 2>/dev/null || true
+
+            # Check if remote received the message
+            if grep -q "$TEST_MSG" "$RECV_OUTPUT" 2>/dev/null; then
+                pass "Message delivered across mesh: $LOCAL_IP → $REMOTE_IP"
+            else
+                fail "Message not received on $REMOTE_IP (IRC federation may need time)"
+            fi
+
+            rm -f "$RECV_OUTPUT"
+        fi
     fi
 else
     section "7. IRC Cross-Node Messaging"

@@ -2,50 +2,71 @@
 
 ![Nightwatch Banner](https://img.shields.io/badge/NIGHTWATCH-Mesh%20Network%20Terminal-blue?style=for-the-badge)
 
-A resilient chat system for off-grid communication using 802.11s + batman-adv mesh networking. Zero infrastructure required — just power and Raspberry Pis.
+A resilient chat system for off-grid communication using 802.11s + batman-adv mesh networking. Zero infrastructure required — just power, Raspberry Pis, and cheap travel routers.
 
 ## Architecture
 
 ```
-                              802.11s mesh (wlan1, encrypted via SAE)
-                             /            |             \
-                          [Pi 1]       [Pi 2]         [Pi 3]  ...  [Pi N]
-                          bat0          bat0           bat0          bat0
-                        /  |  \       /  |  \        /  |  \      /  |  \
-                     wlan0 IRC nginx wlan0 IRC nginx wlan0 ...  wlan0 ...
-                      AP              AP              AP          AP
-                      |               |               |           |
-                   clients         clients         clients     clients
+                           802.11s mesh (wlan1, USB dongle)
+                          /            |             \
+                       [Pi 1]       [Pi 2]         [Pi 3]  ...  [Pi N]
+                        bat0          bat0           bat0          bat0
+                         |             |              |             |
+                        br0           br0            br0           br0
+                       / | \         / | \          / | \         / | \
+                    eth0 IRC nginx eth0 IRC nginx eth0 ...     eth0 ...
+                     |               |              |             |
+                  GL.iNet         GL.iNet        GL.iNet       GL.iNet
+                  router          router         router        router
+                  (WiFi AP)       (WiFi AP)      (WiFi AP)     (WiFi AP)
+                     |               |              |             |
+                  clients         clients        clients       clients
 
-    Optional: one node has eth0 → internet (gateway mode for music program)
+   Optional: one node has wlan0 → internet (gateway mode)
 ```
 
 Each Pi runs:
 - **wlan1** (USB dongle) — 802.11s mesh with batman-adv for multi-hop routing
-- **wlan0** (onboard) — hostapd access point, bridged into bat0
 - **bat0** — batman-adv virtual interface, carries all mesh traffic
+- **br0** — Linux bridge joining bat0 + eth0, holds the mesh IP
+- **eth0** — connected to GL.iNet router (dumb AP mode) for client WiFi
+- **wlan0** (onboard) — reserved for internet/Tailscale (not used by mesh)
 - **Docker** — ngircd (IRC), irc-bridge (Go WebSocket), nginx (web frontend)
 
-Users connect to any Pi's WiFi hotspot and access the same chat. Traffic routes through the mesh automatically.
+Users connect to any router's WiFi and access the same chat. Traffic routes through the mesh automatically via batman-adv.
+
+### Node Discovery & IRC Federation
+
+Nodes find each other automatically:
+1. **Discovery daemon** broadcasts UDP beacons on bat0 every 30s
+2. When a new peer is found, `ngircd.conf` is regenerated with `[Server]` link blocks
+3. ngircd reloads — IRC servers federate and `#nightwatch` syncs across all nodes
+4. Peers that stop beaconing expire after 90s and are removed
+
+Federation requires `IRC_LINK_PASSWORD` to match on **all nodes**.
 
 ## Features
 
 - **802.11s + batman-adv** — real multi-hop mesh routing (not just single-hop ad-hoc)
 - **SAE encryption** — optional WPA3-level security on mesh links
-- **Automatic peer discovery** — new nodes join the mesh automatically
+- **Automatic peer discovery** — UDP broadcast, no manual config
+- **IRC federation** — linked servers across nodes, messages sync everywhere
 - **Self-healing** — routes around failed nodes in seconds
 - **Gateway support** — one node can share internet to the whole mesh
-- **Hostapd AP per node** — every Pi broadcasts a WiFi hotspot for clients
-- **Client roaming** — users move between hotspots seamlessly (same Layer 2 domain)
-- **Distributed IRC** — linked servers across nodes, messages sync everywhere
+- **GL.iNet router per node** — cheap travel router as WiFi AP (no hostapd needed)
+- **Linux bridge (br0)** — bat0 + eth0 bridged so router clients reach the mesh
+- **dnsmasq DHCP** — Pi serves DHCP to WiFi clients on br0
+- **Client roaming** — users move between routers seamlessly (same Layer 2 domain)
 - **Terminal-style web UI** — clean, fast, works on any device
-- **Scales to 20+ nodes**
+- **Integration test suite** — `make test` verifies mesh, services, and cross-node IRC
+- **Scales to 20 nodes**
 
 ## Hardware Requirements
 
 ### Per Node
 - **Raspberry Pi 4** (recommended) or Pi 3B+
 - **USB WiFi dongle** with 802.11s mesh support (AR9271, MT7612U, or RT5370 chipset)
+- **GL.iNet GL-MT300N-V2** travel router (or similar, connected via ethernet)
 - **MicroSD card** (32GB+ Class 10)
 - **Power supply**
 
@@ -56,76 +77,95 @@ Users connect to any Pi's WiFi hotspot and access the same chat. Traffic routes 
 | ALFA AWUS036ACM | MT7612U | mt76 | ~$35 | Best performance, dual-band |
 | Generic RT5370 | RT5370 | rt2800usb | ~$5 | Budget option |
 
-Verify mesh support: `iw list | grep "mesh point"`
+Verify mesh support: `iw phy phy1 info | grep "mesh point"` (check phy for wlan1, not wlan0)
 
 ### Gateway Node (optional)
-- Ethernet connection to internet (for the music program node)
+- Internet connection via wlan0 or ethernet (for the gateway node)
 
 ## Quick Start
 
 ```bash
-# 1. Clone and setup
+# 1. Clone on each Pi
 git clone https://github.com/guildfordia/nightwatch.git
 cd nightwatch
-chmod +x scripts/*.sh
-sudo ./scripts/setup-rpi.sh
 
-# 2. Configure this node
-make prepare-env
-nano .env    # Set PI_NUMBER, MESH_IP, AP_SSID, etc.
+# 2. Install (installs packages, configures mesh, sets up router, builds Docker images)
+make install
 
-# 3. Setup distributed IRC (if multi-node)
-make setup-distributed-irc
+# 3. Start mesh + services
+make run
 
-# 4. Start everything
-make start
+# 4. Verify everything works
+make test
 ```
+
+`make install` is interactive — it prompts for node number, gateway mode, and passwords. It also auto-configures the GL.iNet router as a dumb AP.
 
 ## Configuration (.env)
 
-Each Pi needs a unique `PI_NUMBER` and `MESH_IP`. Everything else can be identical:
+Auto-generated by `make install`. Each Pi needs a unique `PI_NUMBER` and `MESH_IP`:
 
 ```bash
-# Unique per node
+# ── Node Identity (unique per node) ──
 PI_NUMBER=1
 MESH_IP=192.168.199.101
 
-# Same on all nodes
+# ── Mesh Network ──
+MESH_IFACE=wlan1
 MESH_ID=nightwatch
 FREQ=2412
-AP_SSID=Nightwatch
-# AP_PASSWORD=optional-wpa2-password
-# MESH_SAE_PASSWORD=optional-mesh-encryption
+# MESH_SAE_PASSWORD=your-mesh-secret    # Optional: WPA3 mesh encryption
 
-# Gateway node only (the one with internet)
-MESH_GATEWAY=true
-INET_IFACE=eth0
+# ── Client Access (GL.iNet router on eth0) ──
+AP_IFACE=eth0
+
+# ── Gateway (set on the node with internet) ──
+MESH_GATEWAY=false
+# INET_IFACE=wlan0
+
+# ── GL.iNet Router ──
+ROUTER_IP=192.168.8.1
+ROUTER_CONFIGURED_IP=192.168.8.100
+ROUTER_PASSWORD=<set-during-install>
+WIFI_SSID=Nightwatch
+WIFI_PASSWORD=Nightwatch
+
+# ── Docker Services ──
+IRC_PORT=6667
+BRIDGE_PORT=8080
+NGINX_PORT=80
+DOCKER_NETWORK=nightwatch-net
+
+# ── IRC Federation ──
+# Must be IDENTICAL on all nodes for server linking to work
+IRC_LINK_PASSWORD=<set-during-install>
 ```
 
 ## Management
 
 ```bash
-make start          # Start mesh + Docker services
-make stop           # Stop everything
-make restart        # Restart Docker services
-make full-restart   # Full restart (mesh + services)
-
-make mesh-status    # batman-adv peers, originators, AP clients, gateways
-make mesh-test      # Ping all configured nodes
-make monitor        # Live dashboard (refreshes every 5s)
-make logs           # Docker service logs
-
-make mesh-install   # Install systemd service (persists across reboots)
+make install     # First-time setup (run once per Pi)
+make run         # Start mesh + Docker services
+make stop        # Stop everything
+make test        # Full integration test (mesh, Docker, IRC cross-node)
+make update      # Pull latest code, rebuild, restart
+make status      # Show mesh and service status
+make logs        # Follow Docker logs
+make clean       # Remove containers and volumes
+make monitor     # Live dashboard (refreshes every 5s)
+make blink       # Blink onboard LED to identify this Pi
 ```
 
 ## How the Mesh Works
 
-1. **802.11s** creates encrypted wireless links between neighboring nodes
+1. **802.11s** creates wireless links between neighboring nodes (wlan1, USB dongle)
 2. **batman-adv** (kernel module) builds a Layer 2 mesh on top — handles multi-hop routing, topology discovery, and self-healing
-3. **hostapd** runs an access point on each Pi's onboard WiFi
-4. The AP is bridged into **bat0**, so client devices are on the same Layer 2 network as the mesh
-5. **Docker services** (IRC, bridge, nginx) bind to the host, reachable via bat0's IP
-6. A user on any Pi's hotspot can reach any service on any node
+3. **br0** (Linux bridge) joins bat0 + eth0, giving them a shared IP (192.168.199.10X)
+4. **GL.iNet router** on eth0 acts as a dumb WiFi AP — clients connect to it and land on br0
+5. **dnsmasq** on the Pi serves DHCP to clients on br0
+6. **Docker services** (IRC, bridge, nginx) bind to 0.0.0.0, reachable via br0's IP
+7. **Node discovery** broadcasts on bat0, auto-configures ngircd federation
+8. A user on any router's WiFi can reach any service on any node
 
 ## Multi-Node Deployment
 
@@ -133,21 +173,23 @@ make mesh-install   # Install systemd service (persists across reboots)
 |------|-----------|---------|------|
 | Node 1 | 1 | 192.168.199.101 | Regular |
 | Node 2 | 2 | 192.168.199.102 | Regular |
-| Node 3 | 3 | 192.168.199.103 | Regular |
+| Node 3 | 3 | 192.168.199.103 | Gateway (MESH_GATEWAY=true) |
 | ... | ... | ... | ... |
-| Music Node | N | 192.168.199.1XX | Gateway (MESH_GATEWAY=true) |
 
 1. Flash each Pi with Raspberry Pi OS Lite
-2. Run `setup-rpi.sh` on each
-3. Set unique `PI_NUMBER` / `MESH_IP` in `.env`
-4. `make start` on each node
-5. Nodes auto-discover and mesh. Users connect to any hotspot.
+2. Run `make install` on each (it prompts for node number + passwords)
+3. Ensure `IRC_LINK_PASSWORD` is the **same** on all nodes
+4. `make run` on each node
+5. Nodes auto-discover and mesh. Users connect to any router's WiFi.
 
 ## Troubleshooting
 
 ```bash
-# Check everything
-make mesh-status
+# Full integration test (31 checks)
+make test
+
+# Quick status
+make status
 
 # batman-adv not loading?
 sudo modprobe batman-adv
@@ -156,24 +198,48 @@ lsmod | grep batman
 # No mesh peers?
 iw dev wlan1 info              # Should show "type mesh point"
 iw dev wlan1 station dump      # Should show peer stations
-sudo batctl n                  # batman-adv neighbors
+sudo batctl meshif bat0 n      # batman-adv neighbors
 
-# No AP clients?
-iw dev wlan0 station dump      # Connected clients
-journalctl -u nightwatch-mesh  # Service logs
+# br0 bridge issues?
+bridge link show               # Should show bat0 and eth0
+ip addr show br0               # Should have 192.168.199.10X
 
-# Docker services not reaching mesh?
-# Services bind to 0.0.0.0, accessible via bat0 IP
-curl http://$(ip -4 addr show bat0 | grep inet | awk '{print $2}' | cut -d/ -f1)
+# IRC federation broken?
+docker logs ngircd 2>&1 | grep -i "bad password\|server\|link"
+# If "Bad password" → IRC_LINK_PASSWORD doesn't match between nodes
+
+# No clients getting DHCP?
+sudo systemctl status dnsmasq
+cat /var/lib/misc/dnsmasq.leases
+
+# Docker services not reachable?
+docker ps                      # All 3 should be healthy
+curl http://localhost/          # Nginx
+curl http://localhost:8080/health  # Bridge
+nc -z localhost 6667           # IRC
 ```
 
 ## Security
 
 - **Mesh encryption**: Set `MESH_SAE_PASSWORD` in `.env` for WPA3-level SAE on all mesh links
-- **AP encryption**: Set `AP_PASSWORD` for WPA2 on client hotspots
+- **WiFi encryption**: Router broadcasts WPA2 (set via `WIFI_PASSWORD`)
+- **IRC federation**: `IRC_LINK_PASSWORD` secures server-to-server links
 - **Secrets in .env**: File is gitignored, never committed
-- **Generated configs**: `ngircd.conf` is gitignored (contains link passwords)
+- **Generated configs**: `ngircd.conf` is regenerated by the discovery daemon (link passwords never in git)
 - **Local-only traffic**: All mesh traffic stays on the mesh, never touches internet
+
+## TODO
+
+- [ ] Fix IRC federation password sync — ensure `IRC_LINK_PASSWORD` is set identically during `make install` on all nodes (currently easy to mismatch)
+- [ ] Add federation health check to `make test` — detect "Bad password" loop before attempting cross-node messaging (in progress)
+- [ ] Investigate frozen Pi issue — nodes 2 and 3 become unresponsive and require hard reboot
+- [ ] Add `make sync-config` command to push `.env` secrets to all reachable nodes via mesh
+- [ ] Add captive portal — redirect new WiFi clients to the chat page automatically
+- [ ] Support channel persistence — IRC history survives container restarts
+- [ ] Add mesh network map to web UI — show topology, latency, and node status
+- [ ] Improve `make update` for offline/mesh-only nodes (currently skips git pull gracefully)
+- [ ] Add monitoring/alerting — detect and notify when nodes go offline
+- [ ] Document SD card imaging workflow for mass deployment (`scripts/build-image.sh`, `scripts/prepare-sdcard.sh`)
 
 ## Contributing
 
