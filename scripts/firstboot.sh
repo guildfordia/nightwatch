@@ -193,6 +193,29 @@ denyinterfaces eth0 bat0 br0
 DENYEOF
         echo "[+] dhcpcd: eth0/bat0/br0 excluded (bridge ports)"
     fi
+    systemctl restart dhcpcd 2>/dev/null || true
+elif command -v nmcli >/dev/null 2>&1; then
+    # NetworkManager: configure eth0 — no default route (it's a bridge port to GL.iNet AP)
+    ETH_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep 'eth0' | head -1 | cut -d: -f1)
+    if [ -n "$ETH_CON" ]; then
+        # eth0 must NOT add a default route — it connects to the GL.iNet AP (no internet)
+        # Without this, eth0's route (metric 100) wins over wlan0 (metric 600) and
+        # all traffic goes to the GL.iNet bridge which has no upstream internet.
+        nmcli con mod "$ETH_CON" ipv4.never-default yes 2>/dev/null || true
+        nmcli con mod "$ETH_CON" ipv4.dns "8.8.8.8 1.1.1.1" 2>/dev/null || true
+        nmcli con up "$ETH_CON" 2>/dev/null || true
+        echo "[+] NetworkManager: eth0 ($ETH_CON) — never-default route, DNS 8.8.8.8 + 1.1.1.1"
+    fi
+    # Also add fallback via systemd-resolved
+    mkdir -p /etc/systemd/resolved.conf.d
+    cat > /etc/systemd/resolved.conf.d/nightwatch-fallback.conf << 'DNSEOF'
+[Resolve]
+FallbackDNS=8.8.8.8 1.1.1.1
+DNSEOF
+    systemctl restart systemd-resolved 2>/dev/null || true
+    echo "[+] Fallback DNS configured (8.8.8.8, 1.1.1.1)"
+else
+    echo "[!] Neither dhcpcd nor NetworkManager found — skipping network config"
 fi
 
 # Lock /etc/resolv.conf (prevents Tailscale, dhcpcd, etc. from overwriting)
@@ -203,9 +226,6 @@ nameserver 1.1.1.1
 DNSEOF
 chattr +i /etc/resolv.conf
 echo "[+] /etc/resolv.conf locked (immutable) with 8.8.8.8 + 1.1.1.1"
-
-# Restart dhcpcd to pick up config
-systemctl restart dhcpcd 2>/dev/null || true
 
 # ---- Step 6: Install Tailscale ----
 
