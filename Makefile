@@ -15,7 +15,7 @@ ENV_FILE   := .env
 # Auto-detect docker compose v2 vs v1
 DC := $(shell if docker compose version >/dev/null 2>&1; then echo "docker compose"; elif command -v docker-compose >/dev/null 2>&1; then echo "docker-compose"; else echo "docker compose"; fi)
 
-.PHONY: install run stop test update status logs help clean monitor blink image sdcard info
+.PHONY: install run stop test update status logs help clean monitor blink image sdcard info router
 
 .DEFAULT_GOAL := help
 
@@ -36,6 +36,7 @@ help:
 	@echo "  make clean     Remove containers and volumes"
 	@echo "  make monitor   Live dashboard (refreshes every 5s)"
 	@echo "  make blink     Blink onboard LED to identify this Pi"
+	@echo "  make router    Configure GL.iNet router (can run separately)"
 	@echo "  make image     Prepare this Pi for SD card cloning (golden image)"
 	@echo "  make sdcard    Prepare a flashed SD card for a node (run on laptop)"
 	@echo "  make info      Show detailed node info (network, DNS, system)"
@@ -229,6 +230,14 @@ image:
 	@echo "  Nightwatch — Build Golden Image"
 	@echo "====================================="
 	@sudo scripts/build-image.sh
+
+# -------- router --------
+# Configure GL.iNet router (run on the Pi with router plugged into eth0)
+router:
+	@echo "====================================="
+	@echo "  Nightwatch — Router Setup"
+	@echo "====================================="
+	@sudo scripts/setup-router.sh
 
 # -------- sdcard --------
 # Prepare a flashed SD card for a specific node (run on your laptop)
