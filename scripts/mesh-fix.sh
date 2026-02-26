@@ -56,12 +56,29 @@ load_batman_module() {
 setup_mesh_interface() {
     echo "[+] Configuring $MESH_IFACE for 802.11s mesh..."
 
-    # Bring down and reset
+    # Kill anything holding the interface (NetworkManager, wpa_supplicant)
+    nmcli dev set "$MESH_IFACE" managed no 2>/dev/null || true
+    pkill -f "wpa_supplicant.*$MESH_IFACE" 2>/dev/null || true
+    sleep 1
+
+    # Bring down and set mesh type
     ip link set "$MESH_IFACE" down 2>/dev/null || true
-    iw dev "$MESH_IFACE" set type mesh 2>/dev/null || true
+    if ! iw dev "$MESH_IFACE" set type mesh; then
+        echo "[-] Failed to set $MESH_IFACE to mesh mode, retrying..."
+        sleep 2
+        iw dev "$MESH_IFACE" set type mesh
+    fi
     ip link set "$MESH_IFACE" up
 
     sleep 1
+
+    # Verify mesh mode
+    IFACE_TYPE=$(iw dev "$MESH_IFACE" info 2>/dev/null | grep type | awk '{print $2}')
+    if [ "$IFACE_TYPE" != "mesh" ]; then
+        echo "[-] Error: $MESH_IFACE is '$IFACE_TYPE' instead of 'mesh'"
+        echo "[-] Check if another process is managing this interface"
+        exit 1
+    fi
 
     # Join 802.11s mesh
     if [ -n "$MESH_SAE_PASSWORD" ]; then
