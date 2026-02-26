@@ -189,7 +189,7 @@ fi
 echo ""
 echo -e "${BOLD}${CYAN}======================================"
 echo "  Nightwatch SD Card Preparation"
-echo "======================================${NC}"
+echo -e "======================================${NC}"
 echo ""
 echo "  Node:       (auto-assigned on first boot)"
 echo "  Gateway:    $GATEWAY_MODE"
@@ -219,13 +219,20 @@ sudo mkdir -p "$DEST"
 sudo rsync -a --delete \
     --exclude='.git' \
     --exclude='.env' \
+    --exclude='.secrets' \
     --exclude='ngircd/ngircd.conf' \
     --exclude='dnsmasq/dnsmasq.conf' \
     --exclude='*.log' \
+    --exclude='*.img' \
+    --exclude='*.img.xz' \
+    --exclude='*.img.gz' \
+    --exclude='*.rpi-imager-manifest' \
+    --exclude='pishrink.sh' \
     --exclude='.DS_Store' \
     --exclude='node_modules' \
     --exclude='irc-bridge-go/irc-bridge' \
     --exclude='.firstboot-done' \
+    --exclude='.node-number' \
     "$PROJECT_DIR/" "$DEST/"
 
 echo "[+] Project copied to $DEST"
