@@ -242,18 +242,17 @@ router:
 # -------- sdcard --------
 # Prepare a flashed SD card (run on your laptop)
 # Usage: make sdcard SD=/path/to/rootfs
-#        make sdcard SD=/path/to/rootfs NODE=2 GATEWAY=true
+#        make sdcard SD=/path/to/rootfs GATEWAY=true
 sdcard:
 	@if [ -z "$(SD)" ]; then \
-		echo "Usage: make sdcard SD=/path/to/rootfs [NODE=<number>] [GATEWAY=true]"; \
+		echo "Usage: make sdcard SD=/path/to/rootfs [GATEWAY=true]"; \
 		echo ""; \
 		echo "Examples:"; \
 		echo "  make sdcard SD=/run/media/$$USER/rootfs"; \
-		echo "  make sdcard SD=/run/media/$$USER/rootfs NODE=2"; \
 		echo "  make sdcard SD=/run/media/$$USER/rootfs GATEWAY=true"; \
 		exit 1; \
 	fi
-	@scripts/prepare-sdcard.sh $(NODE) $(SD) $(if $(filter true,$(GATEWAY)),--gateway,)
+	@scripts/prepare-sdcard.sh $(SD) $(if $(filter true,$(GATEWAY)),--gateway,)
 
 # -------- info --------
 # Print detailed node information (network, DNS, system, mesh, Docker)
