@@ -370,28 +370,11 @@ echo "[9/12] Installing systemd services..."
 # Ensure scripts are executable
 chmod +x "$NIGHTWATCH_DIR"/scripts/*.sh
 
-# Detect docker compose command
-if docker compose version >/dev/null 2>&1; then
-    DC_BIN="/usr/bin/docker compose"
-elif command -v docker-compose >/dev/null 2>&1; then
-    DC_BIN="$(command -v docker-compose)"
-else
-    DC_BIN="/usr/bin/docker compose"
-fi
-
 # Install service files (replace /opt/nightwatch with actual path)
-sed "s|/opt/nightwatch|$NIGHTWATCH_DIR|g" \
-    "$NIGHTWATCH_DIR/scripts/nightwatch-nodeconfig.service" > /etc/systemd/system/nightwatch-nodeconfig.service
-
-sed "s|/opt/nightwatch|$NIGHTWATCH_DIR|g" \
-    "$NIGHTWATCH_DIR/scripts/nightwatch-mesh.service" > /etc/systemd/system/nightwatch-mesh.service
-
-sed "s|/opt/nightwatch|$NIGHTWATCH_DIR|g" \
-    "$NIGHTWATCH_DIR/scripts/nightwatch-discovery.service" > /etc/systemd/system/nightwatch-discovery.service
-
-sed -e "s|/opt/nightwatch|$NIGHTWATCH_DIR|g" \
-    -e "s|/usr/bin/docker compose|$DC_BIN|g" \
-    "$NIGHTWATCH_DIR/scripts/nightwatch-docker.service" > /etc/systemd/system/nightwatch-docker.service
+for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch-docker; do
+    sed "s|/opt/nightwatch|$NIGHTWATCH_DIR|g" \
+        "$NIGHTWATCH_DIR/scripts/${svc}.service" > /etc/systemd/system/${svc}.service
+done
 
 systemctl daemon-reload
 
