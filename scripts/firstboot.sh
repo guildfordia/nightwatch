@@ -95,6 +95,33 @@ while ! ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; do
 done
 echo "[+] Network is up"
 
+# ---- Step 1b: Sync clock (Pi has no hardware RTC) ----
+
+echo "[1b/12] Syncing system clock..."
+# Without correct time, apt signature verification fails ("Not live until ...")
+if command -v timedatectl >/dev/null 2>&1; then
+    timedatectl set-ntp true 2>/dev/null || true
+    # Wait up to 30s for NTP sync
+    for i in $(seq 1 15); do
+        if timedatectl show -p NTPSynchronized --value 2>/dev/null | grep -q "yes"; then
+            break
+        fi
+        sleep 2
+    done
+fi
+# Fallback: fetch time from HTTP header if NTP didn't work
+if [ "$(date +%Y)" -lt 2026 ]; then
+    HTTP_DATE=$(curl -sI http://deb.debian.org 2>/dev/null | grep -i "^date:" | sed 's/^[Dd]ate: //')
+    if [ -n "$HTTP_DATE" ]; then
+        date -s "$HTTP_DATE" 2>/dev/null || true
+        echo "[+] Clock set from HTTP: $(date)"
+    else
+        echo "[!] Warning: could not sync clock — apt may fail"
+    fi
+else
+    echo "[+] Clock OK: $(date)"
+fi
+
 # ---- Step 2: Install system packages ----
 
 echo ""
