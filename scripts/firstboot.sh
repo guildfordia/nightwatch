@@ -95,7 +95,7 @@ echo "[1/12] Waiting for network..."
 TRIES=0
 MAX_TRIES=30
 while ! ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; do
-    ((TRIES++))
+    TRIES=$((TRIES + 1))
     if [ "$TRIES" -ge "$MAX_TRIES" ]; then
         echo "[-] No internet after ${MAX_TRIES} attempts."
         echo "[-] Connect Ethernet or configure WiFi, then run: sudo systemctl start nightwatch-firstboot"
