@@ -103,7 +103,37 @@ if [ "$IS_GATEWAY" = true ]; then
     log "Gateway mode enabled"
 fi
 
+# Inject secrets from .secrets file (preserved by build-image.sh)
+SECRETS_FILE="$NIGHTWATCH_DIR/.secrets"
+if [ -f "$SECRETS_FILE" ]; then
+    log "Injecting secrets from .secrets..."
+    while IFS='=' read -r key value; do
+        # Skip comments and empty lines
+        [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
+        # Replace the value in .env
+        sed -i "s/^${key}=.*/${key}=${value}/" "$ENV_FILE"
+    done < "$SECRETS_FILE"
+    log "Secrets injected"
+fi
+
 log "Config: PI_NUMBER=$NODE_NUM MESH_IP=$MESH_IP GATEWAY=$IS_GATEWAY"
+
+# ---- Tailscale setup (if auth key present and not yet connected) ----
+
+# shellcheck source=/dev/null
+source "$ENV_FILE"
+if [ -n "${TAILSCALE_AUTH_KEY:-}" ] && command -v tailscale >/dev/null 2>&1; then
+    TS_STATUS=$(tailscale status --json 2>/dev/null | grep -o '"BackendState":"[^"]*"' | cut -d'"' -f4 || echo "")
+    if [ "$TS_STATUS" != "Running" ]; then
+        log "Connecting to Tailscale..."
+        systemctl start tailscaled 2>/dev/null || true
+        tailscale up --auth-key="$TAILSCALE_AUTH_KEY" --accept-routes --hostname="$(hostname)" 2>/dev/null || true
+        tailscale set --accept-dns=false 2>/dev/null || true
+        log "Tailscale connected: $(tailscale ip --4 2>/dev/null || echo 'pending')"
+    else
+        log "Tailscale already running"
+    fi
+fi
 
 # ---- Generate ngircd config ----
 
