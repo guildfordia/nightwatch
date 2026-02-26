@@ -202,6 +202,10 @@ rm -f /var/lib/dbus/machine-id
 
 # Clear SSH host keys (will regenerate on boot — each clone gets unique keys)
 rm -f /etc/ssh/ssh_host_*
+# Regenerate immediately so SSH still works if we don't capture the image right away
+# (clones will regenerate their own unique keys via sshd-keygen on first boot)
+ssh-keygen -A >/dev/null 2>&1 || true
+systemctl restart sshd 2>/dev/null || true
 
 # Clear journald logs
 journalctl --rotate 2>/dev/null || true

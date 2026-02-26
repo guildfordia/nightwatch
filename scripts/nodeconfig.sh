@@ -27,6 +27,13 @@ ENV_FILE="$NIGHTWATCH_DIR/.env"
 ENV_TEMPLATE="$NIGHTWATCH_DIR/.env.example"
 NODE_NUM_FILE="$NIGHTWATCH_DIR/.node-number"
 
+# Ensure SSH host keys exist (build-image.sh deletes them for cloning)
+if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
+    log "Regenerating SSH host keys..."
+    ssh-keygen -A >/dev/null 2>&1 || true
+    systemctl restart sshd 2>/dev/null || true
+fi
+
 if [ ! -d "$NIGHTWATCH_DIR" ]; then
     log "Error: $NIGHTWATCH_DIR not found"
     exit 1
