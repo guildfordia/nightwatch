@@ -127,7 +127,7 @@ if [ -n "${TAILSCALE_AUTH_KEY:-}" ] && command -v tailscale >/dev/null 2>&1; the
     if [ "$TS_STATUS" != "Running" ]; then
         log "Connecting to Tailscale..."
         systemctl start tailscaled 2>/dev/null || true
-        tailscale up --auth-key="$TAILSCALE_AUTH_KEY" --accept-routes --hostname="$(hostname)" 2>/dev/null || true
+        tailscale up --auth-key="$TAILSCALE_AUTH_KEY" --accept-routes --accept-dns=false --hostname="$(hostname)" --reset 2>/dev/null || true
         tailscale set --accept-dns=false 2>/dev/null || true
         log "Tailscale connected: $(tailscale ip --4 2>/dev/null || echo 'pending')"
     else

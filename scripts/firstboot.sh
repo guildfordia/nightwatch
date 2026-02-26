@@ -274,10 +274,7 @@ if [ -n "$TAILSCALE_AUTH_KEY" ]; then
 
     # Join the tailnet unattended with the auth key
     echo "[+] Joining tailnet with auth key..."
-    tailscale up --auth-key="$TAILSCALE_AUTH_KEY" --accept-routes --hostname="$(hostname)"
-
-    # Disable Tailscale DNS (we manage DNS ourselves)
-    tailscale set --accept-dns=false 2>/dev/null || true
+    tailscale up --auth-key="$TAILSCALE_AUTH_KEY" --accept-routes --accept-dns=false --hostname="$(hostname)" --reset
 
     # Wait for connection
     sleep 3
