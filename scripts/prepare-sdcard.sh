@@ -12,12 +12,12 @@
 # Node number is assigned dynamically on first boot by scanning the mesh network.
 #
 # Usage:
-#   ./scripts/prepare-sdcard.sh <sdcard_rootfs_path> [options]
+#   ./scripts/prepare-sdcard.sh <sdcard_path> [options]
 #
 # Examples:
+#   ./scripts/prepare-sdcard.sh /dev/sdf
+#   ./scripts/prepare-sdcard.sh /dev/sdf --gateway
 #   ./scripts/prepare-sdcard.sh /run/media/$USER/rootfs
-#   ./scripts/prepare-sdcard.sh /Volumes/rootfs --gateway
-#   ./scripts/prepare-sdcard.sh /media/user/rootfs --yes
 #
 # What it does:
 #   1. Copies the entire project to /opt/nightwatch/ on the SD card
@@ -46,17 +46,17 @@ NC='\033[0m'
 # ---- Usage ----
 
 usage() {
-    echo "Usage: $0 <sdcard_rootfs_path> [options]"
+    echo "Usage: $0 <sdcard_path> [options]"
     echo ""
-    echo "  sdcard_path:  Path to the SD card's rootfs partition (required)"
+    echo "  sdcard_path:  Block device (e.g. /dev/sdf) or mounted rootfs path"
     echo ""
     echo "Options:"
     echo "  --gateway     Mark this node as the internet gateway"
     echo "  --yes         Skip confirmation prompts"
     echo ""
     echo "Examples:"
-    echo "  $0 /run/media/\$USER/rootfs"
-    echo "  $0 /Volumes/rootfs --gateway"
+    echo "  $0 /dev/sdf"
+    echo "  $0 /dev/sdf --gateway"
     echo ""
     echo "Node number is assigned dynamically on first boot by scanning the mesh."
     echo ""
@@ -85,9 +85,53 @@ done
 # ---- Validate SD card path ----
 
 if [ -z "$SD_ROOT" ]; then
-    echo -e "${RED}Error: SD card rootfs path is required${NC}"
+    echo -e "${RED}Error: SD card path is required${NC}"
     usage
 fi
+
+# If given a block device (e.g. /dev/sdf), find and mount the rootfs partition
+AUTO_MOUNTED=false
+if [ -b "$SD_ROOT" ]; then
+    DISK="$SD_ROOT"
+    echo "[+] Block device detected: $DISK"
+
+    # Find the rootfs partition (largest Linux partition, typically partition 2)
+    ROOTFS_PART=""
+    for part in "${DISK}"2 "${DISK}p2"; do
+        if [ -b "$part" ]; then
+            ROOTFS_PART="$part"
+            break
+        fi
+    done
+
+    if [ -z "$ROOTFS_PART" ]; then
+        echo -e "${RED}Error: Could not find rootfs partition on $DISK${NC}"
+        echo "Expected ${DISK}2 or ${DISK}p2"
+        exit 1
+    fi
+
+    # Check if already mounted
+    EXISTING_MOUNT=$(lsblk -o MOUNTPOINT -nr "$ROOTFS_PART" 2>/dev/null | head -1)
+    if [ -n "$EXISTING_MOUNT" ]; then
+        SD_ROOT="$EXISTING_MOUNT"
+        echo "[+] Already mounted at $SD_ROOT"
+    else
+        SD_ROOT="/mnt/nightwatch-sdcard"
+        sudo mkdir -p "$SD_ROOT"
+        echo "[+] Mounting $ROOTFS_PART → $SD_ROOT"
+        sudo mount "$ROOTFS_PART" "$SD_ROOT"
+        AUTO_MOUNTED=true
+    fi
+fi
+
+# Cleanup function to unmount if we mounted it
+cleanup() {
+    if [ "$AUTO_MOUNTED" = true ]; then
+        echo "[+] Unmounting $SD_ROOT..."
+        sudo umount "$SD_ROOT" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
 
 # Validate SD card root
 if [ ! -d "$SD_ROOT/etc" ] || [ ! -d "$SD_ROOT/opt" ]; then

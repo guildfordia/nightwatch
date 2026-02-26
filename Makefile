@@ -245,11 +245,13 @@ router:
 #        make sdcard SD=/path/to/rootfs GATEWAY=true
 sdcard:
 	@if [ -z "$(SD)" ]; then \
-		echo "Usage: make sdcard SD=/path/to/rootfs [GATEWAY=true]"; \
+		echo "Usage: make sdcard SD=/dev/sdX [GATEWAY=true]"; \
 		echo ""; \
 		echo "Examples:"; \
-		echo "  make sdcard SD=/run/media/$$USER/rootfs"; \
-		echo "  make sdcard SD=/run/media/$$USER/rootfs GATEWAY=true"; \
+		echo "  make sdcard SD=/dev/sdf"; \
+		echo "  make sdcard SD=/dev/sdf GATEWAY=true"; \
+		echo ""; \
+		echo "Use 'lsblk' to find your SD card device."; \
 		exit 1; \
 	fi
 	@scripts/prepare-sdcard.sh $(SD) $(if $(filter true,$(GATEWAY)),--gateway,)
