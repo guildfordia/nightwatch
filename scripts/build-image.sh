@@ -65,6 +65,15 @@ fi
 
 cd "$NIGHTWATCH_DIR"
 
+# ---- Step 0: Update project to latest ----
+
+echo "[0/7] Updating project to latest version..."
+if [ -d "$NIGHTWATCH_DIR/.git" ]; then
+    git -C "$NIGHTWATCH_DIR" pull --ff-only 2>/dev/null && echo "[+] Updated from git" || echo "[+] Git pull skipped (no internet or not a repo)"
+else
+    echo "[+] Not a git repo — using existing files"
+fi
+
 # ---- Step 1: Stop services ----
 
 echo "[1/7] Stopping services..."
