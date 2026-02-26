@@ -39,6 +39,15 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+# Auto-detect docker compose v2 vs v1
+if docker compose version >/dev/null 2>&1; then
+    DC="docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+    DC="docker-compose"
+else
+    DC="docker compose"
+fi
+
 echo ""
 echo -e "${BOLD}======================================"
 echo "  Nightwatch — Image Builder"
@@ -59,7 +68,7 @@ cd "$NIGHTWATCH_DIR"
 # ---- Step 1: Stop services ----
 
 echo "[1/7] Stopping services..."
-docker compose --env-file .env down 2>/dev/null || true
+$DC --env-file .env down 2>/dev/null || true
 systemctl stop nightwatch-discovery.service 2>/dev/null || true
 systemctl stop nightwatch-mesh.service 2>/dev/null || true
 echo "[+] Services stopped"
@@ -68,7 +77,7 @@ echo "[+] Services stopped"
 
 echo ""
 echo "[2/7] Pre-building Docker images (so clones don't need internet)..."
-docker compose --env-file .env build
+$DC --env-file .env build
 echo "[+] Docker images built and cached"
 
 # ---- Step 3: Pre-pull base images ----
@@ -111,9 +120,13 @@ if [ -f "$NIGHTWATCH_DIR/.env" ]; then
     echo "  Saved secrets to .secrets"
 fi
 
-# Remove .env (will be generated on first boot from hostname)
+# Remove .env (will be generated on first boot)
 rm -f "$NIGHTWATCH_DIR/.env"
 echo "  Removed .env"
+
+# Remove saved node number (so clone does fresh dynamic assignment)
+rm -f "$NIGHTWATCH_DIR/.node-number"
+echo "  Removed .node-number"
 
 # Remove generated ngircd config
 rm -f "$NIGHTWATCH_DIR/ngircd/ngircd.conf"
@@ -228,13 +241,16 @@ echo -e "  ${BOLD}5. Compress for Pi Imager (supports .img.xz natively):${NC}"
 echo "     xz -9 -T0 nightwatch.img"
 echo "     # Creates nightwatch.img.xz (~60-70% smaller)"
 echo ""
-echo -e "  ${BOLD}6. Flash to other SD cards:${NC}"
-echo "     Open Pi Imager -> Choose OS -> Use custom -> select nightwatch.img.xz"
-echo "     In settings, set ONLY:"
+echo -e "  ${BOLD}6. Generate Pi Imager manifest (enables hostname/SSH customization):${NC}"
+echo "     ./scripts/make-imager-manifest.sh nightwatch.img.xz"
+echo ""
+echo -e "  ${BOLD}7. Flash to other SD cards:${NC}"
+echo "     Double-click nightwatch.rpi-imager-manifest"
+echo "     → Pi Imager opens with Nightwatch pre-selected"
+echo "     → Choose storage → Next → Set:"
 echo "       - Hostname: nightwatch-1 (or nightwatch-2, nightwatch-3, etc.)"
 echo "       - Enable SSH"
 echo "       - Username/password"
-echo "       - WiFi (if the node needs internet, e.g. gateway)"
 echo "     The node number is derived from the hostname automatically."
 echo ""
 echo -e "  ${YELLOW}Note: This golden image has all packages and Docker images pre-installed.${NC}"
