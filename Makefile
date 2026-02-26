@@ -38,7 +38,7 @@ help:
 	@echo "  make blink     Blink onboard LED to identify this Pi"
 	@echo "  make router    Configure GL.iNet router (can run separately)"
 	@echo "  make image     Prepare this Pi for SD card cloning (golden image)"
-	@echo "  make sdcard    Prepare a flashed SD card for a node (run on laptop)"
+	@echo "  make sdcard    Prepare a flashed SD card (run on laptop, node auto-assigned)"
 	@echo "  make info      Show detailed node info (network, DNS, system)"
 	@echo ""
 	@echo "First time on a new Pi:"
@@ -240,19 +240,12 @@ router:
 	@sudo scripts/setup-router.sh
 
 # -------- sdcard --------
-# Prepare a flashed SD card for a specific node (run on your laptop)
-# Usage: make sdcard NODE=1
-#        make sdcard NODE=2 GATEWAY=true
+# Prepare a flashed SD card (run on your laptop)
+# Node number is optional — if omitted, assigned dynamically on first boot
+# Usage: make sdcard
+#        make sdcard NODE=2
+#        make sdcard GATEWAY=true
 sdcard:
-	@if [ -z "$(NODE)" ]; then \
-		echo "Usage: make sdcard NODE=<number> [GATEWAY=true]"; \
-		echo ""; \
-		echo "Examples:"; \
-		echo "  make sdcard NODE=1"; \
-		echo "  make sdcard NODE=2"; \
-		echo "  make sdcard NODE=3 GATEWAY=true"; \
-		exit 1; \
-	fi
 	@scripts/prepare-sdcard.sh $(NODE) $(if $(filter true,$(GATEWAY)),--gateway,)
 
 # -------- info --------

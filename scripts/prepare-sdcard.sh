@@ -46,9 +46,9 @@ NC='\033[0m'
 # ---- Usage ----
 
 usage() {
-    echo "Usage: $0 <node_number> [sdcard_rootfs_path] [options]"
+    echo "Usage: $0 [node_number] [sdcard_rootfs_path] [options]"
     echo ""
-    echo "  node_number:  Pi number (1, 2, 3, ...) — must match .env.example config"
+    echo "  node_number:  Pi number (1-20). If omitted, assigned dynamically on first boot."
     echo "  sdcard_path:  Path to the SD card's rootfs partition (auto-detected if omitted)"
     echo ""
     echo "Options:"
@@ -56,10 +56,10 @@ usage() {
     echo "  --yes         Skip confirmation prompts"
     echo ""
     echo "Examples:"
-    echo "  $0 1                          # Auto-detect SD card"
-    echo "  $0 2 /Volumes/rootfs          # macOS"
-    echo "  $0 3 /media/\$USER/rootfs      # Linux"
-    echo "  $0 1 --gateway                # Mark node as gateway (internet sharing)"
+    echo "  $0                            # Dynamic node assignment"
+    echo "  $0 1                          # Force node 1"
+    echo "  $0 2 /Volumes/rootfs          # macOS, force node 2"
+    echo "  $0 --gateway                  # Dynamic + gateway mode"
     echo ""
     echo "Environment variables (optional — skips password prompts):"
     echo "  ROUTER_PASSWORD     GL.iNet router admin password"
@@ -68,30 +68,35 @@ usage() {
     exit 1
 }
 
-if [ $# -lt 1 ]; then
-    usage
-fi
-
-NODE_NUM="$1"
+NODE_NUM=""
 GATEWAY_MODE=false
 SD_ROOT=""
 AUTO_YES=false
 
 # Parse args
-shift
 while [ $# -gt 0 ]; do
     case "$1" in
         --gateway) GATEWAY_MODE=true ;;
         --yes|-y)  AUTO_YES=true ;;
-        *)         SD_ROOT="$1" ;;
+        --help|-h) usage ;;
+        *)
+            # First non-flag arg: if it's a number, it's the node number; otherwise it's the SD path
+            if [ -z "$NODE_NUM" ] && [[ "$1" =~ ^[0-9]+$ ]]; then
+                NODE_NUM="$1"
+            else
+                SD_ROOT="$1"
+            fi
+            ;;
     esac
     shift
 done
 
-# Validate node number
-if ! [[ "$NODE_NUM" =~ ^[0-9]+$ ]] || [ "$NODE_NUM" -lt 1 ] || [ "$NODE_NUM" -gt 20 ]; then
-    echo -e "${RED}Error: node_number must be between 1 and 20${NC}"
-    exit 1
+# Validate node number if provided
+if [ -n "$NODE_NUM" ]; then
+    if [ "$NODE_NUM" -lt 1 ] || [ "$NODE_NUM" -gt 20 ]; then
+        echo -e "${RED}Error: node_number must be between 1 and 20${NC}"
+        exit 1
+    fi
 fi
 
 # ---- Auto-detect SD card ----
@@ -171,15 +176,22 @@ set -o allexport
 source "$ENV_TEMPLATE"
 set +o allexport
 
-# Get this node's specific config
-IP_VAR="PI${NODE_NUM}_MESH_IP"
-NAME_VAR="PI${NODE_NUM}_SERVER_NAME"
-NODE_IP="${!IP_VAR:-}"
-NODE_NAME="${!NAME_VAR:-node${NODE_NUM}.nightwatch.irc}"
+# Get this node's specific config (if node number is set)
+DYNAMIC_MODE=false
+if [ -n "$NODE_NUM" ]; then
+    IP_VAR="PI${NODE_NUM}_MESH_IP"
+    NAME_VAR="PI${NODE_NUM}_SERVER_NAME"
+    NODE_IP="${!IP_VAR:-}"
+    NODE_NAME="${!NAME_VAR:-node${NODE_NUM}.nightwatch.irc}"
 
-if [ -z "$NODE_IP" ]; then
-    # Generate IP from node number
-    NODE_IP="192.168.199.$((100 + NODE_NUM))"
+    if [ -z "$NODE_IP" ]; then
+        # Generate IP from node number
+        NODE_IP="192.168.199.$((100 + NODE_NUM))"
+    fi
+else
+    DYNAMIC_MODE=true
+    NODE_IP="(assigned on first boot)"
+    NODE_NAME="(assigned on first boot)"
 fi
 
 # ---- Prompt for secrets ----
@@ -214,9 +226,13 @@ echo -e "${BOLD}${CYAN}======================================"
 echo "  Nightwatch SD Card Preparation"
 echo "======================================${NC}"
 echo ""
+if [ "$DYNAMIC_MODE" = true ]; then
+echo "  Node:       (dynamic — assigned on first boot)"
+else
 echo "  Node:       Pi #$NODE_NUM"
 echo "  Name:       $NODE_NAME"
 echo "  Mesh IP:    $NODE_IP"
+fi
 echo "  Gateway:    $GATEWAY_MODE"
 echo "  Tailscale:  $([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo 'yes (auth key set)' || echo 'no')"
 echo "  SD card:    $SD_ROOT"
@@ -257,36 +273,65 @@ echo "[+] Project copied to $DEST"
 
 # ---- Step 2: Generate node-specific .env ----
 
-echo "[2/5] Generating .env for Pi #$NODE_NUM..."
+if [ "$DYNAMIC_MODE" = true ]; then
+    echo "[2/5] Preparing .env template (node config assigned on first boot)..."
 
-# Build the .env by modifying the template
-ENV_DEST="$DEST/.env"
-sudo cp "$ENV_TEMPLATE" "$ENV_DEST"
+    # In dynamic mode, don't generate a full .env — nodeconfig.sh will do it on boot.
+    # Just save secrets so nodeconfig can inject them.
+    SECRETS_DEST="$DEST/.secrets"
+    sudo bash -c "cat > '$SECRETS_DEST'" << SECRETSEOF
+# Nightwatch secrets — baked by prepare-sdcard.sh
+# nodeconfig.sh injects these into .env on first boot
+ROUTER_PASSWORD='${ROUTER_PASSWORD}'
+IRC_LINK_PASSWORD='${IRC_LINK_PASSWORD}'
+TAILSCALE_AUTH_KEY=${TAILSCALE_AUTH_KEY:-}
+SECRETSEOF
+    sudo chmod 600 "$SECRETS_DEST"
 
-# Override node-specific values
-sudo sed -i.bak "s/^PI_NUMBER=.*/PI_NUMBER=$NODE_NUM/" "$ENV_DEST"
-sudo sed -i.bak "s/^MESH_IP=.*/MESH_IP=$NODE_IP/" "$ENV_DEST"
+    # Also save gateway mode flag
+    if [ "$GATEWAY_MODE" = true ]; then
+        echo "MESH_GATEWAY=true" | sudo tee -a "$SECRETS_DEST" > /dev/null
+    fi
 
-if [ "$GATEWAY_MODE" = true ]; then
-    sudo sed -i.bak "s/^MESH_GATEWAY=.*/MESH_GATEWAY=true/" "$ENV_DEST"
-    sudo sed -i.bak "s/^# INET_IFACE=eth0/INET_IFACE=eth0/" "$ENV_DEST"
+    # Remove any .env so nodeconfig generates a fresh one
+    sudo rm -f "$DEST/.env"
+
+    echo "[+] Secrets saved (nodeconfig will generate .env on first boot)"
+    echo "    ROUTER_PASSWORD=***"
+    echo "    IRC_LINK_PASSWORD=***"
+    echo "    TAILSCALE_AUTH_KEY=$([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo '***' || echo '(empty)')"
+else
+    echo "[2/5] Generating .env for Pi #$NODE_NUM..."
+
+    # Build the .env by modifying the template
+    ENV_DEST="$DEST/.env"
+    sudo cp "$ENV_TEMPLATE" "$ENV_DEST"
+
+    # Override node-specific values
+    sudo sed -i.bak "s/^PI_NUMBER=.*/PI_NUMBER=$NODE_NUM/" "$ENV_DEST"
+    sudo sed -i.bak "s/^MESH_IP=.*/MESH_IP=$NODE_IP/" "$ENV_DEST"
+
+    if [ "$GATEWAY_MODE" = true ]; then
+        sudo sed -i.bak "s/^MESH_GATEWAY=.*/MESH_GATEWAY=true/" "$ENV_DEST"
+        sudo sed -i.bak "s/^# INET_IFACE=eth0/INET_IFACE=eth0/" "$ENV_DEST"
+    fi
+
+    # Bake in secrets (single-quote to prevent $ expansion in bash/docker-compose)
+    sudo sed -i.bak "s/^ROUTER_PASSWORD=.*/ROUTER_PASSWORD='${ROUTER_PASSWORD}'/" "$ENV_DEST"
+    sudo sed -i.bak "s/^IRC_LINK_PASSWORD=.*/IRC_LINK_PASSWORD='${IRC_LINK_PASSWORD}'/" "$ENV_DEST"
+    sudo sed -i.bak "s/^TAILSCALE_AUTH_KEY=.*/TAILSCALE_AUTH_KEY=${TAILSCALE_AUTH_KEY:-}/" "$ENV_DEST"
+
+    # Clean up sed backup files
+    sudo rm -f "$ENV_DEST.bak"
+
+    echo "[+] .env written:"
+    echo "    PI_NUMBER=$NODE_NUM"
+    echo "    MESH_IP=$NODE_IP"
+    echo "    MESH_GATEWAY=$GATEWAY_MODE"
+    echo "    ROUTER_PASSWORD=***"
+    echo "    IRC_LINK_PASSWORD=***"
+    echo "    TAILSCALE_AUTH_KEY=$([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo '***' || echo '(empty)')"
 fi
-
-# Bake in secrets (single-quote to prevent $ expansion in bash/docker-compose)
-sudo sed -i.bak "s/^ROUTER_PASSWORD=.*/ROUTER_PASSWORD='${ROUTER_PASSWORD}'/" "$ENV_DEST"
-sudo sed -i.bak "s/^IRC_LINK_PASSWORD=.*/IRC_LINK_PASSWORD='${IRC_LINK_PASSWORD}'/" "$ENV_DEST"
-sudo sed -i.bak "s/^TAILSCALE_AUTH_KEY=.*/TAILSCALE_AUTH_KEY=${TAILSCALE_AUTH_KEY:-}/" "$ENV_DEST"
-
-# Clean up sed backup files
-sudo rm -f "$ENV_DEST.bak"
-
-echo "[+] .env written:"
-echo "    PI_NUMBER=$NODE_NUM"
-echo "    MESH_IP=$NODE_IP"
-echo "    MESH_GATEWAY=$GATEWAY_MODE"
-echo "    ROUTER_PASSWORD=***"
-echo "    IRC_LINK_PASSWORD=***"
-echo "    TAILSCALE_AUTH_KEY=$([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo '***' || echo '(empty)')"
 
 # ---- Step 3: Write /etc/nightwatch.conf ----
 
@@ -320,7 +365,13 @@ echo "[+] Firstboot service installed and enabled"
 echo "[5/5] Verifying..."
 
 ERRORS=0
-for f in .env .env.example scripts/firstboot.sh scripts/mesh-fix.sh scripts/nodeconfig.sh scripts/node-discovery.sh scripts/setup-distributed-irc.sh docker-compose.yml irc-bridge-go/Dockerfile html/index.html; do
+VERIFY_FILES=".env.example scripts/firstboot.sh scripts/mesh-fix.sh scripts/nodeconfig.sh scripts/node-discovery.sh scripts/setup-distributed-irc.sh docker-compose.yml irc-bridge-go/Dockerfile html/index.html"
+if [ "$DYNAMIC_MODE" = true ]; then
+    VERIFY_FILES="$VERIFY_FILES .secrets"
+else
+    VERIFY_FILES="$VERIFY_FILES .env"
+fi
+for f in $VERIFY_FILES; do
     if [ ! -f "$DEST/$f" ]; then
         echo -e "  ${RED}[MISS] $f${NC}"
         ((ERRORS++))
@@ -350,8 +401,12 @@ echo -e "${GREEN}${BOLD}======================================"
 echo "  SD Card Ready!"
 echo "======================================${NC}"
 echo ""
+if [ "$DYNAMIC_MODE" = true ]; then
+echo "  Node:       (dynamic — auto-assigned on first boot)"
+else
 echo "  Node:       Pi #$NODE_NUM ($NODE_NAME)"
 echo "  Mesh IP:    $NODE_IP"
+fi
 echo "  Gateway:    $GATEWAY_MODE"
 echo "  Tailscale:  $([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo 'yes' || echo 'no')"
 echo ""

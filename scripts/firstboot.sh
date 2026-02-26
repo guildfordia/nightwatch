@@ -59,8 +59,19 @@ fi
 
 cd "$NIGHTWATCH_DIR"
 
+# If .env doesn't exist, run nodeconfig first to generate it (dynamic mode)
 if [ ! -f ".env" ]; then
-    echo "[-] Error: .env not found in $NIGHTWATCH_DIR"
+    echo "[+] No .env found — running nodeconfig for dynamic node assignment..."
+    if [ -x scripts/nodeconfig.sh ]; then
+        scripts/nodeconfig.sh
+    else
+        echo "[-] Error: .env not found and nodeconfig.sh not available"
+        exit 1
+    fi
+fi
+
+if [ ! -f ".env" ]; then
+    echo "[-] Error: .env still not found after nodeconfig"
     exit 1
 fi
 
