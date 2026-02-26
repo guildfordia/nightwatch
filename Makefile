@@ -38,7 +38,7 @@ help:
 	@echo "  make blink     Blink onboard LED to identify this Pi"
 	@echo "  make router    Configure GL.iNet router (can run separately)"
 	@echo "  make image     Prepare this Pi for SD card cloning (golden image)"
-	@echo "  make sdcard    Prepare a flashed SD card (run on laptop, node auto-assigned)"
+	@echo "  make sdcard    Prepare a flashed SD card: make sdcard SD=/path/to/rootfs"
 	@echo "  make info      Show detailed node info (network, DNS, system)"
 	@echo ""
 	@echo "First time on a new Pi:"
@@ -241,12 +241,19 @@ router:
 
 # -------- sdcard --------
 # Prepare a flashed SD card (run on your laptop)
-# Node number is optional — if omitted, assigned dynamically on first boot
-# Usage: make sdcard
-#        make sdcard NODE=2
-#        make sdcard GATEWAY=true
+# Usage: make sdcard SD=/path/to/rootfs
+#        make sdcard SD=/path/to/rootfs NODE=2 GATEWAY=true
 sdcard:
-	@scripts/prepare-sdcard.sh $(NODE) $(if $(filter true,$(GATEWAY)),--gateway,)
+	@if [ -z "$(SD)" ]; then \
+		echo "Usage: make sdcard SD=/path/to/rootfs [NODE=<number>] [GATEWAY=true]"; \
+		echo ""; \
+		echo "Examples:"; \
+		echo "  make sdcard SD=/run/media/$$USER/rootfs"; \
+		echo "  make sdcard SD=/run/media/$$USER/rootfs NODE=2"; \
+		echo "  make sdcard SD=/run/media/$$USER/rootfs GATEWAY=true"; \
+		exit 1; \
+	fi
+	@scripts/prepare-sdcard.sh $(NODE) $(SD) $(if $(filter true,$(GATEWAY)),--gateway,)
 
 # -------- info --------
 # Print detailed node information (network, DNS, system, mesh, Docker)

@@ -46,20 +46,19 @@ NC='\033[0m'
 # ---- Usage ----
 
 usage() {
-    echo "Usage: $0 [node_number] [sdcard_rootfs_path] [options]"
+    echo "Usage: $0 [node_number] <sdcard_rootfs_path> [options]"
     echo ""
     echo "  node_number:  Pi number (1-20). If omitted, assigned dynamically on first boot."
-    echo "  sdcard_path:  Path to the SD card's rootfs partition (auto-detected if omitted)"
+    echo "  sdcard_path:  Path to the SD card's rootfs partition (required)"
     echo ""
     echo "Options:"
     echo "  --gateway     Mark this node as the internet gateway"
     echo "  --yes         Skip confirmation prompts"
     echo ""
     echo "Examples:"
-    echo "  $0                            # Dynamic node assignment"
-    echo "  $0 1                          # Force node 1"
-    echo "  $0 2 /Volumes/rootfs          # macOS, force node 2"
-    echo "  $0 --gateway                  # Dynamic + gateway mode"
+    echo "  $0 /run/media/\$USER/rootfs                  # Dynamic node assignment"
+    echo "  $0 1 /run/media/\$USER/rootfs                # Force node 1"
+    echo "  $0 /Volumes/rootfs --gateway                 # macOS, gateway mode"
     echo ""
     echo "Environment variables (optional — skips password prompts):"
     echo "  ROUTER_PASSWORD     GL.iNet router admin password"
@@ -99,56 +98,11 @@ if [ -n "$NODE_NUM" ]; then
     fi
 fi
 
-# ---- Auto-detect SD card ----
+# ---- Validate SD card path ----
 
 if [ -z "$SD_ROOT" ]; then
-    echo "[+] Auto-detecting SD card rootfs..."
-
-    case "$(uname)" in
-        Darwin)
-            # macOS: look for /Volumes/rootfs
-            if [ -d "/Volumes/rootfs" ]; then
-                SD_ROOT="/Volumes/rootfs"
-            else
-                # Look for any volume that looks like a Pi rootfs
-                for vol in /Volumes/*; do
-                    if [ -d "$vol/etc/systemd" ] && [ -d "$vol/opt" ]; then
-                        SD_ROOT="$vol"
-                        break
-                    fi
-                done
-            fi
-            ;;
-        Linux)
-            # Linux: check common mount points
-            for mount in /media/"$USER"/rootfs /mnt/rootfs /media/rootfs; do
-                if [ -d "$mount/etc/systemd" ]; then
-                    SD_ROOT="$mount"
-                    break
-                fi
-            done
-            # Try lsblk to find mounted partitions
-            if [ -z "$SD_ROOT" ]; then
-                root_mount=$(lsblk -o MOUNTPOINT -nr 2>/dev/null | grep -E "^/media|^/mnt" | while read -r mp; do
-                    if [ -d "$mp/etc/systemd" ]; then
-                        echo "$mp"
-                        break
-                    fi
-                done)
-                SD_ROOT="${root_mount:-}"
-            fi
-            ;;
-    esac
-
-    if [ -z "$SD_ROOT" ]; then
-        echo -e "${RED}Error: Could not auto-detect SD card rootfs${NC}"
-        echo "Please specify the path manually:"
-        echo "  $0 $NODE_NUM /path/to/rootfs"
-        echo ""
-        echo "On macOS, insert the SD card and look for /Volumes/rootfs"
-        echo "On Linux, check /media/\$USER/ or /mnt/"
-        exit 1
-    fi
+    echo -e "${RED}Error: SD card rootfs path is required${NC}"
+    usage
 fi
 
 # Validate SD card root
