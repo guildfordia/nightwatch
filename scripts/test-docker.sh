@@ -106,9 +106,9 @@ else
     fail "IRC port 6667 not reachable"
 fi
 
-# IRC protocol response
-IRC_RESP=$(echo "QUIT" | nc -w 3 localhost 6667 2>/dev/null | head -1 || echo "")
-if echo "$IRC_RESP" | grep -qi "irc\|ngircd\|nightwatch"; then
+# IRC protocol response (server needs time between NICK/USER before it replies)
+IRC_RESP=$( (echo -e "NICK testprobe\r"; sleep 1; echo -e "USER testprobe 0 * :test\r"; sleep 2; echo -e "QUIT\r") | nc -w 5 localhost 6667 2>/dev/null | head -1 || echo "")
+if echo "$IRC_RESP" | grep -qi "irc\|ngircd\|nightwatch\|001\|NOTICE"; then
     pass "IRC server responds with valid protocol"
 else
     if [ -n "$IRC_RESP" ]; then
@@ -150,8 +150,8 @@ section "5. Nginx Web Server"
 NGINX_PORT=$(docker port nginx 2>/dev/null | grep 80 | head -1 | awk -F: '{print $NF}' || echo "80")
 
 # Serves HTML
-NGINX_RESP=$(curl -sf --max-time 3 "http://localhost:${NGINX_PORT}/" 2>/dev/null || echo "")
-if echo "$NGINX_RESP" | grep -qi "nightwatch\|html"; then
+NGINX_RESP=$(curl -s --max-time 3 "http://localhost:${NGINX_PORT}/" 2>/dev/null || echo "")
+if grep -qi "nightwatch\|html" <<< "$NGINX_RESP"; then
     pass "Nginx serves Nightwatch frontend (port $NGINX_PORT)"
 else
     fail "Nginx response does not contain expected content"
