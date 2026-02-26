@@ -47,6 +47,32 @@ if [ ! -f "$ENV_TEMPLATE" ]; then
     exit 1
 fi
 
+# ---- Sync service files to systemd ----
+# Ensures golden image clones and updates always have the latest service files
+SERVICES_UPDATED=false
+for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch-docker; do
+    SRC="$NIGHTWATCH_DIR/scripts/${svc}.service"
+    DST="/etc/systemd/system/${svc}.service"
+    if [ -f "$SRC" ]; then
+        if ! cmp -s "$SRC" "$DST" 2>/dev/null; then
+            cp "$SRC" "$DST"
+            SERVICES_UPDATED=true
+            log "Updated ${svc}.service"
+        fi
+    fi
+done
+if [ "$SERVICES_UPDATED" = true ]; then
+    systemctl daemon-reload
+    log "systemd reloaded"
+fi
+
+# Ensure Docker DNS is configured
+if [ ! -f /etc/docker/daemon.json ]; then
+    mkdir -p /etc/docker
+    echo '{"dns":["8.8.8.8","1.1.1.1"]}' > /etc/docker/daemon.json
+    log "Docker DNS configured"
+fi
+
 # Load mesh config defaults from template
 MESH_IFACE="wlan1"
 MESH_ID="nightwatch"
