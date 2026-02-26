@@ -191,6 +191,11 @@ else
     echo "[+] Docker Compose already available"
 fi
 
+# Configure Docker DNS (containers can't resolve without this)
+mkdir -p /etc/docker
+echo '{"dns":["8.8.8.8","1.1.1.1"]}' > /etc/docker/daemon.json
+echo "[+] Docker DNS configured (8.8.8.8, 1.1.1.1)"
+
 # Enable Docker to start on boot
 systemctl enable docker
 systemctl start docker
