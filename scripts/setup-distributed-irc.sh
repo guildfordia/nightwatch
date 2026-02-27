@@ -7,21 +7,16 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=common.sh
+source "$SCRIPT_DIR/common.sh"
+
 ENV_FILE=".env"
 
 echo "[+] Setting up IRC configuration..."
 
-# Load environment variables
-if [ ! -f "$ENV_FILE" ]; then
-    echo "[-] Error: $ENV_FILE not found!"
-    echo "[-] Please copy .env.example to .env and configure it first."
-    exit 1
-fi
-
-set -o allexport
-# shellcheck source=/dev/null
-source "$ENV_FILE"
-set +o allexport
+load_env "$ENV_FILE"
 
 if [ -z "$PI_NUMBER" ]; then
     echo "[-] Error: PI_NUMBER not set in $ENV_FILE"
@@ -41,41 +36,9 @@ echo "    → Node: $PI_NUMBER"
 echo "    → Server: $SERVER_NAME"
 echo "    → Mesh IP: $MESH_IP"
 
-mkdir -p ngircd
+generate_ngircd_base_conf "ngircd/ngircd.conf" "$SERVER_NAME" "$PI_NUMBER"
 
-cat > "ngircd/ngircd.conf" << EOF
-[Global]
-Name = $SERVER_NAME
-AdminInfo1 = Nightwatch IRC Server - Node $PI_NUMBER
-AdminInfo2 = Mesh Network
-AdminEMail = admin@nightwatch.local
-Listen = 0.0.0.0
-MotdPhrase = Nightwatch mesh node $PI_NUMBER
-ServerUID = abc
-ServerGID = abc
-
-[Limits]
-MaxConnections = 150
-MaxConnectionsIP = 25
-MaxJoins = 3
-MaxNickLength = 12
-PingTimeout = 300
-PongTimeout = 60
-IdleTimeout = 900
-MaxChannelNameLength = 15
-MaxTopicLength = 80
-MaxAwayLen = 40
-MaxListSize = 100
-
-[Options]
-RequireAuthPing = no
-PAM = no
-
-[Channel]
-name = #nightwatch
-topic = Nightwatch Chat
-modes = +nt
-maxusers = 100
+cat >> "ngircd/ngircd.conf" << 'EOF'
 
 # Peer links are added automatically by the discovery daemon.
 # Run: scripts/node-discovery.sh peers  — to see discovered nodes.

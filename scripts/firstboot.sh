@@ -75,11 +75,10 @@ if [ ! -f ".env" ]; then
     exit 1
 fi
 
-# Load config
-set -o allexport
-# shellcheck source=/dev/null
-source .env
-set +o allexport
+# shellcheck source=scripts/common.sh
+source "$NIGHTWATCH_DIR/scripts/common.sh"
+
+load_env .env
 
 # Detect the real user (not root)
 REAL_USER=$(find /home/ -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | head -1)
@@ -146,7 +145,13 @@ fi
 
 echo ""
 echo "[2/12] Installing system packages..."
-apt-get update -qq
+for attempt in 1 2 3; do
+    if apt-get update -qq; then
+        break
+    fi
+    echo "[!] apt-get update failed (attempt $attempt/3), retrying in 5s..."
+    sleep 5
+done
 apt-get install -y -qq \
     docker.io \
     batctl \
@@ -399,13 +404,7 @@ echo "    - nightwatch-docker (IRC + bridge + nginx)"
 echo ""
 echo "[10/12] Building Docker images (this may take a few minutes)..."
 cd "$NIGHTWATCH_DIR"
-if docker compose version >/dev/null 2>&1; then
-    DC="docker compose"
-elif command -v docker-compose >/dev/null 2>&1; then
-    DC="docker-compose"
-else
-    DC="docker compose"
-fi
+detect_docker_compose
 $DC --env-file .env build
 echo "[+] Docker images built"
 

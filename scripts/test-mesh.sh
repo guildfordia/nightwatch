@@ -21,6 +21,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 ENV_FILE="$PROJECT_DIR/.env"
 
+# shellcheck source=common.sh
+source "$SCRIPT_DIR/common.sh"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -47,15 +50,7 @@ fi
 
 # ---- Load config ----
 
-if [ ! -f "$ENV_FILE" ]; then
-    echo -e "${RED}Error: $ENV_FILE not found${NC}"
-    exit 1
-fi
-
-set -o allexport
-# shellcheck source=/dev/null
-source "$ENV_FILE"
-set +o allexport
+load_env "$ENV_FILE"
 
 BAT_IFACE="${BAT_IFACE:-bat0}"
 BR_IFACE="${BR_IFACE:-br0}"

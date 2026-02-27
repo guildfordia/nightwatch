@@ -14,15 +14,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 ENV_FILE="$PROJECT_DIR/.env"
 
-# Load .env
-if [ ! -f "$ENV_FILE" ]; then
-    echo "[-] Error: $ENV_FILE not found. Run 'make prepare-env' first."
-    exit 1
-fi
-set -o allexport
-# shellcheck source=/dev/null
-source "$ENV_FILE"
-set +o allexport
+# shellcheck source=common.sh
+source "$SCRIPT_DIR/common.sh"
+
+load_env "$ENV_FILE"
 
 # Defaults
 MESH_IFACE="${MESH_IFACE:-wlan1}"
@@ -35,6 +30,13 @@ MESH_SAE_PASSWORD="${MESH_SAE_PASSWORD:-}"
 
 if [ -z "$MESH_IP" ]; then
     echo "[-] Error: MESH_IP not set in $ENV_FILE"
+    exit 1
+fi
+
+# Validate MESH_IP is a valid IPv4 address (strip CIDR suffix for check)
+MESH_IP_CHECK="${MESH_IP%/*}"
+if [[ ! "$MESH_IP_CHECK" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "[-] Error: Invalid MESH_IP: $MESH_IP"
     exit 1
 fi
 
@@ -84,7 +86,9 @@ setup_mesh_interface() {
     if [ -n "$MESH_SAE_PASSWORD" ]; then
         echo "[+] Joining encrypted mesh '$MESH_ID' on $FREQ MHz (SAE)..."
         # SAE encryption requires wpa_supplicant — generate config
-        cat > /tmp/nightwatch-mesh-wpa.conf << WPAEOF
+        WPA_CONF=$(mktemp /tmp/nightwatch-mesh-wpa.XXXXXX)
+        chmod 600 "$WPA_CONF"
+        cat > "$WPA_CONF" << WPAEOF
 ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
 network={
     ssid="$MESH_ID"
@@ -96,7 +100,7 @@ network={
     mesh_fwding=0
 }
 WPAEOF
-        wpa_supplicant -B -i "$MESH_IFACE" -c /tmp/nightwatch-mesh-wpa.conf -D nl80211
+        wpa_supplicant -B -i "$MESH_IFACE" -c "$WPA_CONF" -D nl80211
     else
         echo "[+] Joining open mesh '$MESH_ID' on $FREQ MHz..."
         iw dev "$MESH_IFACE" mesh join "$MESH_ID" freq "$FREQ"
@@ -183,7 +187,10 @@ start_dnsmasq() {
 
     # Kill any existing Nightwatch dnsmasq instance
     if [ -f "$DNSMASQ_PID" ]; then
-        kill "$(cat "$DNSMASQ_PID")" 2>/dev/null || true
+        OLD_PID=$(cat "$DNSMASQ_PID")
+        if kill -0 "$OLD_PID" 2>/dev/null; then
+            kill "$OLD_PID" 2>/dev/null || true
+        fi
         rm -f "$DNSMASQ_PID"
     fi
 
@@ -252,7 +259,10 @@ case "$1" in
         # Stop dnsmasq
         DNSMASQ_PID="/var/run/dnsmasq-nightwatch.pid"
         if [ -f "$DNSMASQ_PID" ]; then
-            kill "$(cat "$DNSMASQ_PID")" 2>/dev/null || true
+            OLD_PID=$(cat "$DNSMASQ_PID")
+            if kill -0 "$OLD_PID" 2>/dev/null; then
+                kill "$OLD_PID" 2>/dev/null || true
+            fi
             rm -f "$DNSMASQ_PID"
         fi
 
@@ -269,6 +279,7 @@ case "$1" in
 
         # Leave mesh (only kill mesh wpa_supplicant, not internet wpa_supplicant)
         pkill -f "nightwatch-mesh-wpa" 2>/dev/null || true
+        rm -f /tmp/nightwatch-mesh-wpa.* 2>/dev/null || true
         iw dev "$MESH_IFACE" mesh leave 2>/dev/null || true
         ip addr flush dev "$MESH_IFACE" 2>/dev/null || true
         ip link set "$MESH_IFACE" down 2>/dev/null || true

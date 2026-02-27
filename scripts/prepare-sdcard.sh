@@ -35,6 +35,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
+# shellcheck source=common.sh
+source "$SCRIPT_DIR/common.sh"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -153,10 +156,7 @@ if [ ! -f "$ENV_TEMPLATE" ]; then
     exit 1
 fi
 
-set -o allexport
-# shellcheck source=/dev/null
-source "$ENV_TEMPLATE"
-set +o allexport
+load_env "$ENV_TEMPLATE"
 
 
 # ---- Prompt for secrets ----

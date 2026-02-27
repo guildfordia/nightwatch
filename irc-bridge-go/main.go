@@ -30,6 +30,7 @@ const (
 	wsWriteWait     = 10 * time.Second
 	ircDialTimeout  = 5 * time.Second
 	shutdownTimeout = 10 * time.Second
+	maxIRCMsgLen    = 400 // IRC limit minus protocol overhead
 )
 
 // --- WebSocket upgrader with origin check ---
@@ -38,15 +39,14 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
-		// Allow connections from the same host (mesh network)
-		// In a mesh/local network context, accept all local origins
 		origin := r.Header.Get("Origin")
 		if origin == "" {
 			return true
 		}
-		// Accept any origin on local/private networks
-		// This is appropriate for a mesh network chat with no internet
-		return true
+		// Allow mesh subnet, localhost, and loopback origins only
+		return strings.HasPrefix(origin, "http://192.168.199.") ||
+			strings.HasPrefix(origin, "http://localhost") ||
+			strings.HasPrefix(origin, "http://127.0.0.1")
 	},
 }
 
@@ -193,11 +193,17 @@ func (c *Client) readPump(hub *Hub) {
 			continue
 		}
 
+		// Truncate to IRC maximum message length
+		if len(msg) > maxIRCMsgLen {
+			msg = msg[:maxIRCMsgLen]
+		}
+
 		log.Printf("[%s] WS->IRC: %s", c.id, msg)
 		if c.irc != nil {
 			_, writeErr := c.irc.Write([]byte(msg + "\r\n"))
 			if writeErr != nil {
 				log.Printf("[%s] IRC write error: %v", c.id, writeErr)
+				c.close() // signal other goroutines to stop
 				return
 			}
 		}
@@ -311,7 +317,7 @@ func handleWebSocket(hub *Hub, limiter *RateLimiter, w http.ResponseWriter, r *h
 	}
 
 	// Register with IRC — single registration, no double NICK/USER
-	nick := fmt.Sprintf("webuser%d", time.Now().Unix()%10000)
+	nick := fmt.Sprintf("webuser%d", time.Now().UnixNano()%1000000)
 	log.Printf("[%s] Registering with IRC as %s", clientID, nick)
 
 	ircConn.Write([]byte(fmt.Sprintf("NICK %s\r\n", nick)))

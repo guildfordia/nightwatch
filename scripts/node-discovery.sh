@@ -24,15 +24,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 ENV_FILE="$PROJECT_DIR/.env"
 
-# Load .env
-if [ ! -f "$ENV_FILE" ]; then
-    echo "[-] Error: $ENV_FILE not found"
-    exit 1
-fi
-set -o allexport
-# shellcheck source=/dev/null
-source "$ENV_FILE"
-set +o allexport
+# shellcheck source=common.sh
+source "$SCRIPT_DIR/common.sh"
+
+load_env "$ENV_FILE"
 
 # Config
 BAT_IFACE="${BAT_IFACE:-bat0}"
@@ -47,14 +42,7 @@ SERVER_NAME="node${NODE_NUM}.nightwatch.irc"
 IRC_LINK_PASSWORD="${IRC_LINK_PASSWORD:-nightwatch-mesh-link}"
 BROADCAST_IP="192.168.199.255"
 
-# Detect docker compose
-if docker compose version >/dev/null 2>&1; then
-    DC="docker compose"
-elif command -v docker-compose >/dev/null 2>&1; then
-    DC="docker-compose"
-else
-    DC="docker compose"
-fi
+detect_docker_compose
 
 CONFLICT_FILE="/tmp/nightwatch-conflict"
 
@@ -95,12 +83,15 @@ receive_beacons() {
                 continue
             fi
 
-            # Update peer file (atomic: write tmp, move)
-            touch "$PEER_FILE"
-            # Remove old entry for this peer, add fresh one
-            grep -v "^${PEER_NUM}|" "$PEER_FILE" 2>/dev/null > "${PEER_FILE}.tmp" || true
-            echo "${PEER_NUM}|${PEER_IP}|${PEER_NAME}|${NOW}" >> "${PEER_FILE}.tmp"
-            mv "${PEER_FILE}.tmp" "$PEER_FILE"
+            # Update peer file with flock to prevent concurrent write races
+            (
+                flock -x 200
+                touch "$PEER_FILE"
+                # Remove old entry for this peer, add fresh one
+                grep -v "^${PEER_NUM}|" "$PEER_FILE" 2>/dev/null > "${PEER_FILE}.tmp" || true
+                echo "${PEER_NUM}|${PEER_IP}|${PEER_NAME}|${NOW}" >> "${PEER_FILE}.tmp"
+                mv "${PEER_FILE}.tmp" "$PEER_FILE"
+            ) 200>"${PEER_FILE}.lock"
 
             log "Beacon from node $PEER_NUM ($PEER_NAME @ $PEER_IP)"
 
@@ -129,11 +120,13 @@ expire_peers() {
         done < "$PEER_FILE"
 
         if [ "$CHANGED" = true ]; then
-            # Remove expired entries
-            grep -v "" "$PEER_FILE" > /dev/null 2>&1 || true
-            CUTOFF=$((NOW - PEER_TIMEOUT))
-            awk -F'|' -v cutoff="$CUTOFF" '$4 >= cutoff' "$PEER_FILE" > "${PEER_FILE}.tmp" 2>/dev/null || true
-            mv "${PEER_FILE}.tmp" "$PEER_FILE"
+            # Remove expired entries with flock to prevent concurrent write races
+            (
+                flock -x 200
+                CUTOFF=$((NOW - PEER_TIMEOUT))
+                awk -F'|' -v cutoff="$CUTOFF" '$4 >= cutoff' "$PEER_FILE" > "${PEER_FILE}.tmp" 2>/dev/null || true
+                mv "${PEER_FILE}.tmp" "$PEER_FILE"
+            ) 200>"${PEER_FILE}.lock"
             update_irc_config
         fi
     done
@@ -142,42 +135,8 @@ expire_peers() {
 # ---- Generate ngircd.conf from current peers ----
 generate_irc_config() {
     local CONF="$PROJECT_DIR/ngircd/ngircd.conf"
-    mkdir -p "$PROJECT_DIR/ngircd"
 
-    cat > "$CONF" << EOF
-[Global]
-Name = $SERVER_NAME
-AdminInfo1 = Nightwatch IRC Server - Node $NODE_NUM
-AdminInfo2 = Mesh Network
-AdminEMail = admin@nightwatch.local
-Listen = 0.0.0.0
-MotdPhrase = Nightwatch mesh node $NODE_NUM
-ServerUID = abc
-ServerGID = abc
-
-[Limits]
-MaxConnections = 150
-MaxConnectionsIP = 25
-MaxJoins = 3
-MaxNickLength = 12
-PingTimeout = 300
-PongTimeout = 60
-IdleTimeout = 900
-MaxChannelNameLength = 15
-MaxTopicLength = 80
-MaxAwayLen = 40
-MaxListSize = 100
-
-[Options]
-RequireAuthPing = no
-PAM = no
-
-[Channel]
-name = #nightwatch
-topic = Nightwatch Chat
-modes = +nt
-maxusers = 100
-EOF
+    generate_ngircd_base_conf "$CONF" "$SERVER_NAME" "$NODE_NUM"
 
     # Add server links for each known peer
     if [ -f "$PEER_FILE" ]; then
@@ -270,9 +229,13 @@ case "${1:-start}" in
     stop)
         if [ -f "$PID_FILE" ]; then
             PID=$(cat "$PID_FILE")
-            kill "$PID" 2>/dev/null || true
+            if kill -0 "$PID" 2>/dev/null; then
+                kill "$PID" 2>/dev/null || true
+                log "Stopped (PID $PID)"
+            else
+                log "Stale PID file (process $PID not running)"
+            fi
             rm -f "$PID_FILE"
-            log "Stopped (PID $PID)"
         else
             log "Not running"
         fi

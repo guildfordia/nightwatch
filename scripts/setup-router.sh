@@ -21,21 +21,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 ENV_FILE="$PROJECT_DIR/.env"
 
+# shellcheck source=common.sh
+source "$SCRIPT_DIR/common.sh"
+
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 RED='\033[0;31m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# Load .env
-if [ ! -f "$ENV_FILE" ]; then
-    echo -e "${RED}Error: $ENV_FILE not found${NC}"
-    exit 1
-fi
-set -o allexport
-# shellcheck source=/dev/null
-source "$ENV_FILE"
-set +o allexport
+load_env "$ENV_FILE"
 
 # Config from .env
 ROUTER_IP="${ROUTER_IP:-192.168.8.1}"

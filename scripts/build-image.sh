@@ -39,14 +39,11 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-# Auto-detect docker compose v2 vs v1
-if docker compose version >/dev/null 2>&1; then
-    DC="docker compose"
-elif command -v docker-compose >/dev/null 2>&1; then
-    DC="docker-compose"
-else
-    DC="docker compose"
-fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/common.sh
+source "$NIGHTWATCH_DIR/scripts/common.sh"
+
+detect_docker_compose
 
 echo ""
 echo -e "${BOLD}======================================"

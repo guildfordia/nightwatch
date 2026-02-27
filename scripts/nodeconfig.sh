@@ -127,13 +127,25 @@ scan_mesh() {
     # Scan for taken node numbers
     TAKEN=""
     if [ "$TEMP_MESH" = true ]; then
-        for i in $(seq 1 20); do
-            ip="192.168.199.$((100 + i))"
-            if ping -c 1 -W 1 "$ip" >/dev/null 2>&1; then
+        if command -v fping >/dev/null 2>&1; then
+            # fping pings all 20 IPs in parallel — much faster than sequential ping
+            IPS=$(for i in $(seq 1 20); do echo "192.168.199.$((100 + i))"; done)
+            ALIVE=$(echo "$IPS" | fping -a -q -r 1 -t 500 2>/dev/null || true)
+            for ip in $ALIVE; do
+                i=$((${ip##*.} - 100))
                 TAKEN="$TAKEN $i"
                 log "  Node $i is taken ($ip responds)"
-            fi
-        done
+            done
+        else
+            # Fallback: sequential ping (fping not yet installed on fresh image)
+            for i in $(seq 1 20); do
+                ip="192.168.199.$((100 + i))"
+                if ping -c 1 -W 1 "$ip" >/dev/null 2>&1; then
+                    TAKEN="$TAKEN $i"
+                    log "  Node $i is taken ($ip responds)"
+                fi
+            done
+        fi
     fi
 }
 
@@ -273,8 +285,10 @@ if [ -f "$SECRETS_FILE" ]; then
         # Skip comments, empty lines, and non-env keys
         [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
         [[ "$key" = "MESH_GATEWAY" ]] && continue
+        # Escape sed special characters in value (passwords may contain / & \)
+        escaped_value=$(printf '%s\n' "$value" | sed 's/[&/\]/\\&/g')
         # Replace the value in .env
-        sed -i "s/^${key}=.*/${key}=${value}/" "$ENV_FILE"
+        sed -i "s/^${key}=.*/${key}=${escaped_value}/" "$ENV_FILE"
     done < "$SECRETS_FILE"
     log "Secrets injected"
 fi
@@ -286,14 +300,18 @@ log "Config: PI_NUMBER=$NODE_NUM MESH_IP=$MESH_IP GATEWAY=$IS_GATEWAY"
 # shellcheck source=/dev/null
 source "$ENV_FILE"
 if [ -n "${TAILSCALE_AUTH_KEY:-}" ] && command -v tailscale >/dev/null 2>&1; then
-    TS_STATUS=$(tailscale status --json 2>/dev/null | grep -o '"BackendState":"[^"]*"' | cut -d'"' -f4 || echo "")
-    if [ "$TS_STATUS" != "Running" ]; then
-        log "Connecting to Tailscale..."
-        systemctl start tailscaled 2>/dev/null || true
-        tailscale up --auth-key="$TAILSCALE_AUTH_KEY" --accept-routes --accept-dns=false --hostname="$(hostname)" --reset 2>/dev/null || true
-        log "Tailscale connected: $(tailscale ip --4 2>/dev/null || echo 'pending')"
+    if [[ ! "$TAILSCALE_AUTH_KEY" =~ ^tskey- ]]; then
+        log "Warning: TAILSCALE_AUTH_KEY doesn't start with 'tskey-' — skipping Tailscale setup"
     else
-        log "Tailscale already running"
+        TS_STATUS=$(tailscale status --json 2>/dev/null | grep -o '"BackendState":"[^"]*"' | cut -d'"' -f4 || echo "")
+        if [ "$TS_STATUS" != "Running" ]; then
+            log "Connecting to Tailscale..."
+            systemctl start tailscaled 2>/dev/null || true
+            tailscale up --auth-key="$TAILSCALE_AUTH_KEY" --accept-routes --accept-dns=false --hostname="$(hostname)" --reset 2>/dev/null || true
+            log "Tailscale connected: $(tailscale ip --4 2>/dev/null || echo 'pending')"
+        else
+            log "Tailscale already running"
+        fi
     fi
 fi
 

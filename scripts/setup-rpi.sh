@@ -29,6 +29,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 INSTALL_DIR="$PROJECT_DIR"
 
+# shellcheck source=common.sh
+source "$SCRIPT_DIR/common.sh"
+
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 RED='\033[0;31m'
@@ -372,12 +375,11 @@ sed "s|/opt/nightwatch|$INSTALL_DIR|g" "$INSTALL_DIR/scripts/nightwatch-mesh.ser
 sed "s|/opt/nightwatch|$INSTALL_DIR|g" "$INSTALL_DIR/scripts/nightwatch-discovery.service" > /etc/systemd/system/nightwatch-discovery.service
 
 # Docker service needs docker compose detection too
-if docker compose version >/dev/null 2>&1; then
+detect_docker_compose
+if [ "$DC" = "docker compose" ]; then
     DC_BIN="/usr/bin/docker compose"
-elif command -v docker-compose >/dev/null 2>&1; then
-    DC_BIN="$(command -v docker-compose)"
 else
-    DC_BIN="/usr/bin/docker compose"
+    DC_BIN="$(command -v docker-compose)"
 fi
 sed -e "s|/opt/nightwatch|$INSTALL_DIR|g" \
     -e "s|/usr/bin/docker compose|$DC_BIN|g" \
@@ -404,15 +406,7 @@ echo ""
 echo "[8/10] Building Docker images (this may take a few minutes)..."
 cd "$INSTALL_DIR"
 
-# Detect docker compose command (v2 plugin vs v1 standalone)
-if docker compose version >/dev/null 2>&1; then
-    DC="docker compose"
-elif command -v docker-compose >/dev/null 2>&1; then
-    DC="docker-compose"
-else
-    echo "[-] Neither 'docker compose' nor 'docker-compose' found!"
-    exit 1
-fi
+detect_docker_compose
 
 $DC --env-file .env build
 echo "[+] Docker images built"
