@@ -373,7 +373,7 @@ else
     fail "  IRC (port $IRC_PORT) not reachable"
 fi
 
-health=$(curl -sf --max-time 3 "http://localhost:${BRIDGE_PORT}/health" 2>/dev/null || echo "")
+health=$(timeout 5 docker exec irc-bridge wget -qO- http://localhost:3000/health 2>/dev/null || echo "")
 if [ "$health" = "OK" ]; then
     pass "  Bridge /health returns OK"
 else
@@ -560,7 +560,12 @@ if [ -d "/sys/class/net/$BR_IFACE" ]; then
     if [ -d "/sys/class/net/$BR_IFACE/brif/$AP_IFACE" ]; then
         pass "$AP_IFACE is a port of $BR_IFACE"
     else
-        fail "$AP_IFACE not in $BR_IFACE (router clients won't reach mesh)"
+        # eth0 may not be connected (no GL.iNet router plugged in)
+        if ip link show "$AP_IFACE" up 2>/dev/null | grep -q "state UP"; then
+            fail "$AP_IFACE not in $BR_IFACE (router clients won't reach mesh)"
+        else
+            warn "$AP_IFACE not in $BR_IFACE ($AP_IFACE is down — no router connected?)"
+        fi
     fi
 else
     fail "$BR_IFACE bridge not found (eth0 and bat0 are not bridged)"
