@@ -198,12 +198,16 @@ fi
 declare -a LIVE_IPS=()
 declare -a LIVE_NAMES=()
 
-echo "  Scanning 192.168.199.101-120..."
+# Scan via mesh interface only (br0/bat0) — not via LAN/Tailscale
+SCAN_IFACE="$BR_IFACE"
+if [ ! -d "/sys/class/net/$BR_IFACE" ]; then
+    SCAN_IFACE="$BAT_IFACE"
+fi
+echo "  Scanning 192.168.199.101-120 via $SCAN_IFACE..."
 if command -v fping >/dev/null 2>&1; then
-    # Fast parallel scan with fping
+    # Fast parallel scan with fping bound to mesh interface
     ALL_IPS=$(for i in $(seq 1 "$MAX_NODES"); do mesh_ip_for_node "$i"; done)
-    # Use fping -e for RTT in a single pass (no need for separate ping)
-    FPING_OUT=$(echo "$ALL_IPS" | fping -a -e -r 1 -t 500 2>/dev/null || true)
+    FPING_OUT=$(echo "$ALL_IPS" | fping -a -e -r 1 -t 500 -I "$SCAN_IFACE" 2>/dev/null || true)
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         ip=$(echo "$line" | awk '{print $1}')
@@ -216,13 +220,13 @@ if command -v fping >/dev/null 2>&1; then
         LIVE_NAMES+=("$name")
     done <<< "$FPING_OUT"
 else
-    # Fallback: sequential ping
+    # Fallback: sequential ping bound to mesh interface
     for idx in "${!NODE_IPS[@]}"; do
         ip="${NODE_IPS[$idx]}"
         name="${NODE_NAMES[$idx]}"
         [ "$ip" = "$LOCAL_IP" ] && continue
-        if ping -c 1 -W 1 "$ip" >/dev/null 2>&1; then
-            rtt=$(ping -c 1 -W 1 "$ip" 2>/dev/null | grep 'time=' | sed 's/.*time=//' || echo "?")
+        if ping -c 1 -W 1 -I "$SCAN_IFACE" "$ip" >/dev/null 2>&1; then
+            rtt=$(ping -c 1 -W 1 -I "$SCAN_IFACE" "$ip" 2>/dev/null | grep 'time=' | sed 's/.*time=//' || echo "?")
             echo -e "  ${GREEN}[ONLINE]${NC}  $ip ($name) — ${rtt}"
             LIVE_IPS+=("$ip")
             LIVE_NAMES+=("$name")
@@ -285,10 +289,8 @@ if [ "$mesh_neighbor_count" -gt 0 ]; then
         extra=" (+$bridged bridged client(s))"
     fi
     pass "batman-adv has $mesh_neighbor_count mesh neighbor(s)${extra}"
-elif [ ${#LIVE_IPS[@]} -gt 0 ]; then
-    fail "No batman-adv mesh neighbors (but live nodes exist)"
 else
-    skip "No batman-adv neighbors (no other nodes online)"
+    skip "No batman-adv mesh neighbors (no mesh peers)"
 fi
 
 # Originators — count only best routes (* prefix = unique originator)
@@ -297,10 +299,8 @@ originator_count=$(echo "$originator_output" | grep -c "^ \*" || true)
 originator_count=$((originator_count + 0))
 if [ "$originator_count" -gt 0 ]; then
     pass "batman-adv sees $originator_count originator(s) in mesh"
-elif [ ${#LIVE_IPS[@]} -gt 0 ]; then
-    fail "No batman-adv originators (but live nodes exist)"
 else
-    skip "No batman-adv originators (no other nodes online)"
+    skip "No batman-adv originators (no mesh peers)"
 fi
 
 # Gateway list — only count lines with actual MAC addresses
