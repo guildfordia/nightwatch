@@ -560,13 +560,8 @@ if [ -d "/sys/class/net/$BR_IFACE" ]; then
     if [ -d "/sys/class/net/$BR_IFACE/brif/$AP_IFACE" ]; then
         pass "$AP_IFACE is a port of $BR_IFACE"
     else
-        # eth0 may not be connected (no GL.iNet router plugged in)
-        # Check physical carrier (1 = cable connected, 0 or missing = no cable)
-        if [ "$(cat /sys/class/net/$AP_IFACE/carrier 2>/dev/null)" = "1" ]; then
-            fail "$AP_IFACE not in $BR_IFACE (router clients won't reach mesh)"
-        else
-            warn "$AP_IFACE not in $BR_IFACE ($AP_IFACE has no carrier — no router connected?)"
-        fi
+        # eth0 role varies (router AP, Mac Mini, or unplugged) — warn, don't fail
+        warn "$AP_IFACE not in $BR_IFACE (run: sudo ip link set $AP_IFACE master $BR_IFACE)"
     fi
 else
     fail "$BR_IFACE bridge not found (eth0 and bat0 are not bridged)"
