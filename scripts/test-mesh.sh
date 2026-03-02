@@ -561,10 +561,11 @@ if [ -d "/sys/class/net/$BR_IFACE" ]; then
         pass "$AP_IFACE is a port of $BR_IFACE"
     else
         # eth0 may not be connected (no GL.iNet router plugged in)
-        if ip link show "$AP_IFACE" up 2>/dev/null | grep -q "state UP"; then
+        # Check physical carrier (1 = cable connected, 0 or missing = no cable)
+        if [ "$(cat /sys/class/net/$AP_IFACE/carrier 2>/dev/null)" = "1" ]; then
             fail "$AP_IFACE not in $BR_IFACE (router clients won't reach mesh)"
         else
-            warn "$AP_IFACE not in $BR_IFACE ($AP_IFACE is down — no router connected?)"
+            warn "$AP_IFACE not in $BR_IFACE ($AP_IFACE has no carrier — no router connected?)"
         fi
     fi
 else
