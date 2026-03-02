@@ -124,21 +124,20 @@ fi
 
 section "4. IRC Bridge"
 
-# Health endpoint
-BRIDGE_PORT=$(docker port irc-bridge 2>/dev/null | grep 3000 | head -1 | awk -F: '{print $NF}' || echo "8080")
-HEALTH=$(curl -sf --max-time 3 "http://localhost:${BRIDGE_PORT}/health" 2>/dev/null || echo "")
+# Health endpoint (bridge port not exposed — check inside container)
+HEALTH=$(timeout 5 docker exec irc-bridge wget -qO- http://localhost:3000/health 2>/dev/null || echo "")
 if [ "$HEALTH" = "OK" ]; then
-    pass "Bridge /health returns OK (port $BRIDGE_PORT)"
+    pass "Bridge /health returns OK (via docker exec)"
 else
-    fail "Bridge /health returned: '$HEALTH' (port $BRIDGE_PORT)"
+    fail "Bridge /health returned: '$HEALTH' (via docker exec)"
 fi
 
-# WebSocket endpoint (should get upgrade required or bad request)
-WS_RESP=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" "http://localhost:${BRIDGE_PORT}/ws" 2>/dev/null || echo "000")
+# WebSocket endpoint via nginx proxy (should get upgrade required or bad request)
+WS_RESP=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" "http://localhost:${NGINX_PORT:-80}/ws" 2>/dev/null || echo "000")
 if [ "$WS_RESP" = "400" ] || [ "$WS_RESP" = "426" ] || [ "$WS_RESP" = "200" ]; then
-    pass "Bridge /ws endpoint responds (HTTP $WS_RESP)"
+    pass "Bridge /ws responds via nginx (HTTP $WS_RESP)"
 else
-    fail "Bridge /ws returned HTTP $WS_RESP"
+    fail "Bridge /ws via nginx returned HTTP $WS_RESP"
 fi
 
 # ============================================================
