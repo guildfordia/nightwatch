@@ -32,6 +32,7 @@ source "$NIGHTWATCH_DIR/scripts/common.sh"
 ENV_FILE="$NIGHTWATCH_DIR/.env"
 ENV_TEMPLATE="$NIGHTWATCH_DIR/.env.example"
 NODE_NUM_FILE="$NIGHTWATCH_DIR/.node-number"
+RESTART_SERVICES=false
 
 # Ensure SSH host keys exist (build-image.sh deletes them for cloning)
 if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
@@ -279,6 +280,9 @@ if [ -f "$ENV_FILE" ]; then
         exit 0
     fi
     log "Node number changed ($EXISTING_NUM → $NODE_NUM) — regenerating config"
+    # Restart services that depend on the node number/IP
+    # mesh-fix.sh configures br0 with MESH_IP, Docker services bind to it
+    RESTART_SERVICES=true
 fi
 
 # ---- Generate .env from template ----
@@ -362,6 +366,16 @@ if [ -x "$NIGHTWATCH_DIR/scripts/setup-distributed-irc.sh" ]; then
     log "ngircd.conf generated"
 else
     log "Warning: setup-distributed-irc.sh not found"
+fi
+
+# ---- Restart services if node number changed ----
+
+if [ "$RESTART_SERVICES" = true ]; then
+    log "Node number changed — restarting mesh and Docker services..."
+    systemctl restart nightwatch-mesh.service 2>/dev/null || true
+    sleep 5
+    systemctl restart nightwatch-docker.service 2>/dev/null || true
+    log "Services restarted with new config"
 fi
 
 log "Node configuration complete"

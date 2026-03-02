@@ -398,11 +398,12 @@ for idx in "${!LIVE_IPS[@]}"; do
         fail "  IRC (port $IRC_PORT) not reachable"
     fi
 
-    health=$(curl -sf --max-time 5 "http://${ip}:${BRIDGE_PORT}/health" 2>/dev/null || echo "")
-    if [ "$health" = "OK" ]; then
-        pass "  Bridge /health returns OK"
+    # Bridge port isn't exposed — check via nginx /ws proxy (400 = bridge is alive)
+    ws_code=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" "http://${ip}:${NGINX_PORT}/ws" 2>/dev/null || echo "000")
+    if [ "$ws_code" = "400" ] || [ "$ws_code" = "426" ] || [ "$ws_code" = "101" ]; then
+        pass "  Bridge reachable via nginx /ws (HTTP $ws_code)"
     else
-        fail "  Bridge /health: '$health'"
+        fail "  Bridge not reachable via nginx /ws (HTTP $ws_code)"
     fi
 
     nginx_code=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" "http://${ip}:${NGINX_PORT}/" 2>/dev/null || echo "000")
