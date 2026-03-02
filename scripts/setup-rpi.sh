@@ -93,7 +93,7 @@ if [ "$IS_GATEWAY" = false ]; then
     fi
 fi
 
-MESH_IP="192.168.199.$((100 + NODE_NUM))"
+MESH_IP="$(mesh_ip_for_node "$NODE_NUM")"
 if [ "$IS_GATEWAY" = true ]; then
     NEW_HOSTNAME="nightwatch-gw-${NODE_NUM}"
 else
@@ -130,7 +130,7 @@ echo "[+] Hostname set to $NEW_HOSTNAME"
 echo ""
 echo "[2/10] Installing system packages..."
 apt-get update -qq
-apt-get install -y -qq \
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     docker.io \
     batctl \
     bridge-utils \
@@ -202,81 +202,7 @@ systemctl stop hostapd 2>/dev/null || true
 echo ""
 echo "[4b/10] Configuring network routing..."
 
-DHCPCD_CONF="/etc/dhcpcd.conf"
-if [ -f "$DHCPCD_CONF" ]; then
-    # Remove old broken Nightwatch config if present (had nogateway on eth0)
-    if grep -q "# Nightwatch network config" "$DHCPCD_CONF"; then
-        sed -i '/# Nightwatch network config/,/^$/d' "$DHCPCD_CONF"
-        # Also clean up any leftover directives
-        sed -i '/# eth0 is the GL.iNet/d; /# wlan0 has internet/d; /# Fallback DNS when Tailscale/d' "$DHCPCD_CONF"
-        echo "[+] Removed old Nightwatch dhcpcd config"
-    fi
-    if ! grep -q "# Nightwatch DNS" "$DHCPCD_CONF"; then
-        cat >> "$DHCPCD_CONF" << 'NETEOF'
-
-# Nightwatch DNS — hardcode DNS so we don't depend on DHCP-provided nameservers
-static domain_name_servers=8.8.8.8 1.1.1.1
-NETEOF
-        echo "[+] dhcpcd configured: static DNS 8.8.8.8 + 1.1.1.1"
-    else
-        echo "[+] dhcpcd DNS already configured for Nightwatch"
-    fi
-    # Tell dhcpcd to ignore eth0 and bat0 — they are bridge ports managed by mesh-fix.sh
-    # Without this, dhcpcd tries to get a DHCP lease on eth0, conflicting with br0
-    if ! grep -q "denyinterfaces eth0" "$DHCPCD_CONF"; then
-        cat >> "$DHCPCD_CONF" << 'DENYEOF'
-
-# Nightwatch bridge — dhcpcd must not manage these (br0 bridge handles them)
-denyinterfaces eth0 bat0 br0
-DENYEOF
-        echo "[+] dhcpcd: eth0/bat0/br0 excluded (bridge ports)"
-    else
-        echo "[+] dhcpcd already excludes eth0"
-    fi
-elif command -v nmcli >/dev/null 2>&1; then
-    # NetworkManager: configure eth0 — no default route (it's a bridge port to GL.iNet AP)
-    ETH_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep 'eth0' | head -1 | cut -d: -f1)
-    if [ -n "$ETH_CON" ]; then
-        # eth0 must NOT add a default route — it connects to the GL.iNet AP (no internet)
-        # Without this, eth0's route (metric 100) wins over wlan0 (metric 600) and
-        # all traffic goes to the GL.iNet bridge which has no upstream internet.
-        nmcli con mod "$ETH_CON" ipv4.never-default yes 2>/dev/null || true
-        nmcli con mod "$ETH_CON" ipv4.dns "8.8.8.8 1.1.1.1" 2>/dev/null || true
-        nmcli con up "$ETH_CON" 2>/dev/null || true
-        echo "[+] NetworkManager: eth0 ($ETH_CON) — never-default route, DNS 8.8.8.8 + 1.1.1.1"
-    fi
-    # Also add fallback via systemd-resolved
-    mkdir -p /etc/systemd/resolved.conf.d
-    cat > /etc/systemd/resolved.conf.d/nightwatch-fallback.conf << 'DNSEOF'
-[Resolve]
-FallbackDNS=8.8.8.8 1.1.1.1
-DNSEOF
-    systemctl restart systemd-resolved 2>/dev/null || true
-    echo "[+] Fallback DNS configured (8.8.8.8, 1.1.1.1)"
-else
-    echo "[!] Neither dhcpcd nor NetworkManager found — skipping network config"
-fi
-
-# Apply immediately (don't wait for reboot)
-
-# Tell Tailscale to stop overwriting /etc/resolv.conf
-if command -v tailscale >/dev/null 2>&1; then
-    tailscale set --accept-dns=false 2>/dev/null || true
-    echo "[+] Tailscale DNS disabled (--accept-dns=false)"
-fi
-
-# Make /etc/resolv.conf immutable so nothing can overwrite it
-# (Tailscale, dhcpcd, NetworkManager all fight over this file)
-chattr -i /etc/resolv.conf 2>/dev/null || true
-cat > /etc/resolv.conf << 'DNSEOF'
-nameserver 8.8.8.8
-nameserver 1.1.1.1
-DNSEOF
-chattr +i /etc/resolv.conf
-echo "[+] /etc/resolv.conf locked (immutable) with 8.8.8.8 + 1.1.1.1"
-
-# Restart dhcpcd to pick up new config (removes old nogateway on eth0)
-systemctl restart dhcpcd 2>/dev/null || true
+configure_network
 
 # ---- Step 5: Register project path ----
 
@@ -293,12 +219,12 @@ echo "[6/10] Generating configuration..."
 ENV_FILE="$INSTALL_DIR/.env"
 cp "$INSTALL_DIR/.env.example" "$ENV_FILE"
 
-sed -i "s/^PI_NUMBER=.*/PI_NUMBER=$NODE_NUM/" "$ENV_FILE"
-sed -i "s/^MESH_IP=.*/MESH_IP=$MESH_IP/" "$ENV_FILE"
+set_env_value "$ENV_FILE" "PI_NUMBER" "$NODE_NUM"
+set_env_value "$ENV_FILE" "MESH_IP" "$MESH_IP"
 
 if [ "$IS_GATEWAY" = true ]; then
-    sed -i "s/^MESH_GATEWAY=.*/MESH_GATEWAY=true/" "$ENV_FILE"
-    sed -i "s/^# INET_IFACE=wlan0/INET_IFACE=wlan0/" "$ENV_FILE"
+    set_env_value "$ENV_FILE" "MESH_GATEWAY" "true"
+    set_env_value "$ENV_FILE" "INET_IFACE" "wlan0"
 fi
 
 # Set router password (prompt if not already in .env from a previous install)
@@ -309,10 +235,9 @@ if grep -q "CHANGE_ME_BEFORE_DEPLOY" "$ENV_FILE"; then
     echo ""
     read -rsp "  IRC link password: " IRC_PWD
     echo ""
-    # Single-quote passwords in .env to prevent $, !, etc. from being
-    # interpreted by docker compose or bash
-    sed -i "s/^ROUTER_PASSWORD=.*/ROUTER_PASSWORD='$ROUTER_PWD'/" "$ENV_FILE"
-    sed -i "s/^IRC_LINK_PASSWORD=.*/IRC_LINK_PASSWORD='$IRC_PWD'/" "$ENV_FILE"
+    # Use set_env_value for safe password injection (no sed escaping issues)
+    set_env_value "$ENV_FILE" "ROUTER_PASSWORD" "$ROUTER_PWD"
+    set_env_value "$ENV_FILE" "IRC_LINK_PASSWORD" "$IRC_PWD"
 fi
 
 echo "[+] .env generated (PI_NUMBER=$NODE_NUM, MESH_IP=$MESH_IP, GATEWAY=$IS_GATEWAY)"
@@ -326,42 +251,9 @@ fi
 
 # Generate dnsmasq config for client DHCP + captive portal
 echo "[+] Generating dnsmasq config..."
-DHCP_START=$((200 + (NODE_NUM - 1) * 5 + 1))
-DHCP_END=$((200 + (NODE_NUM - 1) * 5 + 5))
-MESH_IP_PLAIN="${MESH_IP%/*}"
-mkdir -p "$INSTALL_DIR/dnsmasq"
-cat > "$INSTALL_DIR/dnsmasq/dnsmasq.conf" << DNSEOF
-# Nightwatch dnsmasq — DHCP + captive portal DNS for WiFi clients
-# Auto-generated by setup-rpi.sh — do not edit manually
-
-# Only listen on the mesh bridge
-interface=br0
-bind-interfaces
-
-# DHCP range for WiFi clients (each node gets 5 addresses to avoid conflicts)
-dhcp-range=192.168.199.${DHCP_START},192.168.199.${DHCP_END},255.255.255.0,1h
-
-# Tell clients to use this node as gateway and DNS
-dhcp-option=3,${MESH_IP_PLAIN}
-dhcp-option=6,${MESH_IP_PLAIN}
-
-# Redirect ALL DNS to this node (captive portal)
-# Every domain resolves to the local Pi — phone detects "no internet" and
-# opens captive portal popup, which shows the Nightwatch chat page.
-address=/#/${MESH_IP_PLAIN}
-
-# Don't read /etc/resolv.conf (we handle all DNS ourselves)
-no-resolv
-
-# Don't poll /etc/resolv.conf for changes
-no-poll
-
-# Log DHCP leases (useful for debugging)
-log-dhcp
-
-# PID file for mesh-fix.sh to manage
-pid-file=/var/run/dnsmasq-nightwatch.pid
-DNSEOF
+generate_dnsmasq_conf "$INSTALL_DIR/dnsmasq/dnsmasq.conf" "$NODE_NUM" "$MESH_IP"
+DHCP_START=$((200 + (NODE_NUM - 1) * 2 + 1))
+DHCP_END=$((200 + (NODE_NUM - 1) * 2 + 2))
 echo "[+] dnsmasq.conf generated (DHCP: .${DHCP_START}-.${DHCP_END})"
 
 # ---- Step 7: Install systemd services ----
@@ -369,30 +261,7 @@ echo "[+] dnsmasq.conf generated (DHCP: .${DHCP_START}-.${DHCP_END})"
 echo ""
 echo "[7/10] Installing systemd services..."
 
-# Generate service files with actual project path
-sed "s|/opt/nightwatch|$INSTALL_DIR|g" "$INSTALL_DIR/scripts/nightwatch-nodeconfig.service" > /etc/systemd/system/nightwatch-nodeconfig.service
-sed "s|/opt/nightwatch|$INSTALL_DIR|g" "$INSTALL_DIR/scripts/nightwatch-mesh.service" > /etc/systemd/system/nightwatch-mesh.service
-sed "s|/opt/nightwatch|$INSTALL_DIR|g" "$INSTALL_DIR/scripts/nightwatch-discovery.service" > /etc/systemd/system/nightwatch-discovery.service
-
-# Docker service needs docker compose detection too
-detect_docker_compose
-if [ "$DC" = "docker compose" ]; then
-    DC_BIN="/usr/bin/docker compose"
-else
-    DC_BIN="$(command -v docker-compose)"
-fi
-sed -e "s|/opt/nightwatch|$INSTALL_DIR|g" \
-    -e "s|/usr/bin/docker compose|$DC_BIN|g" \
-    "$INSTALL_DIR/scripts/nightwatch-docker.service" > /etc/systemd/system/nightwatch-docker.service
-
-systemctl daemon-reload
-# Remove old DNS workaround service if present (Tailscale --accept-dns=false is the proper fix)
-systemctl disable nightwatch-dns.service 2>/dev/null || true
-rm -f /etc/systemd/system/nightwatch-dns.service
-systemctl enable nightwatch-nodeconfig.service
-systemctl enable nightwatch-mesh.service
-systemctl enable nightwatch-discovery.service
-systemctl enable nightwatch-docker.service
+install_systemd_services "$INSTALL_DIR"
 
 echo "[+] Services installed and enabled:"
 echo "    • nightwatch-nodeconfig (generates config from hostname)"
@@ -430,7 +299,7 @@ if [ -n "$ROUTER_PASSWORD_CHECK" ] && [ "$ROUTER_PASSWORD_CHECK" != "CHANGE_ME_B
     sleep 1
     if ping -c 1 -W 2 "$ROUTER_CONFIGURED_IP" >/dev/null 2>&1; then
         SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o LogLevel=ERROR"
-        CURRENT_SSID=$(sshpass -p "$ROUTER_PASSWORD_CHECK" ssh $SSH_OPTS root@"$ROUTER_CONFIGURED_IP" \
+        CURRENT_SSID=$(SSHPASS="$ROUTER_PASSWORD_CHECK" sshpass -e ssh $SSH_OPTS root@"$ROUTER_CONFIGURED_IP" \
             "uci get wireless.@wifi-iface[0].ssid 2>/dev/null" 2>/dev/null || echo "")
         if [ "$CURRENT_SSID" = "$WIFI_SSID_CHECK" ]; then
             ROUTER_ALREADY_CONFIGURED=true

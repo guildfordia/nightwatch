@@ -52,6 +52,22 @@ if [ ${#WIFI_PASSWORD} -lt 8 ]; then
     exit 1
 fi
 
+# Validate inputs to prevent shell injection in UCI commands sent over SSH
+# Reject characters that would be interpreted by remote shell: ' \ $ ` " !
+UNSAFE_CHARS='[\x27\\$`"!]'
+if [[ "$WIFI_SSID" =~ $UNSAFE_CHARS ]]; then
+    echo -e "${RED}Error: WIFI_SSID contains unsafe characters (no quotes, $, backticks, !, or backslashes)${NC}"
+    exit 1
+fi
+if [[ "$WIFI_PASSWORD" =~ $UNSAFE_CHARS ]]; then
+    echo -e "${RED}Error: WIFI_PASSWORD contains unsafe characters (no quotes, $, backticks, !, or backslashes)${NC}"
+    exit 1
+fi
+if [[ "$ROUTER_PASSWORD" =~ $UNSAFE_CHARS ]]; then
+    echo -e "${RED}Error: ROUTER_PASSWORD contains unsafe characters (no quotes, $, backticks, !, or backslashes)${NC}"
+    exit 1
+fi
+
 # ---- Step 0: Temporary IP on eth0 to reach the router ----
 
 echo "[+] Assigning temporary IP $TEMP_IP to $AP_IFACE..."
@@ -102,7 +118,7 @@ SSH_OK=false
 SSH_PASSWORD=""
 
 # Try 1: Already configured with our password
-if sshpass -p "$ROUTER_PASSWORD" ssh $SSH_OPTS root@"$FOUND_IP" "echo ok" 2>/dev/null | grep -q "ok"; then
+if SSHPASS="$ROUTER_PASSWORD" sshpass -e ssh $SSH_OPTS root@"$FOUND_IP" "echo ok" 2>/dev/null | grep -q "ok"; then
     SSH_OK=true
     SSH_PASSWORD="$ROUTER_PASSWORD"
     echo -e "  ${GREEN}SSH connected (existing password)${NC}"
@@ -110,7 +126,7 @@ fi
 
 # Try 2: Factory fresh — empty password
 if [ "$SSH_OK" = false ]; then
-    if sshpass -p "" ssh $SSH_OPTS root@"$FOUND_IP" "echo ok" 2>/dev/null | grep -q "ok"; then
+    if SSHPASS="" sshpass -e ssh $SSH_OPTS root@"$FOUND_IP" "echo ok" 2>/dev/null | grep -q "ok"; then
         SSH_OK=true
         SSH_PASSWORD=""
         echo -e "  ${GREEN}SSH connected (factory fresh, no password)${NC}"
@@ -119,7 +135,7 @@ fi
 
 # Try 3: Factory fresh — default "goodlife" password
 if [ "$SSH_OK" = false ]; then
-    if sshpass -p "goodlife" ssh $SSH_OPTS root@"$FOUND_IP" "echo ok" 2>/dev/null | grep -q "ok"; then
+    if SSHPASS="goodlife" sshpass -e ssh $SSH_OPTS root@"$FOUND_IP" "echo ok" 2>/dev/null | grep -q "ok"; then
         SSH_OK=true
         SSH_PASSWORD="goodlife"
         echo -e "  ${GREEN}SSH connected (default password)${NC}"
@@ -142,8 +158,9 @@ fi
 
 if [ "$SSH_PASSWORD" != "$ROUTER_PASSWORD" ]; then
     echo "[+] Setting admin password..."
-    sshpass -p "$SSH_PASSWORD" ssh $SSH_OPTS root@"$FOUND_IP" \
-        "echo -e '${ROUTER_PASSWORD}\n${ROUTER_PASSWORD}' | passwd root" 2>/dev/null
+    # Use chpasswd for safer password setting (no shell expansion of password chars)
+    SSHPASS="$SSH_PASSWORD" sshpass -e ssh $SSH_OPTS root@"$FOUND_IP" \
+        "echo 'root:${ROUTER_PASSWORD}' | chpasswd" 2>/dev/null
     SSH_PASSWORD="$ROUTER_PASSWORD"
     echo -e "  ${GREEN}Password set${NC}"
 fi
@@ -216,13 +233,13 @@ CONFIG_SCRIPT="${CONFIG_SCRIPT//__WIFI_PASSWORD__/$WIFI_PASSWORD}"
 CONFIG_SCRIPT="${CONFIG_SCRIPT//__ROUTER_CONFIGURED_IP__/$ROUTER_CONFIGURED_IP}"
 
 # Execute on the router
-sshpass -p "$SSH_PASSWORD" ssh $SSH_OPTS root@"$FOUND_IP" "$CONFIG_SCRIPT"
+SSHPASS="$SSH_PASSWORD" sshpass -e ssh $SSH_OPTS root@"$FOUND_IP" "$CONFIG_SCRIPT"
 
 # ---- Step 5: Reboot the router ----
 
 echo "[+] Rebooting router..."
 echo "    Router will come back at $ROUTER_CONFIGURED_IP"
-sshpass -p "$SSH_PASSWORD" ssh $SSH_OPTS root@"$FOUND_IP" "reboot" 2>/dev/null || true
+SSHPASS="$SSH_PASSWORD" sshpass -e ssh $SSH_OPTS root@"$FOUND_IP" "reboot" 2>/dev/null || true
 
 # Clean up temporary IP
 ip addr del "$TEMP_IP/24" dev "$AP_IFACE" 2>/dev/null || true
@@ -250,7 +267,7 @@ ip addr del "$TEMP_IP/24" dev "$AP_IFACE" 2>/dev/null || true
 echo ""
 echo -e "${GREEN}${BOLD}Router configured successfully!${NC}"
 echo "  WiFi SSID:      $WIFI_SSID"
-echo "  WiFi Password:  $WIFI_PASSWORD"
+echo "  WiFi Password:  ****"
 echo "  Management IP:  $ROUTER_CONFIGURED_IP"
 echo "  Mode:           Dumb AP (bridge, no DHCP)"
 echo ""

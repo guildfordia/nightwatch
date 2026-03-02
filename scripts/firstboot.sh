@@ -63,7 +63,10 @@ cd "$NIGHTWATCH_DIR"
 if [ ! -f ".env" ]; then
     echo "[+] No .env found — running nodeconfig for dynamic node assignment..."
     if [ -x scripts/nodeconfig.sh ]; then
-        scripts/nodeconfig.sh
+        if ! scripts/nodeconfig.sh; then
+            echo "[-] Error: nodeconfig.sh failed"
+            exit 1
+        fi
     else
         echo "[-] Error: .env not found and nodeconfig.sh not available"
         exit 1
@@ -80,8 +83,8 @@ source "$NIGHTWATCH_DIR/scripts/common.sh"
 
 load_env .env
 
-# Detect the real user (not root)
-REAL_USER=$(find /home/ -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | head -1)
+# Detect the real user (not root) — prefer UID 1000 (the default non-root user on Pi OS)
+REAL_USER=$(getent passwd 1000 2>/dev/null | cut -d: -f1 || true)
 REAL_USER="${REAL_USER:-pi}"
 
 echo "[+] Node: Pi #${PI_NUMBER:-?} — IP: ${MESH_IP:-?}"
@@ -120,9 +123,11 @@ if command -v timedatectl >/dev/null 2>&1; then
     done
 fi
 # Fallback: fetch time from HTTP header if NTP didn't work
-if [ "$(date +%Y)" -lt 2026 ]; then
+# Check if clock is behind the build date of this script (Pi has no RTC)
+SCRIPT_YEAR=$(date -r "$NIGHTWATCH_DIR/scripts/firstboot.sh" +%Y 2>/dev/null || echo "2025")
+if [ "$(date +%Y)" -lt "$SCRIPT_YEAR" ]; then
     HTTP_DATE=$(curl -sI http://deb.debian.org 2>/dev/null | grep -i "^date:" | sed 's/^[Dd]ate: //')
-    if [ -n "$HTTP_DATE" ]; then
+    if [ -n "$HTTP_DATE" ] && date -d "$HTTP_DATE" >/dev/null 2>&1; then
         date -s "$HTTP_DATE" 2>/dev/null || true
         echo "[+] Clock set from HTTP: $(date)"
     else
@@ -145,14 +150,16 @@ fi
 
 echo ""
 echo "[2/12] Installing system packages..."
+APT_DELAY=5
 for attempt in 1 2 3; do
     if apt-get update -qq; then
         break
     fi
-    echo "[!] apt-get update failed (attempt $attempt/3), retrying in 5s..."
-    sleep 5
+    echo "[!] apt-get update failed (attempt $attempt/3), retrying in ${APT_DELAY}s..."
+    sleep "$APT_DELAY"
+    APT_DELAY=$((APT_DELAY * 2))
 done
-apt-get install -y -qq \
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     docker.io \
     batctl \
     bridge-utils \
@@ -230,59 +237,7 @@ systemctl stop hostapd 2>/dev/null || true
 echo ""
 echo "[5/12] Configuring network routing..."
 
-DHCPCD_CONF="/etc/dhcpcd.conf"
-if [ -f "$DHCPCD_CONF" ]; then
-    # Static DNS
-    if ! grep -q "# Nightwatch DNS" "$DHCPCD_CONF"; then
-        cat >> "$DHCPCD_CONF" << 'NETEOF'
-
-# Nightwatch DNS — hardcode DNS so we don't depend on DHCP-provided nameservers
-static domain_name_servers=8.8.8.8 1.1.1.1
-NETEOF
-        echo "[+] dhcpcd configured: static DNS 8.8.8.8 + 1.1.1.1"
-    fi
-    # Deny bridge port interfaces
-    if ! grep -q "denyinterfaces eth0" "$DHCPCD_CONF"; then
-        cat >> "$DHCPCD_CONF" << 'DENYEOF'
-
-# Nightwatch bridge — dhcpcd must not manage these (br0 bridge handles them)
-denyinterfaces eth0 bat0 br0
-DENYEOF
-        echo "[+] dhcpcd: eth0/bat0/br0 excluded (bridge ports)"
-    fi
-    systemctl restart dhcpcd 2>/dev/null || true
-elif command -v nmcli >/dev/null 2>&1; then
-    # NetworkManager: configure eth0 — no default route (it's a bridge port to GL.iNet AP)
-    ETH_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep 'eth0' | head -1 | cut -d: -f1)
-    if [ -n "$ETH_CON" ]; then
-        # eth0 must NOT add a default route — it connects to the GL.iNet AP (no internet)
-        # Without this, eth0's route (metric 100) wins over wlan0 (metric 600) and
-        # all traffic goes to the GL.iNet bridge which has no upstream internet.
-        nmcli con mod "$ETH_CON" ipv4.never-default yes 2>/dev/null || true
-        nmcli con mod "$ETH_CON" ipv4.dns "8.8.8.8 1.1.1.1" 2>/dev/null || true
-        nmcli con up "$ETH_CON" 2>/dev/null || true
-        echo "[+] NetworkManager: eth0 ($ETH_CON) — never-default route, DNS 8.8.8.8 + 1.1.1.1"
-    fi
-    # Also add fallback via systemd-resolved
-    mkdir -p /etc/systemd/resolved.conf.d
-    cat > /etc/systemd/resolved.conf.d/nightwatch-fallback.conf << 'DNSEOF'
-[Resolve]
-FallbackDNS=8.8.8.8 1.1.1.1
-DNSEOF
-    systemctl restart systemd-resolved 2>/dev/null || true
-    echo "[+] Fallback DNS configured (8.8.8.8, 1.1.1.1)"
-else
-    echo "[!] Neither dhcpcd nor NetworkManager found — skipping network config"
-fi
-
-# Lock /etc/resolv.conf (prevents Tailscale, dhcpcd, etc. from overwriting)
-chattr -i /etc/resolv.conf 2>/dev/null || true
-cat > /etc/resolv.conf << 'DNSEOF'
-nameserver 8.8.8.8
-nameserver 1.1.1.1
-DNSEOF
-chattr +i /etc/resolv.conf
-echo "[+] /etc/resolv.conf locked (immutable) with 8.8.8.8 + 1.1.1.1"
+configure_network
 
 # ---- Step 6: Install Tailscale ----
 
@@ -302,9 +257,13 @@ if [ -n "$TAILSCALE_AUTH_KEY" ]; then
     systemctl enable tailscaled
     systemctl start tailscaled
 
-    # Join the tailnet unattended with the auth key
+    # Join the tailnet unattended with the auth key (via file to avoid ps exposure)
     echo "[+] Joining tailnet with auth key..."
-    tailscale up --auth-key="$TAILSCALE_AUTH_KEY" --accept-routes --accept-dns=false --hostname="$(hostname)" --reset
+    TS_KEY_FILE=$(mktemp /tmp/nightwatch-ts-key.XXXXXX)
+    chmod 600 "$TS_KEY_FILE"
+    printf '%s' "$TAILSCALE_AUTH_KEY" > "$TS_KEY_FILE"
+    tailscale up --auth-key="file:$TS_KEY_FILE" --accept-routes --accept-dns=false --hostname="$(hostname)" --reset
+    rm -f "$TS_KEY_FILE"
 
     # Wait for connection
     sleep 3
@@ -331,40 +290,9 @@ fi
 echo ""
 echo "[8/12] Generating dnsmasq config..."
 NODE_NUM="${PI_NUMBER:-1}"
-DHCP_START=$((200 + (NODE_NUM - 1) * 5 + 1))
-DHCP_END=$((200 + (NODE_NUM - 1) * 5 + 5))
-MESH_IP_PLAIN="${MESH_IP%/*}"
-mkdir -p "$NIGHTWATCH_DIR/dnsmasq"
-cat > "$NIGHTWATCH_DIR/dnsmasq/dnsmasq.conf" << DNSEOF
-# Nightwatch dnsmasq — DHCP + captive portal DNS for WiFi clients
-# Auto-generated by firstboot.sh — do not edit manually
-
-# Only listen on the mesh bridge
-interface=br0
-bind-interfaces
-
-# DHCP range for WiFi clients (each node gets 5 addresses to avoid conflicts)
-dhcp-range=192.168.199.${DHCP_START},192.168.199.${DHCP_END},255.255.255.0,1h
-
-# Tell clients to use this node as gateway and DNS
-dhcp-option=3,${MESH_IP_PLAIN}
-dhcp-option=6,${MESH_IP_PLAIN}
-
-# Redirect ALL DNS to this node (captive portal)
-address=/#/${MESH_IP_PLAIN}
-
-# Don't read /etc/resolv.conf (we handle all DNS ourselves)
-no-resolv
-
-# Don't poll /etc/resolv.conf for changes
-no-poll
-
-# Log DHCP leases (useful for debugging)
-log-dhcp
-
-# PID file for mesh-fix.sh to manage
-pid-file=/var/run/dnsmasq-nightwatch.pid
-DNSEOF
+generate_dnsmasq_conf "$NIGHTWATCH_DIR/dnsmasq/dnsmasq.conf" "$NODE_NUM" "$MESH_IP"
+DHCP_START=$((200 + (NODE_NUM - 1) * 2 + 1))
+DHCP_END=$((200 + (NODE_NUM - 1) * 2 + 2))
 echo "[+] dnsmasq.conf generated (DHCP: .${DHCP_START}-.${DHCP_END})"
 
 # ---- Step 9: Install systemd services ----
@@ -372,26 +300,7 @@ echo "[+] dnsmasq.conf generated (DHCP: .${DHCP_START}-.${DHCP_END})"
 echo ""
 echo "[9/12] Installing systemd services..."
 
-# Ensure scripts are executable
-chmod +x "$NIGHTWATCH_DIR"/scripts/*.sh
-
-# Install service files (replace /opt/nightwatch with actual path)
-for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch-docker; do
-    sed "s|/opt/nightwatch|$NIGHTWATCH_DIR|g" \
-        "$NIGHTWATCH_DIR/scripts/${svc}.service" > /etc/systemd/system/${svc}.service
-done
-
-systemctl daemon-reload
-
-# Remove old DNS workaround if present
-systemctl disable nightwatch-dns.service 2>/dev/null || true
-rm -f /etc/systemd/system/nightwatch-dns.service
-
-# Enable all services
-systemctl enable nightwatch-nodeconfig.service
-systemctl enable nightwatch-mesh.service
-systemctl enable nightwatch-discovery.service
-systemctl enable nightwatch-docker.service
+install_systemd_services "$NIGHTWATCH_DIR"
 
 echo "[+] Services installed and enabled:"
 echo "    - nightwatch-nodeconfig (generates config from hostname)"
@@ -405,7 +314,17 @@ echo ""
 echo "[10/12] Building Docker images (this may take a few minutes)..."
 cd "$NIGHTWATCH_DIR"
 detect_docker_compose
-$DC --env-file .env build
+for attempt in 1 2 3; do
+    if timeout 1200 $DC --env-file .env build; then
+        break
+    fi
+    if [ "$attempt" -eq 3 ]; then
+        echo "[-] Docker build failed after 3 attempts"
+        exit 1
+    fi
+    echo "[!] Docker build failed (attempt $attempt/3), retrying in 10s..."
+    sleep 10
+done
 echo "[+] Docker images built"
 
 # ---- Step 11: Start everything ----
@@ -451,6 +370,6 @@ if [ -n "$TS_IP" ]; then
 echo "  Tailscale:  ${TS_IP}"
 fi
 echo ""
-echo "  Web UI:     http://${MESH_IP_PLAIN}"
+echo "  Web UI:     http://${MESH_IP%/*}"
 echo "  Log:        $LOG_FILE"
 echo "======================================"

@@ -8,11 +8,12 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 # shellcheck source=common.sh
 source "$SCRIPT_DIR/common.sh"
 
-ENV_FILE=".env"
+ENV_FILE="$PROJECT_DIR/.env"
 
 echo "[+] Setting up IRC configuration..."
 
@@ -36,9 +37,9 @@ echo "    → Node: $PI_NUMBER"
 echo "    → Server: $SERVER_NAME"
 echo "    → Mesh IP: $MESH_IP"
 
-generate_ngircd_base_conf "ngircd/ngircd.conf" "$SERVER_NAME" "$PI_NUMBER"
+generate_ngircd_base_conf "$PROJECT_DIR/ngircd/ngircd.conf" "$SERVER_NAME" "$PI_NUMBER"
 
-cat >> "ngircd/ngircd.conf" << 'EOF'
+cat >> "$PROJECT_DIR/ngircd/ngircd.conf" << 'EOF'
 
 # Peer links are added automatically by the discovery daemon.
 # Run: scripts/node-discovery.sh peers  — to see discovered nodes.

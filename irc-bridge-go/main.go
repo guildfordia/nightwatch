@@ -11,11 +11,15 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
+
+// Monotonic counters for unique client IDs and IRC nicks
+var clientCounter atomic.Uint64
 
 // --- Configuration ---
 
@@ -35,6 +39,19 @@ const (
 
 // --- WebSocket upgrader with origin check ---
 
+var allowedOriginPrefixes = []string{
+	"http://192.168.",
+	"http://10.",
+	"http://172.16.", "http://172.17.", "http://172.18.", "http://172.19.",
+	"http://172.20.", "http://172.21.", "http://172.22.", "http://172.23.",
+	"http://172.24.", "http://172.25.", "http://172.26.", "http://172.27.",
+	"http://172.28.", "http://172.29.", "http://172.30.", "http://172.31.",
+	"http://localhost",
+	"http://127.0.0.1",
+	"http://[::1]",
+	"http://nightwatch",
+}
+
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
@@ -43,10 +60,12 @@ var upgrader = websocket.Upgrader{
 		if origin == "" {
 			return true
 		}
-		// Allow mesh subnet, localhost, and loopback origins only
-		return strings.HasPrefix(origin, "http://192.168.199.") ||
-			strings.HasPrefix(origin, "http://localhost") ||
-			strings.HasPrefix(origin, "http://127.0.0.1")
+		for _, prefix := range allowedOriginPrefixes {
+			if strings.HasPrefix(origin, prefix) {
+				return true
+			}
+		}
+		return false
 	},
 }
 
@@ -95,6 +114,14 @@ type Client struct {
 func (c *Client) close() {
 	c.once.Do(func() {
 		close(c.done)
+		// Close underlying connections to unblock any goroutines blocked
+		// on network reads (ReadMessage, scanner.Scan)
+		if c.irc != nil {
+			c.irc.Close()
+		}
+		if c.ws != nil {
+			c.ws.Close()
+		}
 	})
 }
 
@@ -131,10 +158,8 @@ func (h *Hub) run() {
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
 				client.close()
-				if client.irc != nil {
-					client.irc.Close()
-				}
-				client.ws.Close()
+				// Don't close(client.send) — ircPump may still be mid-send.
+				// writePump exits via <-c.done instead.
 			}
 			h.mu.Unlock()
 			log.Printf("[%s] Client unregistered. Total: %d", client.id, len(h.clients))
@@ -142,15 +167,13 @@ func (h *Hub) run() {
 		case <-h.done:
 			h.mu.Lock()
 			for client := range h.clients {
-				client.close()
+				// Best-effort QUIT and close frame before tearing down
 				if client.irc != nil {
-					// Send QUIT before closing
 					client.irc.Write([]byte("QUIT :Server shutting down\r\n"))
-					client.irc.Close()
 				}
 				client.ws.WriteMessage(websocket.CloseMessage,
 					websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down"))
-				client.ws.Close()
+				client.close()
 				delete(h.clients, client)
 			}
 			h.mu.Unlock()
@@ -200,6 +223,7 @@ func (c *Client) readPump(hub *Hub) {
 
 		log.Printf("[%s] WS->IRC: %s", c.id, msg)
 		if c.irc != nil {
+			c.irc.SetWriteDeadline(time.Now().Add(wsWriteWait))
 			_, writeErr := c.irc.Write([]byte(msg + "\r\n"))
 			if writeErr != nil {
 				log.Printf("[%s] IRC write error: %v", c.id, writeErr)
@@ -220,12 +244,8 @@ func (c *Client) writePump() {
 		case <-c.done:
 			return
 
-		case message, ok := <-c.send:
+		case message := <-c.send:
 			c.ws.SetWriteDeadline(time.Now().Add(wsWriteWait))
-			if !ok {
-				c.ws.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
 			err := c.ws.WriteMessage(websocket.TextMessage, message)
 			if err != nil {
 				log.Printf("[%s] WebSocket write error: %v", c.id, err)
@@ -248,6 +268,7 @@ func (c *Client) ircPump() {
 	}()
 
 	scanner := bufio.NewScanner(c.irc)
+	scanner.Buffer(make([]byte, 4096), 4096) // cap line size to match WebSocket read limit
 	for scanner.Scan() {
 		select {
 		case <-c.done:
@@ -256,6 +277,17 @@ func (c *Client) ircPump() {
 		}
 
 		line := scanner.Text()
+
+		// Handle IRC PING server-side (don't round-trip through browser)
+		if strings.HasPrefix(line, "PING ") {
+			token := strings.TrimPrefix(line, "PING ")
+			// Validate: token should be non-empty and not contain CR/LF
+			if token != "" && !strings.ContainsAny(token, "\r\n") {
+				c.irc.Write([]byte("PONG " + token + "\r\n"))
+			}
+			continue
+		}
+
 		if strings.Contains(line, "PRIVMSG") || strings.Contains(line, "JOIN") ||
 			strings.Contains(line, "PART") || strings.Contains(line, "NICK") ||
 			strings.Contains(line, "001") || strings.Contains(line, "353") ||
@@ -268,7 +300,11 @@ func (c *Client) ircPump() {
 		case <-c.done:
 			return
 		default:
-			log.Printf("[%s] Send channel full, dropping message", c.id)
+			// Channel full — close the connection rather than silently
+			// dropping messages, which would confuse the user
+			log.Printf("[%s] Send channel full, closing connection", c.id)
+			c.close()
+			return
 		}
 	}
 
@@ -279,11 +315,15 @@ func (c *Client) ircPump() {
 
 // --- WebSocket handler ---
 
-func handleWebSocket(hub *Hub, limiter *RateLimiter, w http.ResponseWriter, r *http.Request) {
-	// Extract client IP
-	clientIP := r.RemoteAddr
-	if host, _, err := net.SplitHostPort(clientIP); err == nil {
-		clientIP = host
+func handleWebSocket(hub *Hub, limiter *RateLimiter, cleanupWg *sync.WaitGroup, w http.ResponseWriter, r *http.Request) {
+	// Extract client IP — prefer X-Real-IP set by nginx reverse proxy,
+	// since r.RemoteAddr is always the Docker gateway IP (172.x.x.x)
+	clientIP := r.Header.Get("X-Real-IP")
+	if clientIP == "" {
+		clientIP = r.RemoteAddr
+		if host, _, err := net.SplitHostPort(clientIP); err == nil {
+			clientIP = host
+		}
 	}
 
 	// Rate limit
@@ -293,7 +333,8 @@ func handleWebSocket(hub *Hub, limiter *RateLimiter, w http.ResponseWriter, r *h
 		return
 	}
 
-	clientID := fmt.Sprintf("client-%d", time.Now().UnixNano()%10000)
+	seq := clientCounter.Add(1)
+	clientID := fmt.Sprintf("client-%d", seq)
 	log.Printf("[%s] New WebSocket request from %s", clientID, r.RemoteAddr)
 
 	// Upgrade to WebSocket
@@ -317,11 +358,23 @@ func handleWebSocket(hub *Hub, limiter *RateLimiter, w http.ResponseWriter, r *h
 	}
 
 	// Register with IRC — single registration, no double NICK/USER
-	nick := fmt.Sprintf("webuser%d", time.Now().UnixNano()%1000000)
+	nick := fmt.Sprintf("web%d", seq)
 	log.Printf("[%s] Registering with IRC as %s", clientID, nick)
 
-	ircConn.Write([]byte(fmt.Sprintf("NICK %s\r\n", nick)))
-	ircConn.Write([]byte(fmt.Sprintf("USER %s 0 * :Web User\r\n", nick)))
+	if _, err = ircConn.Write([]byte(fmt.Sprintf("NICK %s\r\n", nick))); err != nil {
+		log.Printf("[%s] IRC NICK write error: %v", clientID, err)
+		ircConn.Close()
+		ws.Close()
+		limiter.Release(clientIP)
+		return
+	}
+	if _, err = ircConn.Write([]byte(fmt.Sprintf("USER %s 0 * :Web User\r\n", nick))); err != nil {
+		log.Printf("[%s] IRC USER write error: %v", clientID, err)
+		ircConn.Close()
+		ws.Close()
+		limiter.Release(clientIP)
+		return
+	}
 
 	client := &Client{
 		ws:   ws,
@@ -335,7 +388,9 @@ func handleWebSocket(hub *Hub, limiter *RateLimiter, w http.ResponseWriter, r *h
 	hub.register <- client
 
 	// Release rate limiter slot when client disconnects
+	cleanupWg.Add(1)
 	go func() {
+		defer cleanupWg.Done()
 		<-client.done
 		limiter.Release(clientIP)
 	}()
@@ -345,16 +400,50 @@ func handleWebSocket(hub *Hub, limiter *RateLimiter, w http.ResponseWriter, r *h
 	go client.readPump(hub)
 }
 
-// --- Health check endpoint ---
+// --- Health check endpoint (cached to avoid hammering IRC with TCP dials) ---
+
+var (
+	healthMu     sync.Mutex
+	healthOK     bool
+	healthErr    string
+	healthExpiry time.Time
+)
+
+const healthCacheTTL = 5 * time.Second
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
-	// Quick check: can we reach the IRC server?
-	conn, err := net.DialTimeout("tcp", ircServer, 2*time.Second)
-	if err != nil {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		fmt.Fprintf(w, "IRC unreachable: %v", err)
+	healthMu.Lock()
+	if time.Now().Before(healthExpiry) {
+		ok, errMsg := healthOK, healthErr
+		healthMu.Unlock()
+		if ok {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, "OK")
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, errMsg)
+		}
 		return
 	}
+	healthMu.Unlock()
+
+	conn, err := net.DialTimeout("tcp", ircServer, 2*time.Second)
+
+	healthMu.Lock()
+	healthExpiry = time.Now().Add(healthCacheTTL)
+	if err != nil {
+		healthOK = false
+		healthErr = "IRC unavailable"
+		log.Printf("Health check failed: %v", err)
+		healthMu.Unlock()
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, "IRC unavailable")
+		return
+	}
+	healthOK = true
+	healthErr = ""
+	healthMu.Unlock()
+
 	conn.Close()
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, "OK")
@@ -367,10 +456,11 @@ func main() {
 	go hub.run()
 
 	limiter := newRateLimiter()
+	cleanupWg := &sync.WaitGroup{}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		handleWebSocket(hub, limiter, w, r)
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		handleWebSocket(hub, limiter, cleanupWg, w, r)
 	})
 	mux.HandleFunc("/health", handleHealth)
 
@@ -404,6 +494,9 @@ func main() {
 	if err := server.Shutdown(ctx); err != nil {
 		log.Printf("HTTP server shutdown error: %v", err)
 	}
+
+	// Wait for all cleanup goroutines (rate limiter releases) to finish
+	cleanupWg.Wait()
 
 	log.Println("Server stopped")
 }

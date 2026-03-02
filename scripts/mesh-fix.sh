@@ -62,6 +62,11 @@ setup_mesh_interface() {
     nmcli dev set "$MESH_IFACE" managed no 2>/dev/null || true
     pkill -f "wpa_supplicant.*$MESH_IFACE" 2>/dev/null || true
     sleep 1
+    # Force-kill if SIGTERM was ignored
+    if pgrep -f "wpa_supplicant.*$MESH_IFACE" >/dev/null 2>&1; then
+        pkill -9 -f "wpa_supplicant.*$MESH_IFACE" 2>/dev/null || true
+        sleep 1
+    fi
 
     # Bring down and set mesh type
     ip link set "$MESH_IFACE" down 2>/dev/null || true
@@ -101,6 +106,17 @@ network={
 }
 WPAEOF
         wpa_supplicant -B -i "$MESH_IFACE" -c "$WPA_CONF" -D nl80211
+        # Clean up WPA config after wpa_supplicant has fully started (contains SAE password)
+        # Wait for the wpa_supplicant control socket to confirm it's running
+        (
+            for _try in $(seq 1 10); do
+                if [ -e "/var/run/wpa_supplicant/$MESH_IFACE" ]; then
+                    break
+                fi
+                sleep 1
+            done
+            rm -f "$WPA_CONF"
+        ) &
     else
         echo "[+] Joining open mesh '$MESH_ID' on $FREQ MHz..."
         iw dev "$MESH_IFACE" mesh join "$MESH_ID" freq "$FREQ"
@@ -139,18 +155,7 @@ setup_client_bridge() {
     # batman-adv's "batctl if add" only works for wireless interfaces.
     # For ethernet (eth0 = GL.iNet router), we use a Linux bridge that
     # connects bat0 and eth0 at layer 2. The bridge gets the mesh IP.
-
-    # Ensure dhcpcd won't manage bridge ports (self-healing: adds on first run)
-    DHCPCD_CONF="/etc/dhcpcd.conf"
-    if [ -f "$DHCPCD_CONF" ] && ! grep -q "denyinterfaces.*eth0" "$DHCPCD_CONF"; then
-        echo "[+] Adding denyinterfaces to $DHCPCD_CONF..."
-        cat >> "$DHCPCD_CONF" << 'DENYEOF'
-
-# Nightwatch bridge — dhcpcd must not manage these (br0 bridge handles them)
-denyinterfaces eth0 bat0 br0
-DENYEOF
-        systemctl restart dhcpcd 2>/dev/null || true
-    fi
+    # Note: dhcpcd denyinterfaces is handled by configure_network (setup/firstboot).
 
     # Release any existing DHCP lease on eth0
     if command -v dhcpcd >/dev/null 2>&1; then
@@ -170,8 +175,14 @@ DENYEOF
 
     # Create bridge and add ports
     ip link add name "$BR_IFACE" type bridge
-    ip link set "$BAT_IFACE" master "$BR_IFACE"
-    ip link set "$AP_IFACE" master "$BR_IFACE"
+    if ! ip link set "$BAT_IFACE" master "$BR_IFACE"; then
+        echo "[-] Failed to add $BAT_IFACE to bridge $BR_IFACE"
+        return 1
+    fi
+    if ! ip link set "$AP_IFACE" master "$BR_IFACE"; then
+        echo "[-] Failed to add $AP_IFACE to bridge $BR_IFACE"
+        return 1
+    fi
 
     # Bring up bridge and assign mesh IP
     ip link set "$BR_IFACE" up
@@ -217,9 +228,13 @@ setup_gateway() {
 
         # NAT for internet-bound traffic (wlan0 has internet via WiFi client)
         local INET_IFACE="${INET_IFACE:-wlan0}"
-        iptables -t nat -A POSTROUTING -o "$INET_IFACE" -j MASQUERADE 2>/dev/null || true
-        iptables -A FORWARD -i "$BR_IFACE" -o "$INET_IFACE" -j ACCEPT 2>/dev/null || true
-        iptables -A FORWARD -i "$INET_IFACE" -o "$BR_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+        # Only add rules if not already present (prevents duplicates on restart)
+        iptables -t nat -C POSTROUTING -o "$INET_IFACE" -j MASQUERADE 2>/dev/null || \
+            iptables -t nat -A POSTROUTING -o "$INET_IFACE" -j MASQUERADE 2>/dev/null || true
+        iptables -C FORWARD -i "$BR_IFACE" -o "$INET_IFACE" -j ACCEPT 2>/dev/null || \
+            iptables -A FORWARD -i "$BR_IFACE" -o "$INET_IFACE" -j ACCEPT 2>/dev/null || true
+        iptables -C FORWARD -i "$INET_IFACE" -o "$BR_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+            iptables -A FORWARD -i "$INET_IFACE" -o "$BR_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 
         echo "[+] Gateway mode enabled (NAT via $INET_IFACE)"
     else
@@ -238,10 +253,26 @@ case "$1" in
         echo "====================================="
         echo ""
 
+        check_deps iw batctl ip || exit 1
+
+        # Clean up WPA config files on unexpected exit (contain SAE password)
+        trap 'rm -f /tmp/nightwatch-mesh-wpa.* 2>/dev/null' EXIT
+
         load_batman_module
         setup_mesh_interface
         setup_batman
-        setup_client_bridge || echo "[!] Client bridge setup failed — mesh still operational"
+        # Retry bridge setup (eth0 may not be ready immediately after boot)
+        for _attempt in 1 2 3; do
+            if setup_client_bridge; then
+                break
+            fi
+            if [ "$_attempt" -eq 3 ]; then
+                echo "[!] Client bridge setup failed after 3 attempts — mesh still operational"
+                break
+            fi
+            echo "[!] Bridge setup failed (attempt $_attempt/3), retrying in ${_attempt}s..."
+            sleep "$_attempt"
+        done
         start_dnsmasq
         setup_gateway
 
@@ -287,8 +318,11 @@ case "$1" in
         # NOTE: wlan0 and eth0 are never touched here — wlan0 provides internet,
         # eth0 connects to the external router (both must stay up)
 
-        # Remove gateway NAT rules
-        iptables -t nat -F POSTROUTING 2>/dev/null || true
+        # Remove only the Nightwatch MASQUERADE rule (preserve Docker/Tailscale NAT)
+        INET_IFACE="${INET_IFACE:-wlan0}"
+        iptables -t nat -D POSTROUTING -o "$INET_IFACE" -j MASQUERADE 2>/dev/null || true
+        iptables -D FORWARD -i "$BR_IFACE" -o "$INET_IFACE" -j ACCEPT 2>/dev/null || true
+        iptables -D FORWARD -i "$INET_IFACE" -o "$BR_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 
         echo "[+] Mesh network stopped"
         ;;

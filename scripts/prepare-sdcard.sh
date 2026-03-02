@@ -242,13 +242,12 @@ echo "[+] Project copied to $DEST"
 echo "[2/5] Saving secrets (nodeconfig generates .env on first boot)..."
 
 SECRETS_DEST="$DEST/.secrets"
-sudo bash -c "cat > '$SECRETS_DEST'" << SECRETSEOF
-# Nightwatch secrets — baked by prepare-sdcard.sh
-# nodeconfig.sh injects these into .env on first boot
-ROUTER_PASSWORD='${ROUTER_PASSWORD}'
-IRC_LINK_PASSWORD='${IRC_LINK_PASSWORD}'
-TAILSCALE_AUTH_KEY=${TAILSCALE_AUTH_KEY:-}
-SECRETSEOF
+# Write secrets using printf to safely handle special characters in passwords
+sudo bash -c "printf '%s\n' '# Nightwatch secrets — baked by prepare-sdcard.sh' > '$SECRETS_DEST'"
+sudo bash -c "printf '%s\n' '# nodeconfig.sh injects these into .env on first boot' >> '$SECRETS_DEST'"
+printf 'ROUTER_PASSWORD=%s\n' "$ROUTER_PASSWORD" | sudo tee -a "$SECRETS_DEST" > /dev/null
+printf 'IRC_LINK_PASSWORD=%s\n' "$IRC_LINK_PASSWORD" | sudo tee -a "$SECRETS_DEST" > /dev/null
+printf 'TAILSCALE_AUTH_KEY=%s\n' "${TAILSCALE_AUTH_KEY:-}" | sudo tee -a "$SECRETS_DEST" > /dev/null
 sudo chmod 600 "$SECRETS_DEST"
 
 if [ "$GATEWAY_MODE" = true ]; then
@@ -278,6 +277,7 @@ sudo chmod +x "$DEST/scripts/setup-rpi.sh"
 sudo chmod +x "$DEST/scripts/setup-distributed-irc.sh"
 sudo chmod +x "$DEST/scripts/nodeconfig.sh"
 sudo chmod +x "$DEST/scripts/node-discovery.sh"
+sudo chmod +x "$DEST/scripts/common.sh"
 
 # Copy systemd service
 sudo cp "$DEST/scripts/nightwatch-firstboot.service" \

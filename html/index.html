@@ -472,7 +472,7 @@
       }
 
       handleMessage(data) {
-        const lines = data.split('\r\n').filter(line => line.trim());
+        const lines = data.split(/\r?\n/).filter(line => line.trim());
         lines.forEach(line => {
           // RPL_WELCOME — extract real nick from ":server 001 <nick> :Welcome..."
           if (line.includes(' 001 ')) {
@@ -501,7 +501,7 @@
           else if (line.includes(' 353 ')) {
             const names = line.split(':').pop().trim().split(' ')
               .map(name => name.replace(/^[@+~&%]/, '')) // strip IRC prefix chars
-              .filter(name => name.trim() && !name.includes('.irc') && !name.includes('nightwatch'));
+              .filter(name => name.trim() && !name.includes('.irc'));
             this.users = names;
             this.userCount = this.users.length;
             this.updateStatus();
@@ -677,7 +677,7 @@
 
         this.users.forEach(ircUser => {
           // Filter out IRC server names, keep all real users (including webuser*)
-          if (!ircUser.includes('.irc') && !ircUser.includes('nightwatch')) {
+          if (!ircUser.includes('.irc')) {
             const displayName = this.nickMap[ircUser] || ircUser;
             displayUsers.add(displayName);
           }
@@ -738,7 +738,15 @@
         // If user is near bottom, auto-scroll; otherwise, respect their position
         const threshold = 60; // px
         const atBottom = (this.chatArea.scrollHeight - this.chatArea.scrollTop - this.chatArea.clientHeight) < threshold;
+        this.trimMessages();
         if (atBottom) this.chatArea.scrollTop = this.chatArea.scrollHeight;
+      }
+
+      trimMessages() {
+        const MAX_MESSAGES = 1000;
+        while (this.chatArea.children.length > MAX_MESSAGES) {
+          this.chatArea.removeChild(this.chatArea.firstChild);
+        }
       }
 
       escapeHtml(text) {

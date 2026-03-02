@@ -390,7 +390,7 @@ func TestWebSocketHandlerRateLimit(t *testing.T) {
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handleWebSocket(hub, limiter, w, r)
+		handleWebSocket(hub, limiter, &sync.WaitGroup{}, w, r)
 	}))
 	defer server.Close()
 
@@ -419,7 +419,7 @@ func TestWebSocketUpgradeWithMockIRC(t *testing.T) {
 	limiter := newRateLimiter()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handleWebSocket(hub, limiter, w, r)
+		handleWebSocket(hub, limiter, &sync.WaitGroup{}, w, r)
 	}))
 	defer server.Close()
 

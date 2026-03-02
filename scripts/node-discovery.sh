@@ -31,9 +31,9 @@ load_env "$ENV_FILE"
 
 # Config
 BAT_IFACE="${BAT_IFACE:-bat0}"
-DISCOVERY_PORT=4919
-BEACON_INTERVAL=30
-PEER_TIMEOUT=90
+DISCOVERY_PORT="${DISCOVERY_PORT:-4919}"
+BEACON_INTERVAL="${BEACON_INTERVAL:-30}"
+PEER_TIMEOUT="${PEER_TIMEOUT:-90}"
 PEER_FILE="/tmp/nightwatch-peers"
 PID_FILE="/tmp/nightwatch-discovery.pid"
 LOCAL_IP="${MESH_IP%/*}"
@@ -66,7 +66,9 @@ send_beacons() {
 # ---- Beacon receiver ----
 receive_beacons() {
     # Listen for UDP broadcasts
-    socat -u UDP4-RECVFROM:${DISCOVERY_PORT},broadcast,reuseaddr,fork STDOUT 2>/dev/null | while IFS= read -r line; do
+    # Use process substitution (not pipe) so the while loop runs in the main
+    # shell process and variables (like LAST_PEER_HASH) persist across iterations.
+    while IFS= read -r line; do
         # Parse: NIGHTWATCH|<node_num>|<mesh_ip>|<server_name>|<timestamp>
         if [[ "$line" =~ ^NIGHTWATCH\| ]]; then
             PEER_NUM=$(echo "$line" | cut -d'|' -f2)
@@ -74,11 +76,23 @@ receive_beacons() {
             PEER_NAME=$(echo "$line" | cut -d'|' -f4)
             NOW=$(date +%s)
 
+            # Validate beacon fields to prevent injection
+            if ! [[ "$PEER_NUM" =~ ^[0-9]+$ ]] || ! [[ "$PEER_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || ! [[ "$PEER_NAME" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+                log "WARNING: Invalid beacon ignored: $line"
+                continue
+            fi
+
             # Conflict detection: same node number from a different IP
             if [ "$PEER_NUM" = "$NODE_NUM" ]; then
                 if [ "$PEER_IP" != "$LOCAL_IP" ]; then
                     log "CONFLICT: node $PEER_NUM seen from $PEER_IP (we are also node $NODE_NUM at $LOCAL_IP)!"
                     echo "Node conflict: node $PEER_NUM exists at both $LOCAL_IP and $PEER_IP" > "$CONFLICT_FILE"
+                    # Auto-resolve: trigger nodeconfig to reassign our number
+                    if [ -x "$PROJECT_DIR/scripts/nodeconfig.sh" ]; then
+                        log "Triggering nodeconfig for conflict resolution..."
+                        systemctl restart nightwatch-nodeconfig.service 2>/dev/null || \
+                            "$PROJECT_DIR/scripts/nodeconfig.sh" 2>/dev/null || true
+                    fi
                 fi
                 continue
             fi
@@ -98,7 +112,7 @@ receive_beacons() {
             # Check if ngircd config needs updating
             update_irc_config
         fi
-    done
+    done < <(socat -u UDP4-RECV:${DISCOVERY_PORT},reuseaddr STDOUT 2>/dev/null)
 }
 
 # ---- Expire stale peers ----
@@ -109,24 +123,35 @@ expire_peers() {
             continue
         fi
 
-        NOW=$(date +%s)
-        CHANGED=false
-        while IFS='|' read -r num ip name ts; do
-            AGE=$((NOW - ts))
-            if [ "$AGE" -gt "$PEER_TIMEOUT" ]; then
-                log "Peer node $num ($name) expired (${AGE}s since last beacon)"
-                CHANGED=true
-            fi
-        done < "$PEER_FILE"
+        # Perform entire read+check+write under flock to prevent races
+        (
+            flock -x 200
+            NOW=$(date +%s)
+            CUTOFF=$((NOW - PEER_TIMEOUT))
 
-        if [ "$CHANGED" = true ]; then
-            # Remove expired entries with flock to prevent concurrent write races
-            (
-                flock -x 200
-                CUTOFF=$((NOW - PEER_TIMEOUT))
-                awk -F'|' -v cutoff="$CUTOFF" '$4 >= cutoff' "$PEER_FILE" > "${PEER_FILE}.tmp" 2>/dev/null || true
-                mv "${PEER_FILE}.tmp" "$PEER_FILE"
-            ) 200>"${PEER_FILE}.lock"
+            # Log expired peers
+            while IFS='|' read -r num ip name ts; do
+                [ -z "$num" ] && continue
+                AGE=$((NOW - ts))
+                if [ "$AGE" -gt "$PEER_TIMEOUT" ]; then
+                    log "Peer node $num ($name) expired (${AGE}s since last beacon)"
+                fi
+            done < "$PEER_FILE"
+
+            # Remove expired entries
+            BEFORE=$(wc -l < "$PEER_FILE" 2>/dev/null || echo "0")
+            awk -F'|' -v cutoff="$CUTOFF" '$4 >= cutoff' "$PEER_FILE" > "${PEER_FILE}.tmp" 2>/dev/null || true
+            mv "${PEER_FILE}.tmp" "$PEER_FILE"
+            AFTER=$(wc -l < "$PEER_FILE" 2>/dev/null || echo "0")
+
+            if [ "$BEFORE" != "$AFTER" ]; then
+                # Signal parent that peers changed (via temp file)
+                touch "${PEER_FILE}.changed"
+            fi
+        ) 200>"${PEER_FILE}.lock"
+
+        if [ -f "${PEER_FILE}.changed" ]; then
+            rm -f "${PEER_FILE}.changed"
             update_irc_config
         fi
     done
@@ -161,7 +186,7 @@ EOF
 LAST_PEER_HASH=""
 update_irc_config() {
     # Hash current peer file to detect changes
-    CURRENT_HASH=$(sort "$PEER_FILE" 2>/dev/null | md5sum 2>/dev/null | cut -d' ' -f1 || echo "")
+    CURRENT_HASH=$(sort "$PEER_FILE" 2>/dev/null | cksum || echo "")
     if [ "$CURRENT_HASH" = "$LAST_PEER_HASH" ]; then
         return
     fi
@@ -172,15 +197,21 @@ update_irc_config() {
 
     generate_irc_config
 
-    # Reload ngircd config inside the container
+    # Reload ngircd config inside the container (with timeouts to avoid blocking)
     # Send SIGHUP directly to the ngircd process (not PID 1 which is s6-init)
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q ngircd; then
+    if timeout 5 docker ps --format '{{.Names}}' 2>/dev/null | grep -q ngircd; then
         # Try sending HUP to ngircd process directly
-        if docker exec ngircd pkill -HUP ngircd 2>/dev/null; then
+        if timeout 5 docker exec ngircd pkill -HUP ngircd 2>/dev/null; then
             log "Sent HUP to ngircd process (config reload)"
+            # Verify ngircd survived the reload (bad config can crash it)
+            sleep 1
+            if ! timeout 5 docker exec ngircd pgrep -x ngircd >/dev/null 2>&1; then
+                log "WARNING: ngircd crashed after HUP — restarting container"
+                timeout 30 docker restart ngircd 2>/dev/null || true
+            fi
         else
             # Fallback: restart container
-            docker restart ngircd 2>/dev/null || true
+            timeout 30 docker restart ngircd 2>/dev/null || true
             log "Restarted ngircd (config reload)"
         fi
     fi
@@ -223,15 +254,33 @@ case "${1:-start}" in
         trap 'log "Stopping..."; kill $SENDER_PID $EXPIRY_PID 2>/dev/null; rm -f "$PID_FILE"; exit 0' SIGTERM SIGINT EXIT
 
         # Receive beacons (blocking — this is the main loop)
-        receive_beacons
+        # Retry if socat dies (e.g., interface goes down temporarily)
+        RETRY_DELAY=5
+        while true; do
+            receive_beacons
+            # If receive_beacons ran for >60s, it was working — reset backoff
+            if [ -f "$PEER_FILE" ] && [ "$(wc -l < "$PEER_FILE" 2>/dev/null || echo 0)" -gt 0 ]; then
+                RETRY_DELAY=5
+            fi
+            log "WARNING: socat exited — retrying in ${RETRY_DELAY}s..."
+            sleep "$RETRY_DELAY"
+            # Cap backoff at 30s
+            RETRY_DELAY=$((RETRY_DELAY < 30 ? RETRY_DELAY * 2 : 30))
+        done
         ;;
 
     stop)
         if [ -f "$PID_FILE" ]; then
             PID=$(cat "$PID_FILE")
-            if kill -0 "$PID" 2>/dev/null; then
-                kill "$PID" 2>/dev/null || true
-                log "Stopped (PID $PID)"
+            # Validate PID is numeric and belongs to a discovery process
+            if [[ "$PID" =~ ^[0-9]+$ ]] && kill -0 "$PID" 2>/dev/null; then
+                PROC_CMD=$(cat "/proc/$PID/cmdline" 2>/dev/null | tr '\0' ' ' || true)
+                if echo "$PROC_CMD" | grep -q "node-discovery"; then
+                    kill "$PID" 2>/dev/null || true
+                    log "Stopped (PID $PID)"
+                else
+                    log "PID $PID is not a discovery process — removing stale PID file"
+                fi
             else
                 log "Stale PID file (process $PID not running)"
             fi

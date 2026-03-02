@@ -48,6 +48,17 @@ if [ "${1:-}" = "--quick" ]; then
     QUICK_MODE=true
 fi
 
+# Cleanup trap — kill background processes and remove temp files on exit
+cleanup() {
+    local pids
+    pids=$(jobs -p 2>/dev/null) || true
+    if [ -n "$pids" ]; then
+        kill $pids 2>/dev/null || true
+    fi
+    rm -f /tmp/nightwatch-test-*.$$
+}
+trap cleanup EXIT
+
 # ---- Load config ----
 
 load_env "$ENV_FILE"
@@ -64,8 +75,8 @@ LOCAL_IP="${MESH_IP%/*}"
 # Node list: all possible mesh IPs (192.168.199.101-120, max 20 nodes)
 declare -a NODE_IPS=()
 declare -a NODE_NAMES=()
-for i in $(seq 1 20); do
-    NODE_IPS+=("192.168.199.$((100 + i))")
+for i in $(seq 1 "$MAX_NODES"); do
+    NODE_IPS+=("$(mesh_ip_for_node "$i")")
     NODE_NAMES+=("node${i}")
 done
 
@@ -74,7 +85,7 @@ echo "  Nightwatch Mesh Integration Test"
 echo "======================================"
 echo ""
 echo "  This node:  $LOCAL_IP (node #${PI_NUMBER:-?})"
-echo "  Scanning:   192.168.199.101-120 (max 20 nodes)"
+echo "  Scanning:   192.168.199.101-$((100 + MAX_NODES)) (max $MAX_NODES nodes)"
 echo "  Mode:       $([ "$QUICK_MODE" = true ] && echo 'quick' || echo 'full')"
 echo ""
 
@@ -188,22 +199,36 @@ declare -a LIVE_IPS=()
 declare -a LIVE_NAMES=()
 
 echo "  Scanning 192.168.199.101-120..."
-for idx in "${!NODE_IPS[@]}"; do
-    ip="${NODE_IPS[$idx]}"
-    name="${NODE_NAMES[$idx]}"
-
-    # Skip self
-    if [ "$ip" = "$LOCAL_IP" ]; then
-        continue
-    fi
-
-    if ping -c 1 -W 1 "$ip" >/dev/null 2>&1; then
-        rtt=$(ping -c 1 -W 1 "$ip" 2>/dev/null | grep 'time=' | sed 's/.*time=//' || echo "?")
+if command -v fping >/dev/null 2>&1; then
+    # Fast parallel scan with fping
+    ALL_IPS=$(for i in $(seq 1 "$MAX_NODES"); do mesh_ip_for_node "$i"; done)
+    # Use fping -e for RTT in a single pass (no need for separate ping)
+    FPING_OUT=$(echo "$ALL_IPS" | fping -a -e -r 1 -t 500 2>/dev/null || true)
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        ip=$(echo "$line" | awk '{print $1}')
+        rtt=$(echo "$line" | grep -oP '\(.*\)' || echo "(?)")
+        [ "$ip" = "$LOCAL_IP" ] && continue
+        i=$((${ip##*.} - 100))
+        name="node${i}"
         echo -e "  ${GREEN}[ONLINE]${NC}  $ip ($name) — ${rtt}"
         LIVE_IPS+=("$ip")
         LIVE_NAMES+=("$name")
-    fi
-done
+    done <<< "$FPING_OUT"
+else
+    # Fallback: sequential ping
+    for idx in "${!NODE_IPS[@]}"; do
+        ip="${NODE_IPS[$idx]}"
+        name="${NODE_NAMES[$idx]}"
+        [ "$ip" = "$LOCAL_IP" ] && continue
+        if ping -c 1 -W 1 "$ip" >/dev/null 2>&1; then
+            rtt=$(ping -c 1 -W 1 "$ip" 2>/dev/null | grep 'time=' | sed 's/.*time=//' || echo "?")
+            echo -e "  ${GREEN}[ONLINE]${NC}  $ip ($name) — ${rtt}"
+            LIVE_IPS+=("$ip")
+            LIVE_NAMES+=("$name")
+        fi
+    done
+fi
 
 live_count=${#LIVE_IPS[@]}
 echo ""
@@ -307,12 +332,13 @@ if [ "$QUICK_MODE" = false ] && [ ${#LIVE_IPS[@]} -gt 0 ]; then
         if [ ! -d "/sys/class/net/$BR_IFACE" ]; then
             ping_iface="$BAT_IFACE"
         fi
-        result=$(ping -c 5 -W 2 -I "$ping_iface" "$ip" 2>/dev/null | tail -1 || echo "")
+        ping_output=$(ping -c 5 -W 2 -I "$ping_iface" "$ip" 2>/dev/null || true)
+        result=$(echo "$ping_output" | tail -1)
         if echo "$result" | grep -q "/"; then
             min=$(echo "$result" | awk -F'/' '{print $4}')
             avg=$(echo "$result" | awk -F'/' '{print $5}')
             max=$(echo "$result" | awk -F'/' '{print $6}')
-            loss=$(ping -c 5 -W 2 -I "$ping_iface" "$ip" 2>/dev/null | grep "packet loss" | awk -F',' '{print $3}' | tr -d ' ')
+            loss=$(echo "$ping_output" | grep "packet loss" | awk -F',' '{print $3}' | tr -d ' ')
             echo -e "    → $ip ($name): min=${min}ms avg=${avg}ms max=${max}ms $loss"
             # Flag high latency
             avg_int=${avg%.*}

@@ -66,7 +66,7 @@ cd "$NIGHTWATCH_DIR"
 
 echo "[0/7] Updating project to latest version..."
 if [ -d "$NIGHTWATCH_DIR/.git" ]; then
-    git -C "$NIGHTWATCH_DIR" pull --ff-only 2>/dev/null && echo "[+] Updated from git" || echo "[+] Git pull skipped (no internet or not a repo)"
+    timeout 30 git -C "$NIGHTWATCH_DIR" pull --ff-only 2>/dev/null && echo "[+] Updated from git" || echo "[+] Git pull skipped (no internet or not a repo)"
 else
     echo "[+] Not a git repo — using existing files"
 fi
@@ -154,36 +154,7 @@ echo "  Cleaned logs"
 echo ""
 echo "[6/7] Installing nodeconfig service (auto-configures on boot)..."
 
-# Ensure scripts are executable
-chmod +x "$NIGHTWATCH_DIR/scripts/nodeconfig.sh"
-chmod +x "$NIGHTWATCH_DIR/scripts/mesh-fix.sh"
-chmod +x "$NIGHTWATCH_DIR/scripts/setup-distributed-irc.sh"
-chmod +x "$NIGHTWATCH_DIR/scripts/node-discovery.sh"
-
-# Install the nodeconfig service
-cp "$NIGHTWATCH_DIR/scripts/nightwatch-nodeconfig.service" \
-    /etc/systemd/system/nightwatch-nodeconfig.service
-systemctl daemon-reload
-systemctl enable nightwatch-nodeconfig.service
-echo "[+] Nodeconfig service enabled"
-
-# Make sure mesh service is enabled
-cp "$NIGHTWATCH_DIR/scripts/nightwatch-mesh.service" \
-    /etc/systemd/system/nightwatch-mesh.service
-systemctl enable nightwatch-mesh.service
-echo "[+] Mesh service enabled"
-
-# Install discovery service
-cp "$NIGHTWATCH_DIR/scripts/nightwatch-discovery.service" \
-    /etc/systemd/system/nightwatch-discovery.service
-systemctl enable nightwatch-discovery.service
-echo "[+] Discovery service enabled"
-
-# Install Docker autostart service
-cp "$NIGHTWATCH_DIR/scripts/nightwatch-docker.service" \
-    /etc/systemd/system/nightwatch-docker.service
-systemctl enable nightwatch-docker.service
-echo "[+] Docker autostart service enabled"
+install_systemd_services "$NIGHTWATCH_DIR"
 
 # ---- Step 7: Clean up system ----
 
