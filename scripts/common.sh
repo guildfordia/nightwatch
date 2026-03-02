@@ -159,12 +159,19 @@ set_env_value() {
     local value="$3"
     local tmp="${file}.tmp.$$"
 
-    # Quote values that contain shell-sensitive characters ($, `, ", \, !)
-    # so that `source .env` doesn't expand them.
-    # Uses single quotes with ' escaped as '"'"' (end quote, double-quoted quote, resume quote)
+    # Strip surrounding quotes if the value is already quoted
+    # (e.g. .secrets files may have KEY='value' to protect $)
+    if [[ "$value" =~ ^\'(.*)\'$ ]]; then
+        value="${BASH_REMATCH[1]}"
+    elif [[ "$value" =~ ^\"(.*)\"$ ]]; then
+        value="${BASH_REMATCH[1]}"
+    fi
+
+    # Wrap in single quotes if value contains shell-sensitive characters
+    # Simple single quotes work for both bash `source` and Docker Compose .env
     local quoted_value="$value"
-    if [[ "$value" == *'$'* ]] || [[ "$value" == *'`'* ]] || [[ "$value" == *'\'* ]] || [[ "$value" == *'"'* ]] || [[ "$value" == *'!'* ]]; then
-        quoted_value="'${value//\'/\'"\'"\'}'"
+    if [[ "$value" == *'$'* ]] || [[ "$value" == *'`'* ]] || [[ "$value" == *'\'* ]] || [[ "$value" == *'"'* ]] || [[ "$value" == *'!'* ]] || [[ "$value" == *"'"* ]]; then
+        quoted_value="'$value'"
     fi
 
     if grep -q "^${key}=" "$file" 2>/dev/null; then
