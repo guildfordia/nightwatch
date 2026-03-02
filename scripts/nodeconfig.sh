@@ -264,8 +264,7 @@ fi
 # ---- Check if .env already exists and is valid ----
 
 if [ -f "$ENV_FILE" ]; then
-    # shellcheck source=/dev/null
-    source "$ENV_FILE"
+    load_env "$ENV_FILE"
     EXISTING_NUM="${PI_NUMBER:-}"
     if [ "$EXISTING_NUM" = "$NODE_NUM" ]; then
         log ".env already configured for node $NODE_NUM — skipping generation"
@@ -328,8 +327,7 @@ log "Config: PI_NUMBER=$NODE_NUM MESH_IP=$MESH_IP GATEWAY=$IS_GATEWAY"
 
 # ---- Tailscale setup (if auth key present and not yet connected) ----
 
-# shellcheck source=/dev/null
-source "$ENV_FILE"
+load_env "$ENV_FILE"
 if [ -n "${TAILSCALE_AUTH_KEY:-}" ] && command -v tailscale >/dev/null 2>&1; then
     if [[ ! "$TAILSCALE_AUTH_KEY" =~ ^tskey- ]]; then
         log "Warning: TAILSCALE_AUTH_KEY doesn't start with 'tskey-' — skipping Tailscale setup"
