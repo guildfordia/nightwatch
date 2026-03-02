@@ -121,7 +121,11 @@ SECRETS_FILE="$NIGHTWATCH_DIR/.secrets"
 if [ -f "$NIGHTWATCH_DIR/.env" ]; then
     echo "# Nightwatch secrets — preserved from golden image" > "$SECRETS_FILE"
     echo "# These get injected into .env by nodeconfig.sh on boot" >> "$SECRETS_FILE"
-    grep -E '^(ROUTER_PASSWORD|IRC_LINK_PASSWORD|TAILSCALE_AUTH_KEY)=' "$NIGHTWATCH_DIR/.env" >> "$SECRETS_FILE" 2>/dev/null || true
+    # Strip surrounding quotes from values so nodeconfig's set_env_value
+    # doesn't double-quote them (e.g. KEY='$val' → KEY=$val in .secrets)
+    grep -E '^(ROUTER_PASSWORD|IRC_LINK_PASSWORD|TAILSCALE_AUTH_KEY)=' "$NIGHTWATCH_DIR/.env" \
+        | sed "s/='\(.*\)'$/=\1/; s/=\"\(.*\)\"$/=\1/" \
+        >> "$SECRETS_FILE" 2>/dev/null || true
     chmod 600 "$SECRETS_FILE"
     echo "  Saved secrets to .secrets"
 fi
