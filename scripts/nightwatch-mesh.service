@@ -1,7 +1,8 @@
 [Unit]
 Description=Nightwatch Mesh Network (802.11s + batman-adv + AP)
-After=network.target
+After=network.target sys-subsystem-net-devices-wlan1.device
 Wants=network.target
+Requires=sys-subsystem-net-devices-wlan1.device
 
 [Service]
 Type=oneshot

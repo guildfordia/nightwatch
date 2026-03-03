@@ -14,10 +14,15 @@
 # Usage:
 #   ./scripts/prepare-sdcard.sh <sdcard_path> [options]
 #
-# Examples:
+# Examples (Linux):
 #   ./scripts/prepare-sdcard.sh /dev/sdf
 #   ./scripts/prepare-sdcard.sh /dev/sdf --gateway
 #   ./scripts/prepare-sdcard.sh /run/media/$USER/rootfs
+#
+# Examples (macOS):
+#   ./scripts/prepare-sdcard.sh /dev/disk4
+#   ./scripts/prepare-sdcard.sh /dev/disk4 --gateway
+#   ./scripts/prepare-sdcard.sh /Volumes/rootfs
 #
 # What it does:
 #   1. Copies the entire project to /opt/nightwatch/ on the SD card
@@ -57,9 +62,14 @@ usage() {
     echo "  --gateway     Mark this node as the internet gateway"
     echo "  --yes         Skip confirmation prompts"
     echo ""
-    echo "Examples:"
+    echo "Examples (Linux):"
     echo "  $0 /dev/sdf"
     echo "  $0 /dev/sdf --gateway"
+    echo ""
+    echo "Examples (macOS):"
+    echo "  $0 /dev/disk4"
+    echo "  $0 /dev/disk4 --gateway"
+    echo "  $0 /Volumes/rootfs"
     echo ""
     echo "Node number is assigned dynamically on first boot by scanning the mesh."
     echo ""
@@ -92,38 +102,373 @@ if [ -z "$SD_ROOT" ]; then
     usage
 fi
 
-# If given a block device (e.g. /dev/sdf), find and mount the rootfs partition
+# Detect platform
+OS_TYPE="$(uname -s)"
+
+# Rsync exclusions shared by both direct-copy and tarball paths
+RSYNC_EXCLUDES=(
+    --exclude='.git'
+    --exclude='.env'
+    --exclude='.secrets'
+    --exclude='ngircd/ngircd.conf'
+    --exclude='dnsmasq/dnsmasq.conf'
+    --exclude='*.log'
+    --exclude='*.img'
+    --exclude='*.img.xz'
+    --exclude='*.img.gz'
+    --exclude='*.rpi-imager-manifest'
+    --exclude='pishrink.sh'
+    --exclude='.DS_Store'
+    --exclude='node_modules'
+    --exclude='.firstboot-done'
+    --exclude='.node-number'
+    --exclude='PiShrink'
+)
+
+# ---- macOS boot-partition staging ----
+# macOS cannot mount ext4 natively. Instead we stage files on the boot partition
+# (FAT32, natively writable) and the Pi unpacks them on first boot.
+
+prepare_via_boot_partition() {
+    local disk="$1"
+    local boot_part="${disk}s1"
+
+    if [ ! -b "$boot_part" ]; then
+        echo -e "${RED}Error: Boot partition $boot_part not found${NC}"
+        echo "List partitions with: diskutil list $disk"
+        exit 1
+    fi
+
+    # Find or mount boot partition
+    local boot_mount
+    boot_mount=$(diskutil info "$boot_part" 2>/dev/null | awk -F: '/Mount Point/{gsub(/^[ \t]+/,"",$2); print $2}')
+    if [ -z "$boot_mount" ]; then
+        echo "[+] Mounting boot partition..."
+        diskutil mount "$boot_part" >/dev/null 2>&1 || true
+        boot_mount=$(diskutil info "$boot_part" 2>/dev/null | awk -F: '/Mount Point/{gsub(/^[ \t]+/,"",$2); print $2}')
+    fi
+
+    if [ -z "$boot_mount" ] || [ ! -d "$boot_mount" ]; then
+        echo -e "${RED}Error: Could not mount boot partition $boot_part${NC}"
+        echo "Try mounting manually: diskutil mount $boot_part"
+        exit 1
+    fi
+
+    echo "[+] Boot partition: $boot_mount"
+
+    # Sanity check — boot partition should have config.txt or cmdline.txt
+    if [ ! -f "$boot_mount/cmdline.txt" ] && [ ! -f "$boot_mount/config.txt" ]; then
+        echo -e "${RED}Error: $boot_mount does not look like a Pi boot partition${NC}"
+        echo "Expected cmdline.txt or config.txt"
+        exit 1
+    fi
+
+    echo ""
+    echo -e "${BOLD}${CYAN}======================================"
+    echo "  Nightwatch SD Card Preparation"
+    echo -e "======================================${NC}"
+    echo ""
+    echo "  Mode:       macOS → boot partition staging"
+    echo "  Node:       (auto-assigned on first boot)"
+    echo "  Gateway:    $GATEWAY_MODE"
+    echo "  Tailscale:  $([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo 'yes (auth key set)' || echo 'no')"
+    echo "  Boot part:  $boot_mount"
+    echo ""
+
+    if [ "$AUTO_YES" != true ]; then
+        echo -e "${YELLOW}Files will be staged on the boot partition (FAT32).${NC}"
+        echo -e "${YELLOW}The Pi will unpack them to /opt/nightwatch/ on first boot.${NC}"
+        echo ""
+        read -rp "Continue? [y/N] " confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            echo "Aborted."
+            exit 0
+        fi
+    fi
+
+    echo ""
+
+    # Step 1: Create project tarball on boot partition
+    echo "[1/4] Creating project tarball on boot partition..."
+    local staging_dir
+    staging_dir=$(mktemp -d)
+    rsync -a "${RSYNC_EXCLUDES[@]}" "$PROJECT_DIR/" "$staging_dir/"
+
+    # Remove any stale .env or .secrets from staging
+    rm -f "$staging_dir/.env" "$staging_dir/.secrets"
+
+    tar czf "$boot_mount/nightwatch.tar.gz" -C "$staging_dir" .
+    rm -rf "$staging_dir"
+    echo "[+] nightwatch.tar.gz written to boot partition"
+
+    # Step 2: Write secrets
+    echo "[2/4] Writing secrets to boot partition..."
+    local secrets_file="$boot_mount/nightwatch-secrets"
+    printf '%s\n' '# Nightwatch secrets — baked by prepare-sdcard.sh' > "$secrets_file"
+    printf '%s\n' '# nightwatch-stage.sh copies these on first boot' >> "$secrets_file"
+    printf 'ROUTER_PASSWORD=%s\n' "$ROUTER_PASSWORD" >> "$secrets_file"
+    printf 'IRC_LINK_PASSWORD=%s\n' "$IRC_LINK_PASSWORD" >> "$secrets_file"
+    printf 'TAILSCALE_AUTH_KEY=%s\n' "${TAILSCALE_AUTH_KEY:-}" >> "$secrets_file"
+    if [ "$GATEWAY_MODE" = true ]; then
+        printf 'MESH_GATEWAY=true\n' >> "$secrets_file"
+    fi
+    echo "[+] Secrets staged"
+    echo "    ROUTER_PASSWORD=***"
+    echo "    IRC_LINK_PASSWORD=***"
+    echo "    TAILSCALE_AUTH_KEY=$([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo '***' || echo '(empty)')"
+
+    # Step 3: Write staging script (runs on the Pi to unpack from boot → rootfs)
+    echo "[3/4] Writing staging script..."
+    cat > "$boot_mount/nightwatch-stage.sh" << 'STAGEEOF'
+#!/bin/bash
+# Nightwatch — Unpack staged files from boot partition to rootfs
+# Written by prepare-sdcard.sh (macOS boot-partition staging mode)
+# This script runs ONCE on first boot, then cleans up after itself.
+# It may be called from firstrun.sh (traditional) or cloud-init runcmd.
+set -e
+
+# Detect boot partition mount (Bookworm: /boot/firmware, older: /boot)
+if [ -f /boot/firmware/nightwatch.tar.gz ]; then
+    BOOT=/boot/firmware
+elif [ -f /boot/nightwatch.tar.gz ]; then
+    BOOT=/boot
+else
+    echo "[-] nightwatch-stage: nightwatch.tar.gz not found on boot partition"
+    exit 1
+fi
+
+echo "[+] nightwatch-stage: unpacking from $BOOT to /opt/nightwatch/"
+
+# Extract project
+mkdir -p /opt/nightwatch
+tar xzf "$BOOT/nightwatch.tar.gz" -C /opt/nightwatch/
+
+# Copy secrets
+if [ -f "$BOOT/nightwatch-secrets" ]; then
+    mv "$BOOT/nightwatch-secrets" /opt/nightwatch/.secrets
+    chmod 600 /opt/nightwatch/.secrets
+fi
+
+# Write nightwatch.conf
+echo "NIGHTWATCH_DIR=/opt/nightwatch" > /etc/nightwatch.conf
+
+# Make scripts executable
+chmod +x /opt/nightwatch/scripts/*.sh 2>/dev/null || true
+
+# Install and enable firstboot service
+cp /opt/nightwatch/scripts/nightwatch-firstboot.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable nightwatch-firstboot.service
+
+# Clean up staged files from boot partition
+rm -f "$BOOT/nightwatch.tar.gz" "$BOOT/nightwatch-secrets" "$BOOT/nightwatch-stage.sh"
+
+# If running from cloud-init runcmd (not firstrun.sh), firstrun.sh won't reboot
+# for us. Schedule a reboot so the firstboot service starts.
+if [ ! -f "$BOOT/firstrun.sh" ]; then
+    echo "[+] nightwatch-stage: scheduling reboot for firstboot service"
+    shutdown -r +1 "Nightwatch: rebooting to start firstboot setup" &
+fi
+
+echo "[+] nightwatch-stage: done — firstboot service will run after reboot"
+STAGEEOF
+    chmod +x "$boot_mount/nightwatch-stage.sh"
+
+    # Step 4: Configure first-boot trigger
+    # Newer Pi Imager uses cloud-init (user-data) instead of firstrun.sh.
+    # Detect which mechanism is in use and inject accordingly.
+    echo "[4/4] Configuring first-boot trigger..."
+    local firstrun="$boot_mount/firstrun.sh"
+    local userdata="$boot_mount/user-data"
+    local cmdline="$boot_mount/cmdline.txt"
+    local stage_cmd="/boot/firmware/nightwatch-stage.sh || true"
+
+    if [ -f "$userdata" ] && grep -q '#cloud-config' "$userdata"; then
+        # ---- Cloud-init image (newer Pi Imager) ----
+        echo "[+] Cloud-init image detected (user-data present)"
+
+        # Inject staging into cloud-init runcmd
+        if grep -q 'nightwatch-stage' "$userdata"; then
+            echo "[+] Staging command already in user-data"
+        else
+            if grep -q '^runcmd:' "$userdata"; then
+                # Insert our command after the existing runcmd: line
+                local tmp_ud
+                tmp_ud=$(mktemp)
+                local inserted=false
+                while IFS= read -r line; do
+                    echo "$line" >> "$tmp_ud"
+                    if [ "$inserted" = false ] && echo "$line" | grep -q '^runcmd:'; then
+                        echo "  - [/boot/firmware/nightwatch-stage.sh]" >> "$tmp_ud"
+                        inserted=true
+                    fi
+                done < "$userdata"
+                cp "$tmp_ud" "$userdata"
+                rm -f "$tmp_ud"
+            else
+                printf '\nruncmd:\n  - [/boot/firmware/nightwatch-stage.sh]\n' >> "$userdata"
+            fi
+            echo "[+] Staging command added to cloud-init user-data"
+        fi
+
+        # Fix broken cmdline.txt → firstrun.sh reference (Pi Imager bug on cloud-init images).
+        # Pi Imager sets systemd.run=/boot/firmware/firstrun.sh but doesn't create the file,
+        # which causes the boot to HANG. Remove the directives — cloud-init handles first boot.
+        if [ -f "$cmdline" ] && grep -q 'systemd.run=' "$cmdline"; then
+            local clean_cmdline
+            clean_cmdline=$(cat "$cmdline" | sed 's| systemd\.run=[^ ]*||g' | sed 's| systemd\.run_success_action=[^ ]*||g' | sed 's| systemd\.unit=kernel-command-line\.target||g')
+            echo "$clean_cmdline" > "$cmdline"
+            rm -f "$firstrun" 2>/dev/null
+            echo "[+] Removed broken firstrun.sh references from cmdline.txt"
+        fi
+
+    elif [ -f "$firstrun" ]; then
+        # ---- Traditional firstrun.sh (older Pi Imager) ----
+        if grep -q 'nightwatch-stage' "$firstrun"; then
+            echo "[+] Staging call already present in firstrun.sh"
+        elif grep -q 'shutdown\|reboot' "$firstrun"; then
+            # Insert before the first shutdown/reboot line
+            local tmp_firstrun
+            tmp_firstrun=$(mktemp)
+            local inserted=false
+            while IFS= read -r line; do
+                if [ "$inserted" = false ] && echo "$line" | grep -q 'shutdown\|reboot'; then
+                    echo "" >> "$tmp_firstrun"
+                    echo "# Nightwatch: unpack project from boot partition" >> "$tmp_firstrun"
+                    echo "$stage_cmd" >> "$tmp_firstrun"
+                    echo "" >> "$tmp_firstrun"
+                    inserted=true
+                fi
+                echo "$line" >> "$tmp_firstrun"
+            done < "$firstrun"
+            cp "$tmp_firstrun" "$firstrun"
+            rm -f "$tmp_firstrun"
+            echo "[+] Staging call injected into existing firstrun.sh"
+        else
+            # No shutdown line found — append
+            echo "" >> "$firstrun"
+            echo "# Nightwatch: unpack project from boot partition" >> "$firstrun"
+            echo "$stage_cmd" >> "$firstrun"
+            echo "[+] Staging call appended to firstrun.sh"
+        fi
+
+    else
+        # ---- No firstrun.sh and no cloud-init — create firstrun.sh ----
+        cat > "$firstrun" << FIRSTEOF
+#!/bin/bash
+set +e
+
+# Nightwatch: unpack project from boot partition
+$stage_cmd
+
+rm -f /boot/firmware/firstrun.sh
+shutdown -r now
+exit 0
+FIRSTEOF
+        chmod +x "$firstrun"
+
+        # Ensure cmdline.txt triggers firstrun.sh on boot
+        if [ -f "$cmdline" ] && ! grep -q 'systemd.run=' "$cmdline"; then
+            local existing
+            existing=$(tr -d '\n' < "$cmdline")
+            printf '%s systemd.run=/boot/firmware/firstrun.sh systemd.run_success_action=reboot systemd.unit=kernel-command-line.target\n' \
+                "$existing" > "$cmdline"
+            echo "[+] cmdline.txt updated to trigger firstrun.sh"
+        fi
+
+        echo "[+] firstrun.sh created"
+    fi
+
+    # Verify
+    echo ""
+    echo "[+] Verifying boot partition files..."
+    local errors=0
+    for f in nightwatch.tar.gz nightwatch-secrets nightwatch-stage.sh; do
+        if [ ! -f "$boot_mount/$f" ]; then
+            echo -e "  ${RED}[MISS] $f${NC}"
+            ((errors++)) || true
+        fi
+    done
+    if [ "$errors" -gt 0 ]; then
+        echo -e "${RED}Warning: $errors missing files${NC}"
+    else
+        echo -e "  ${GREEN}All staging files present${NC}"
+    fi
+
+    # Done
+    echo ""
+    echo -e "${GREEN}${BOLD}======================================"
+    echo "  SD Card Ready! (boot-partition staging)"
+    echo "======================================${NC}"
+    echo ""
+    echo "  Node:       (auto-assigned on first boot)"
+    echo "  Gateway:    $GATEWAY_MODE"
+    echo "  Tailscale:  $([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo 'yes' || echo 'no')"
+    echo ""
+    echo -e "  ${BOLD}How it works on macOS:${NC}"
+    echo "  Files are staged on the boot partition (FAT32)."
+    echo "  On first boot, the Pi unpacks them to /opt/nightwatch/"
+    echo "  and enables the firstboot service (runs on the next reboot)."
+    echo ""
+    echo -e "  ${BOLD}Next steps:${NC}"
+    echo "  1. Eject: diskutil eject $disk"
+    echo "  2. Insert into the Raspberry Pi"
+    echo "  3. Power on — first boot takes ~10-15 min (needs internet)"
+    echo ""
+    echo -e "  ${BOLD}Monitor progress (after Pi boots):${NC}"
+    echo "     ssh into the Pi, then:"
+    echo "     journalctl -f -u nightwatch-firstboot"
+    echo "     tail -f /var/log/nightwatch-firstboot.log"
+    echo ""
+    echo "  After first boot completes, the Pi will:"
+    echo "  - Start the mesh network automatically on every boot"
+    echo "  - Start Docker services (IRC, bridge, web UI)"
+    echo "  - Broadcast WiFi hotspot '${WIFI_SSID:-Nightwatch}'"
+    if [ -n "${TAILSCALE_AUTH_KEY:-}" ]; then
+    echo "  - Be accessible remotely via Tailscale"
+    fi
+    echo ""
+}
+
+# If given a block device (e.g. /dev/sdf on Linux, /dev/disk4 on macOS), find and mount the rootfs partition
 AUTO_MOUNTED=false
+BOOT_STAGING=false
 if [ -b "$SD_ROOT" ]; then
     DISK="$SD_ROOT"
     echo "[+] Block device detected: $DISK"
 
-    # Find the rootfs partition (largest Linux partition, typically partition 2)
-    ROOTFS_PART=""
-    for part in "${DISK}"2 "${DISK}p2"; do
-        if [ -b "$part" ]; then
-            ROOTFS_PART="$part"
-            break
-        fi
-    done
-
-    if [ -z "$ROOTFS_PART" ]; then
-        echo -e "${RED}Error: Could not find rootfs partition on $DISK${NC}"
-        echo "Expected ${DISK}2 or ${DISK}p2"
-        exit 1
-    fi
-
-    # Check if already mounted
-    EXISTING_MOUNT=$(lsblk -o MOUNTPOINT -nr "$ROOTFS_PART" 2>/dev/null | head -1)
-    if [ -n "$EXISTING_MOUNT" ]; then
-        SD_ROOT="$EXISTING_MOUNT"
-        echo "[+] Already mounted at $SD_ROOT"
+    if [ "$OS_TYPE" = "Darwin" ]; then
+        # macOS: stage on boot partition (FAT32) — ext4 rootfs is not writable
+        BOOT_STAGING=true
     else
-        SD_ROOT="/mnt/nightwatch-sdcard"
-        sudo mkdir -p "$SD_ROOT"
-        echo "[+] Mounting $ROOTFS_PART → $SD_ROOT"
-        sudo mount "$ROOTFS_PART" "$SD_ROOT"
-        AUTO_MOUNTED=true
+        # ---- Linux block device handling ----
+        # Find the rootfs partition (largest Linux partition, typically partition 2)
+        ROOTFS_PART=""
+        for part in "${DISK}"2 "${DISK}p2"; do
+            if [ -b "$part" ]; then
+                ROOTFS_PART="$part"
+                break
+            fi
+        done
+
+        if [ -z "$ROOTFS_PART" ]; then
+            echo -e "${RED}Error: Could not find rootfs partition on $DISK${NC}"
+            echo "Expected ${DISK}2 or ${DISK}p2"
+            exit 1
+        fi
+
+        # Check if already mounted
+        EXISTING_MOUNT=$(lsblk -o MOUNTPOINT -nr "$ROOTFS_PART" 2>/dev/null | head -1)
+        if [ -n "$EXISTING_MOUNT" ]; then
+            SD_ROOT="$EXISTING_MOUNT"
+            echo "[+] Already mounted at $SD_ROOT"
+        else
+            SD_ROOT="/mnt/nightwatch-sdcard"
+            sudo mkdir -p "$SD_ROOT"
+            echo "[+] Mounting $ROOTFS_PART → $SD_ROOT"
+            sudo mount "$ROOTFS_PART" "$SD_ROOT"
+            AUTO_MOUNTED=true
+        fi
     fi
 fi
 
@@ -136,16 +481,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Validate SD card root
-if [ ! -d "$SD_ROOT/etc" ] || [ ! -d "$SD_ROOT/opt" ]; then
-    echo -e "${RED}Error: $SD_ROOT does not look like a Linux rootfs${NC}"
-    echo "Expected to find $SD_ROOT/etc and $SD_ROOT/opt"
-    exit 1
-fi
+# Validate SD card root (skip for macOS boot-partition staging)
+if [ "$BOOT_STAGING" = false ]; then
+    if [ ! -d "$SD_ROOT/etc" ] || [ ! -d "$SD_ROOT/opt" ]; then
+        echo -e "${RED}Error: $SD_ROOT does not look like a Linux rootfs${NC}"
+        echo "Expected to find $SD_ROOT/etc and $SD_ROOT/opt"
+        exit 1
+    fi
 
-if [ ! -d "$SD_ROOT/etc/systemd/system" ]; then
-    echo -e "${RED}Error: $SD_ROOT does not have systemd (not a Pi OS image?)${NC}"
-    exit 1
+    if [ ! -d "$SD_ROOT/etc/systemd/system" ]; then
+        echo -e "${RED}Error: $SD_ROOT does not have systemd (not a Pi OS image?)${NC}"
+        exit 1
+    fi
 fi
 
 # ---- Load base config ----
@@ -186,6 +533,12 @@ if [ -z "${TAILSCALE_AUTH_KEY:-}" ]; then
     read -rp "  Tailscale auth key (or press Enter to skip): " TAILSCALE_AUTH_KEY
 fi
 
+# ---- macOS boot-partition staging: branch here ----
+if [ "$BOOT_STAGING" = true ]; then
+    prepare_via_boot_partition "$DISK"
+    exit 0
+fi
+
 echo ""
 echo -e "${BOLD}${CYAN}======================================"
 echo "  Nightwatch SD Card Preparation"
@@ -216,24 +569,7 @@ DEST="$SD_ROOT/opt/nightwatch"
 sudo mkdir -p "$DEST"
 
 # Copy everything except .git, .env, and generated files
-sudo rsync -a --delete \
-    --exclude='.git' \
-    --exclude='.env' \
-    --exclude='.secrets' \
-    --exclude='ngircd/ngircd.conf' \
-    --exclude='dnsmasq/dnsmasq.conf' \
-    --exclude='*.log' \
-    --exclude='*.img' \
-    --exclude='*.img.xz' \
-    --exclude='*.img.gz' \
-    --exclude='*.rpi-imager-manifest' \
-    --exclude='pishrink.sh' \
-    --exclude='.DS_Store' \
-    --exclude='node_modules' \
-    --exclude='irc-bridge-go/irc-bridge' \
-    --exclude='.firstboot-done' \
-    --exclude='.node-number' \
-    "$PROJECT_DIR/" "$DEST/"
+sudo rsync -a --delete "${RSYNC_EXCLUDES[@]}" "$PROJECT_DIR/" "$DEST/"
 
 echo "[+] Project copied to $DEST"
 

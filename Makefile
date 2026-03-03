@@ -15,7 +15,7 @@ ENV_FILE   := .env
 # Auto-detect docker compose v2 vs v1
 DC := $(shell if docker compose version >/dev/null 2>&1; then echo "docker compose"; elif command -v docker-compose >/dev/null 2>&1; then echo "docker-compose"; else echo "docker compose"; fi)
 
-.PHONY: install run stop test update status logs help clean monitor blink image sdcard info router
+.PHONY: install run stop test update status logs help clean monitor blink image sdcard info router build-bridge
 
 .DEFAULT_GOAL := help
 
@@ -39,6 +39,7 @@ help:
 	@echo "  make router    Configure GL.iNet router (can run separately)"
 	@echo "  make image     Prepare this Pi for SD card cloning (golden image)"
 	@echo "  make sdcard    Prepare a flashed SD card: make sdcard SD=/path/to/rootfs"
+	@echo "  make build-bridge  Cross-compile irc-bridge for ARM64 (run on laptop)"
 	@echo "  make info      Show detailed node info (network, DNS, system)"
 	@echo ""
 	@echo "First time on a new Pi:"
@@ -239,6 +240,21 @@ router:
 	@echo "====================================="
 	@sudo scripts/setup-router.sh
 
+# -------- build-bridge --------
+# Cross-compile the IRC bridge Go binary for linux/arm64 (run on your laptop)
+# This avoids compiling Go on the Pi Zero 2 W (which has 512MB RAM and takes forever)
+build-bridge:
+	@echo "====================================="
+	@echo "  Cross-compiling irc-bridge (linux/arm64)"
+	@echo "====================================="
+	@if ! command -v go >/dev/null 2>&1; then \
+		echo "Error: Go is not installed. Install with: brew install go"; \
+		exit 1; \
+	fi
+	cd irc-bridge-go && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o irc-bridge .
+	@echo "[+] Built irc-bridge-go/irc-bridge ($$(ls -lh irc-bridge-go/irc-bridge | awk '{print $$5}'))"
+	@echo "[+] The Dockerfile will use this binary instead of compiling on the Pi"
+
 # -------- sdcard --------
 # Prepare a flashed SD card (run on your laptop)
 # Usage: make sdcard SD=/path/to/rootfs
@@ -253,6 +269,13 @@ sdcard:
 		echo ""; \
 		echo "Use 'lsblk' to find your SD card device."; \
 		exit 1; \
+	fi
+	@if command -v go >/dev/null 2>&1; then \
+		echo "[+] Cross-compiling irc-bridge for ARM64..."; \
+		cd irc-bridge-go && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o irc-bridge . && \
+		echo "[+] irc-bridge built ($$(ls -lh irc-bridge | awk '{print $$5}'))"; \
+	else \
+		echo "[!] Go not installed — skipping cross-compile (Pi will build from source)"; \
 	fi
 	@scripts/prepare-sdcard.sh $(SD) $(if $(filter true,$(GATEWAY)),--gateway,)
 

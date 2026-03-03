@@ -10,7 +10,7 @@ ExecStart=/opt/nightwatch/scripts/firstboot.sh
 RemainAfterExit=no
 StandardOutput=journal+console
 StandardError=journal+console
-TimeoutStartSec=600
+TimeoutStartSec=1800
 
 [Install]
 WantedBy=multi-user.target

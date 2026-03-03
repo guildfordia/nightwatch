@@ -253,6 +253,21 @@ case "$1" in
         echo "====================================="
         echo ""
 
+        # Wait for mesh interface to be available (USB dongle may take time)
+        echo "[+] Waiting for $MESH_IFACE..."
+        for _wait in $(seq 1 30); do
+            if ip link show "$MESH_IFACE" >/dev/null 2>&1; then
+                echo "[+] $MESH_IFACE is available"
+                break
+            fi
+            if [ "$_wait" -eq 30 ]; then
+                echo "[-] Error: $MESH_IFACE not found after 30s"
+                echo "[-] Check that USB WiFi dongle is connected"
+                exit 1
+            fi
+            sleep 1
+        done
+
         check_deps iw batctl ip || exit 1
 
         # Clean up WPA config files on unexpected exit (contain SAE password)

@@ -75,11 +75,11 @@ Nodes auto-configure on first boot — no manual setup needed:
 ## Hardware Requirements
 
 ### Per Node
-- **Raspberry Pi 4** (recommended) or Pi 3B+
+- **Raspberry Pi 4/5** (recommended), Pi 3B+, or **Pi Zero 2 W**
 - **USB WiFi dongle** with 802.11s mesh support (AR9271, MT7612U, or RT5370 chipset)
 - **GL.iNet GL-MT300N-V2** travel router (or similar, connected via ethernet)
 - **MicroSD card** (32GB+ Class 10)
-- **Power supply**
+- **Power supply** (5V/3A for Pi 4/5, 5V/1.2A minimum for Zero 2 W)
 
 ### Recommended Dongles
 | Dongle | Chipset | Driver | Price | Notes |
@@ -95,6 +95,18 @@ Verify mesh support: `iw phy phy1 info | grep "mesh point"` (check phy for wlan1
 
 ## Deployment
 
+### Prerequisites (laptop)
+
+`make sdcard` works on both **Linux** and **macOS**. It auto-detects your platform.
+
+| Requirement | Linux | macOS |
+|-------------|-------|-------|
+| **Raspberry Pi Imager** | Yes | Yes |
+| **Go** (optional — cross-compiles irc-bridge) | `apt install golang` | `brew install go` |
+| **rsync** | Pre-installed | Pre-installed |
+
+> **macOS note:** The Pi rootfs uses ext4, which macOS can't mount. `make sdcard` automatically stages files on the boot partition (FAT32) instead — the Pi unpacks them on first boot. No FUSE or extra tools needed.
+
 ### Option A: Golden Image (recommended for multiple Pis)
 
 Set up one Pi fully, then clone it to all others. Clones auto-configure on boot.
@@ -104,7 +116,12 @@ Set up one Pi fully, then clone it to all others. Clones auto-configure on boot.
 ```bash
 # 1. Flash Raspberry Pi OS Lite with Pi Imager (set hostname, SSH, WiFi)
 # 2. Keep SD card mounted and prepare it:
+
+# Linux:
 make sdcard SD=/dev/sdX
+
+# macOS:
+make sdcard SD=/dev/diskN
 
 # 3. Insert SD card in Pi, boot, wait ~10-15 min for firstboot to complete
 # 4. SSH in and verify:
@@ -120,14 +137,22 @@ sudo shutdown -h now
 
 ```bash
 # 1. Pull SD card from Pi, insert in laptop
+
+# Linux:
 lsblk                            # Find the SD card (e.g. /dev/sdf)
 sudo dd if=/dev/sdf of=nightwatch.img bs=4M status=progress
 
+# macOS:
+diskutil list                    # Find the SD card (e.g. /dev/disk4)
+sudo dd if=/dev/rdisk4 of=nightwatch.img bs=4m status=progress
+
 # 2. Shrink (download PiShrink: https://github.com/Drewsif/PiShrink)
+#    Note: PiShrink requires Linux — use a VM or Docker on macOS
 sudo bash pishrink.sh nightwatch.img
 
 # 3. Compress
-sudo xz -9 -T0 nightwatch.img
+sudo xz -9 -T0 nightwatch.img   # Linux
+xz -9 -T0 nightwatch.img        # macOS (no sudo needed)
 
 # 4. Flash to other SD cards with Raspberry Pi Imager:
 #    → Choose OS → Use custom → select nightwatch.img.xz
@@ -205,7 +230,8 @@ make logs        # Follow Docker logs
 make clean       # Remove containers and volumes
 make monitor     # Live dashboard (refreshes every 5s)
 make blink       # Blink onboard LED to identify this Pi
-make sdcard      # Prepare SD card for a new node (run on laptop)
+make sdcard      # Prepare SD card for a new node (run on laptop, Linux/macOS)
+make build-bridge # Cross-compile irc-bridge for ARM64 (run on laptop, auto in sdcard)
 make image       # Prepare this Pi for golden image capture
 make router      # Configure GL.iNet router (retry if skipped during install)
 make info        # Print detailed node information

@@ -48,6 +48,15 @@ MANIFEST_PATH="$IMAGE_DIR/$MANIFEST_NAME"
 
 echo "[+] Computing image checksums and sizes..."
 
+# Portable sha256: works on both Linux (sha256sum) and macOS (shasum -a 256)
+portable_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$@" | awk '{print $1}'
+    else
+        shasum -a 256 "$@" | awk '{print $1}'
+    fi
+}
+
 # Get compressed file size
 DOWNLOAD_SIZE=$(stat -c%s "$IMAGE_FULLPATH" 2>/dev/null || stat -f%z "$IMAGE_FULLPATH" 2>/dev/null)
 
@@ -55,15 +64,15 @@ DOWNLOAD_SIZE=$(stat -c%s "$IMAGE_FULLPATH" 2>/dev/null || stat -f%z "$IMAGE_FUL
 case "$IMAGE_NAME" in
     *.img.xz)
         EXTRACT_SIZE=$(xz --robot --list "$IMAGE_FULLPATH" 2>/dev/null | grep totals | awk '{print $5}')
-        EXTRACT_SHA256=$(xz -dc "$IMAGE_FULLPATH" | sha256sum | awk '{print $1}')
+        EXTRACT_SHA256=$(xz -dc "$IMAGE_FULLPATH" | portable_sha256 /dev/stdin)
         ;;
     *.img.gz)
-        EXTRACT_SHA256=$(gzip -dc "$IMAGE_FULLPATH" | sha256sum | awk '{print $1}')
+        EXTRACT_SHA256=$(gzip -dc "$IMAGE_FULLPATH" | portable_sha256 /dev/stdin)
         EXTRACT_SIZE=$(gzip -dc "$IMAGE_FULLPATH" | wc -c)
         ;;
     *.img)
         EXTRACT_SIZE=$DOWNLOAD_SIZE
-        EXTRACT_SHA256=$(sha256sum "$IMAGE_FULLPATH" | awk '{print $1}')
+        EXTRACT_SHA256=$(portable_sha256 "$IMAGE_FULLPATH")
         ;;
     *)
         echo -e "${RED}Error: Unsupported format. Use .img, .img.xz, or .img.gz${NC}"
