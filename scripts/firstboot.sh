@@ -91,6 +91,53 @@ echo "[+] Node: Pi #${PI_NUMBER:-?} — IP: ${MESH_IP:-?}"
 echo "[+] User: $REAL_USER"
 echo ""
 
+# ---- Step 0: Ensure WiFi is configured ----
+# Cloud-init on Raspberry Pi OS Bookworm may fail to create NetworkManager WiFi
+# connections from network-config (missing cc_netplan_nm_patch module).
+# Detect this and create the NM connection file as a fallback.
+NM_DIR="/etc/NetworkManager/system-connections"
+BOOT_DIR=""
+[ -d /boot/firmware ] && BOOT_DIR=/boot/firmware
+[ -z "$BOOT_DIR" ] && [ -d /boot ] && BOOT_DIR=/boot
+NETCFG="${BOOT_DIR}/network-config"
+
+if [ -d "$NM_DIR" ] && [ -f "$NETCFG" ] && grep -q 'wifis:' "$NETCFG"; then
+    if ! ls "$NM_DIR"/*.nmconnection 2>/dev/null | grep -q .; then
+        WIFI_SSID=$(grep -A5 'access-points:' "$NETCFG" | sed -n 's/^[[:space:]]*"\([^"]*\)":.*/\1/p' | head -1)
+        WIFI_PSK=$(grep -A10 'access-points:' "$NETCFG" | sed -n 's/^[[:space:]]*password:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' | head -1)
+        if [ -n "$WIFI_SSID" ] && [ -n "$WIFI_PSK" ]; then
+            WIFI_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "fb-wifi-$(date +%s)")
+            cat > "$NM_DIR/$WIFI_SSID.nmconnection" << WIFIEOF
+[connection]
+id=$WIFI_SSID
+uuid=$WIFI_UUID
+type=wifi
+autoconnect=true
+
+[wifi]
+mode=infrastructure
+ssid=$WIFI_SSID
+
+[wifi-security]
+key-mgmt=wpa-psk
+psk=$WIFI_PSK
+
+[ipv4]
+method=auto
+
+[ipv6]
+addr-gen-mode=default
+method=auto
+WIFIEOF
+            chmod 600 "$NM_DIR/$WIFI_SSID.nmconnection"
+            nmcli connection reload 2>/dev/null || true
+            nmcli connection up "$WIFI_SSID" 2>/dev/null || true
+            echo "[+] Created NM WiFi connection for '$WIFI_SSID' (cloud-init fallback)"
+            sleep 10
+        fi
+    fi
+fi
+
 # ---- Step 1: Wait for network ----
 
 echo "[1/12] Waiting for network..."

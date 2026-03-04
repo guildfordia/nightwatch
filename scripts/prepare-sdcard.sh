@@ -260,6 +260,54 @@ cp /opt/nightwatch/scripts/nightwatch-firstboot.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable nightwatch-firstboot.service
 
+# ---- WiFi fallback ----
+# Cloud-init on Raspberry Pi OS Bookworm cannot translate netplan v2 wifis:
+# sections into NetworkManager connections (cc_netplan_nm_patch module missing).
+# Parse network-config and create the NM connection file directly.
+NM_DIR="/etc/NetworkManager/system-connections"
+NETCFG="$BOOT/network-config"
+if [ -d "$NM_DIR" ] && [ -f "$NETCFG" ] && grep -q 'wifis:' "$NETCFG"; then
+    # Only create if NM has no WiFi connections yet
+    if ! ls "$NM_DIR"/*.nmconnection 2>/dev/null | grep -q .; then
+        # Extract SSID (first quoted key under access-points:)
+        WIFI_SSID=$(grep -A5 'access-points:' "$NETCFG" | sed -n 's/^[[:space:]]*"\([^"]*\)":.*/\1/p' | head -1)
+        # Extract password
+        WIFI_PSK=$(grep -A10 'access-points:' "$NETCFG" | sed -n 's/^[[:space:]]*password:[[:space:]]*"\?\([^"]*\)"\?[[:space:]]*$/\1/p' | head -1)
+
+        if [ -n "$WIFI_SSID" ] && [ -n "$WIFI_PSK" ]; then
+            WIFI_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "a1b2c3d4-wifi-0000-0000-$(date +%s)")
+            cat > "$NM_DIR/$WIFI_SSID.nmconnection" << NMEOF
+[connection]
+id=$WIFI_SSID
+uuid=$WIFI_UUID
+type=wifi
+autoconnect=true
+
+[wifi]
+mode=infrastructure
+ssid=$WIFI_SSID
+
+[wifi-security]
+key-mgmt=wpa-psk
+psk=$WIFI_PSK
+
+[ipv4]
+method=auto
+
+[ipv6]
+addr-gen-mode=default
+method=auto
+NMEOF
+            chmod 600 "$NM_DIR/$WIFI_SSID.nmconnection"
+            echo "[+] nightwatch-stage: created NM WiFi connection for '$WIFI_SSID'"
+            # Reload NM to pick up the new connection
+            nmcli connection reload 2>/dev/null || true
+        else
+            echo "[!] nightwatch-stage: could not parse WiFi SSID/password from network-config"
+        fi
+    fi
+fi
+
 # Clean up staged files from boot partition
 rm -f "$BOOT/nightwatch.tar.gz" "$BOOT/nightwatch-secrets" "$BOOT/nightwatch-stage.sh"
 
