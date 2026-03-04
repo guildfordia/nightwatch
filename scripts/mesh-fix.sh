@@ -121,7 +121,8 @@ WPAEOF
         echo "[+] Joining open mesh '$MESH_ID' on $FREQ MHz..."
         iw dev "$MESH_IFACE" mesh join "$MESH_ID" freq "$FREQ"
         # Disable HWMP forwarding — batman-adv handles routing
-        echo 0 > /sys/class/net/"$MESH_IFACE"/mesh/mesh_fwding 2>/dev/null || true
+        # (mesh_fwding sysfs may not exist immediately after join)
+        { echo 0 > /sys/class/net/"$MESH_IFACE"/mesh/mesh_fwding; } 2>/dev/null || true
     fi
 
     sleep 1
@@ -281,19 +282,26 @@ case "$1" in
         done
 
         # If still missing, try USB reset (ath9k_htc firmware may have crashed)
+        # Find the device by vendor:product ID since the net/ subdirectory
+        # disappears when the driver crashes
         if [ "$IFACE_FOUND" = false ]; then
             echo "[!] $MESH_IFACE not found after 30s — attempting USB reset..."
-            for dev in /sys/bus/usb/devices/*/net; do
-                [ -d "$dev" ] || continue
+            USB_RESET_DONE=false
+            for dev in /sys/bus/usb/devices/*/idVendor; do
                 USB_DEV=$(dirname "$dev")
-                if [ -f "$USB_DEV/authorized" ]; then
+                if [ "$(cat "$USB_DEV/idVendor" 2>/dev/null)" = "0cf3" ] && \
+                   [ "$(cat "$USB_DEV/idProduct" 2>/dev/null)" = "9271" ]; then
+                    echo "[+] Found AR9271 at $USB_DEV — resetting..."
                     echo 0 > "$USB_DEV/authorized" 2>/dev/null || true
                     sleep 2
                     echo 1 > "$USB_DEV/authorized" 2>/dev/null || true
-                    echo "[+] USB device reset, waiting for $MESH_IFACE..."
+                    USB_RESET_DONE=true
                     break
                 fi
             done
+            if [ "$USB_RESET_DONE" = false ]; then
+                echo "[-] AR9271 USB device not found in sysfs"
+            fi
             for _wait in $(seq 1 15); do
                 if ip link show "$MESH_IFACE" >/dev/null 2>&1; then
                     echo "[+] $MESH_IFACE recovered after USB reset"

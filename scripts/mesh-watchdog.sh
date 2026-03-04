@@ -33,11 +33,13 @@ fi
 # Check if wlan1 exists
 if [ ! -d "/sys/class/net/$MESH_IFACE" ]; then
     log "$MESH_IFACE missing — dongle may have disconnected, attempting USB reset"
-    # Try to find and reset the USB device
-    for dev in /sys/bus/usb/devices/*/net; do
-        [ -d "$dev" ] || continue
+    # Find the device by vendor:product ID since the net/ subdirectory
+    # disappears when the ath9k_htc driver crashes
+    for dev in /sys/bus/usb/devices/*/idVendor; do
         USB_DEV=$(dirname "$dev")
-        if [ -f "$USB_DEV/authorized" ]; then
+        if [ "$(cat "$USB_DEV/idVendor" 2>/dev/null)" = "0cf3" ] && \
+           [ "$(cat "$USB_DEV/idProduct" 2>/dev/null)" = "9271" ]; then
+            log "Found AR9271 at $USB_DEV — resetting"
             echo 0 > "$USB_DEV/authorized" 2>/dev/null || true
             sleep 2
             echo 1 > "$USB_DEV/authorized" 2>/dev/null || true
