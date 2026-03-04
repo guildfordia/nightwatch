@@ -270,18 +270,45 @@ case "$1" in
 
         # Wait for mesh interface to be available (USB dongle may take time)
         echo "[+] Waiting for $MESH_IFACE..."
+        IFACE_FOUND=false
         for _wait in $(seq 1 30); do
             if ip link show "$MESH_IFACE" >/dev/null 2>&1; then
                 echo "[+] $MESH_IFACE is available"
+                IFACE_FOUND=true
                 break
-            fi
-            if [ "$_wait" -eq 30 ]; then
-                echo "[-] Error: $MESH_IFACE not found after 30s"
-                echo "[-] Check that USB WiFi dongle is connected"
-                exit 1
             fi
             sleep 1
         done
+
+        # If still missing, try USB reset (ath9k_htc firmware may have crashed)
+        if [ "$IFACE_FOUND" = false ]; then
+            echo "[!] $MESH_IFACE not found after 30s — attempting USB reset..."
+            for dev in /sys/bus/usb/devices/*/net; do
+                [ -d "$dev" ] || continue
+                USB_DEV=$(dirname "$dev")
+                if [ -f "$USB_DEV/authorized" ]; then
+                    echo 0 > "$USB_DEV/authorized" 2>/dev/null || true
+                    sleep 2
+                    echo 1 > "$USB_DEV/authorized" 2>/dev/null || true
+                    echo "[+] USB device reset, waiting for $MESH_IFACE..."
+                    break
+                fi
+            done
+            for _wait in $(seq 1 15); do
+                if ip link show "$MESH_IFACE" >/dev/null 2>&1; then
+                    echo "[+] $MESH_IFACE recovered after USB reset"
+                    IFACE_FOUND=true
+                    break
+                fi
+                sleep 1
+            done
+        fi
+
+        if [ "$IFACE_FOUND" = false ]; then
+            echo "[-] Error: $MESH_IFACE not found after USB reset"
+            echo "[-] Check that USB WiFi dongle is connected"
+            exit 1
+        fi
 
         check_deps iw batctl ip || exit 1
 
@@ -338,12 +365,14 @@ case "$1" in
         # Bring down bat0
         ip link set "$BAT_IFACE" down 2>/dev/null || true
 
-        # Leave mesh (only kill mesh wpa_supplicant, not internet wpa_supplicant)
+        # Clean up mesh wpa_supplicant (SAE mode only — don't kill internet wpa_supplicant)
         pkill -f "nightwatch-mesh-wpa" 2>/dev/null || true
         rm -f /tmp/nightwatch-mesh-wpa.* 2>/dev/null || true
-        iw dev "$MESH_IFACE" mesh leave 2>/dev/null || true
-        ip addr flush dev "$MESH_IFACE" 2>/dev/null || true
-        ip link set "$MESH_IFACE" down 2>/dev/null || true
+
+        # Do NOT bring wlan1 down or leave mesh mode here.
+        # The ath9k_htc firmware crashes when wlan1 is cycled down/up,
+        # causing it to vanish from the system. Leaving wlan1 in mesh mode
+        # is harmless — setup_mesh_interface handles any state on start.
 
         # NOTE: wlan0 and eth0 are never touched here — wlan0 provides internet,
         # eth0 connects to the external router (both must stay up)
