@@ -369,6 +369,7 @@ If nginx shows `status=created` instead of running, Docker Compose didn't fully 
 
 ## TODO
 
+- [ ] Remove Docker dependency — run ngircd, nginx, and irc-bridge natively via systemd (less RAM, faster boot, simpler debugging, better for Pi Zero 2W)
 - [ ] Add captive portal — redirect new WiFi clients to the chat page automatically
 - [ ] Support channel persistence — IRC history survives container restarts
 - [ ] Add mesh network map to web UI — show topology, latency, and node status
