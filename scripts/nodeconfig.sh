@@ -251,10 +251,12 @@ teardown_mesh() {
     if [ "$TEMP_MESH" = true ]; then
         batctl meshif bat0 if del "$MESH_IFACE" 2>/dev/null || true
         ip link set bat0 down 2>/dev/null || true
-        iw dev "$MESH_IFACE" mesh leave 2>/dev/null || true
-        ip link set "$MESH_IFACE" down 2>/dev/null || true
+        # Do NOT bring wlan1 down or leave mesh mode here.
+        # The ath9k_htc firmware crashes when wlan1 is cycled down/up,
+        # leaving it missing when the mesh service starts.
+        # mesh-fix.sh handles wlan1 setup from any state.
         TEMP_MESH=false
-        log "Temporary mesh torn down"
+        log "Temporary scan done (bat0 cleaned, $MESH_IFACE left up for mesh service)"
     fi
 }
 
