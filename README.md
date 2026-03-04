@@ -135,37 +135,43 @@ sudo shutdown -h now
 
 **Capture and clone (on your laptop):**
 
-```bash
-# 1. Pull SD card from Pi, insert in laptop
+**1. Copy the SD card to an image file:**
 
+```bash
 # Linux:
 lsblk                            # Find the SD card (e.g. /dev/sdf)
 sudo dd if=/dev/sdf of=nightwatch.img bs=4M status=progress
 
-# macOS:
+# macOS (use rdisk for ~10x faster reads):
 diskutil list                    # Find the SD card (e.g. /dev/disk4)
 sudo dd if=/dev/rdisk4 of=nightwatch.img bs=4m status=progress
+```
 
-# 2. Shrink (download PiShrink: https://github.com/Drewsif/PiShrink)
-#    PiShrink requires Linux — on macOS, use Docker:
+**2. Shrink with [PiShrink](https://github.com/Drewsif/PiShrink)** (30GB → ~6GB):
+
+```bash
+# Linux:
+sudo bash pishrink.sh nightwatch.img
+
+# macOS (PiShrink needs Linux, so run it in Docker):
 sudo chmod 666 nightwatch.img
 docker run --rm --privileged -v $(pwd):/workdir ubuntu:latest bash -c \
   "apt-get update && apt-get install -y parted e2fsprogs && \
    cp /workdir/nightwatch.img /tmp/nightwatch.img && \
    bash /workdir/pishrink.sh /tmp/nightwatch.img && \
    cat /tmp/nightwatch.img > /workdir/nightwatch.img"
-#    On Linux:
-sudo bash pishrink.sh nightwatch.img
-
-# 3. Compress
-sudo xz -9 -T0 nightwatch.img   # Linux
-xz -9 -T0 nightwatch.img        # macOS (no sudo needed)
-
-# 4. Flash to other SD cards with Raspberry Pi Imager:
-#    → Choose OS → Use custom → select nightwatch.img.xz
-#    → Choose storage → Flash
-#    No configuration needed — each Pi auto-assigns its node number.
 ```
+
+**3. Compress:**
+
+```bash
+xz -9 -T0 nightwatch.img        # Creates nightwatch.img.xz (~60-70% smaller)
+```
+
+**4. Flash to other SD cards with Raspberry Pi Imager:**
+- Choose OS → Use custom → select `nightwatch.img.xz`
+- Choose storage → Flash
+- No configuration needed — each Pi auto-assigns its node number.
 
 ### Option B: Manual Setup (single Pi or development)
 
