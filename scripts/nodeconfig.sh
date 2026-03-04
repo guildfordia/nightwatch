@@ -281,30 +281,29 @@ fi
 # Ensure temporary mesh is torn down on exit (e.g., if script crashes mid-scan)
 trap 'teardown_mesh' EXIT
 
-# Random delay (1-5s) to stagger mesh interface setup and avoid RF collisions
-DELAY=$((RANDOM % 5 + 1))
-log "Waiting ${DELAY}s before scanning (collision avoidance)..."
-sleep "$DELAY"
-
-# Always scan the mesh to check for conflicts
-scan_mesh
-
-# Try to use saved node number first (if not taken)
+# Try to use saved node number first (skip mesh scan on subsequent boots)
+# The mesh scan stresses the ath9k_htc firmware (setup/teardown cycle) and
+# can crash the dongle, leaving wlan1 missing when the mesh service starts.
+# Only scan on first boot (no saved number) to avoid this.
 NODE_NUM=""
 if [ -f "$NODE_NUM_FILE" ]; then
     SAVED_NUM=$(cat "$NODE_NUM_FILE")
     if [[ "$SAVED_NUM" =~ ^[0-9]+$ ]] && [ "$SAVED_NUM" -ge 1 ] && [ "$SAVED_NUM" -le "$MAX_NODES" ]; then
-        if [ -z "$TAKEN" ] || ! echo "$TAKEN" | grep -qw "$SAVED_NUM"; then
-            NODE_NUM="$SAVED_NUM"
-            log "Using saved node number: $NODE_NUM (verified available)"
-        else
-            log "Saved node number $SAVED_NUM is taken — reassigning"
-        fi
+        NODE_NUM="$SAVED_NUM"
+        log "Using saved node number: $NODE_NUM (from $NODE_NUM_FILE)"
     fi
 fi
 
-# If no valid saved number, pick the lowest available
+# Only scan the mesh if we don't have a saved node number (first boot)
 if [ -z "$NODE_NUM" ]; then
+    # Random delay (1-5s) to stagger mesh interface setup and avoid RF collisions
+    DELAY=$((RANDOM % 5 + 1))
+    log "Waiting ${DELAY}s before scanning (collision avoidance)..."
+    sleep "$DELAY"
+
+    scan_mesh
+
+    # Pick the lowest available number
     for i in $(seq 1 "$MAX_NODES"); do
         if [ -z "$TAKEN" ] || ! echo "$TAKEN" | grep -qw "$i"; then
             NODE_NUM="$i"
