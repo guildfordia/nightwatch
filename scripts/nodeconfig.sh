@@ -210,10 +210,12 @@ NMEOF
         # Get our wlan1 MAC and all neighbor MACs, sort them to assign
         # deterministic node numbers. Each node's position in the sorted
         # MAC list determines its node number.
-        OUR_MAC=$(cat "/sys/class/net/$MESH_IFACE/address" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+        OUR_MAC=$(cat "/sys/class/net/$MESH_IFACE/address" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
         # Collect neighbor MACs from batman-adv (skip 2 header lines to avoid
         # parsing "adv" from "[B.A.T.M.A.N. adv ...]" as a MAC address)
-        NEIGHBOR_MACS=$(batctl meshif bat0 n 2>/dev/null | tail -n +3 | awk '{print $2}' | tr '[:upper:]' '[:lower:]' | sort)
+        # Note: batctl exits non-zero when there are no neighbors, so || true
+        # is required to prevent pipefail + set -e from killing the script.
+        NEIGHBOR_MACS=$(batctl meshif bat0 n 2>/dev/null | tail -n +3 | awk '{print $2}' | tr '[:upper:]' '[:lower:]' | sort || true)
         MESH_PEER_COUNT=$(echo "$NEIGHBOR_MACS" | grep -c . || true)
         MESH_PEER_COUNT=${MESH_PEER_COUNT:-0}
         log "batman-adv sees $MESH_PEER_COUNT neighbor(s) on mesh"
