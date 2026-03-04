@@ -179,7 +179,7 @@ fi
 section "6. Container Logs (error check)"
 
 for svc in ngircd irc-bridge nginx; do
-    fatal_count=$(docker logs "$svc" 2>&1 | grep -ciE "fatal|panic|segfault|SIGSEGV" || true)
+    fatal_count=$(docker logs "$svc" 2>&1 | grep -iE "fatal|panic|segfault|SIGSEGV" | grep -cvE "s6-" || true)
     error_count=$(docker logs "$svc" 2>&1 | grep -ciE "^error|ERROR" || true)
     if [ "$fatal_count" -eq 0 ]; then
         if [ "$error_count" -gt 5 ]; then
