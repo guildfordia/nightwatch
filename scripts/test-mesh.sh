@@ -451,8 +451,8 @@ if [ "$QUICK_MODE" = false ] && [ ${#LIVE_IPS[@]} -gt 0 ]; then
         # Check if any server link is established by querying ngircd via IRC LINKS command
         LINKS_OUTPUT=$(mktemp)
         {
-            echo "NICK fedcheck$$"
-            echo "USER fedcheck$$ 0 * :Federation Check"
+            echo "NICK fc$$"
+            echo "USER fc$$ 0 * :Federation Check"
             sleep 2
             echo "LINKS"
             sleep 2
@@ -480,13 +480,13 @@ if [ "$QUICK_MODE" = false ] && [ ${#LIVE_IPS[@]} -gt 0 ]; then
             echo "  Testing: send on $LOCAL_IP → verify on $REMOTE_IP ($REMOTE_NAME)"
 
             TEST_MSG="MESHTEST_$(date +%s)_$$"
-            TEST_NICK="testbot$$"
+            TEST_NICK="tb$$"
 
             # Start RECEIVER first on remote node — give it time to connect and join
             RECV_OUTPUT=$(mktemp)
             {
-                echo "NICK recvbot$$"
-                echo "USER recvbot$$ 0 * :Mesh Recv Bot"
+                echo "NICK rb$$"
+                echo "USER rb$$ 0 * :Mesh Recv Bot"
                 sleep 4
                 echo "JOIN #nightwatch"
                 sleep 15
