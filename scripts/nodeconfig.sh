@@ -100,7 +100,21 @@ scan_mesh() {
     log "Bringing up temporary mesh for network scan..."
     TEMP_MESH=false
 
-    # Release interface from NetworkManager
+    # Permanently tell NetworkManager to never manage the mesh interface.
+    # Without this, NM reclaims wlan1 after teardown and the repeated
+    # firmware load/unload cycles crash the ath9k_htc dongle.
+    NM_UNMANAGED_CONF="/etc/NetworkManager/conf.d/nightwatch-mesh-unmanaged.conf"
+    if [ ! -f "$NM_UNMANAGED_CONF" ] && [ -d /etc/NetworkManager ]; then
+        mkdir -p /etc/NetworkManager/conf.d
+        cat > "$NM_UNMANAGED_CONF" << NMEOF
+[keyfile]
+unmanaged-devices=interface-name:${MESH_IFACE}
+NMEOF
+        nmcli general reload 2>/dev/null || true
+        log "NetworkManager: $MESH_IFACE permanently set to unmanaged"
+    fi
+
+    # Release interface from NetworkManager (immediate effect)
     nmcli dev set "$MESH_IFACE" managed no 2>/dev/null || true
     pkill -f "wpa_supplicant.*$MESH_IFACE" 2>/dev/null || true
     sleep 1
@@ -108,6 +122,32 @@ scan_mesh() {
     if pgrep -f "wpa_supplicant.*$MESH_IFACE" >/dev/null 2>&1; then
         pkill -9 -f "wpa_supplicant.*$MESH_IFACE" 2>/dev/null || true
         sleep 1
+    fi
+
+    # Check if the dongle is responsive; if not, try a USB reset
+    if ! iw dev "$MESH_IFACE" info >/dev/null 2>&1; then
+        log "Warning: $MESH_IFACE not responding — attempting USB reset..."
+        USB_PATH=$(readlink -f "/sys/class/net/$MESH_IFACE/device/.." 2>/dev/null || true)
+        if [ -n "$USB_PATH" ] && [ -f "$USB_PATH/authorized" ]; then
+            echo 0 > "$USB_PATH/authorized"
+            sleep 2
+            echo 1 > "$USB_PATH/authorized"
+            sleep 5
+            log "USB reset done, waiting for $MESH_IFACE..."
+        else
+            # Fallback: unbind/rebind the USB device
+            USB_DEV=$(basename "$(readlink -f /sys/class/net/$MESH_IFACE/device 2>/dev/null)" 2>/dev/null || true)
+            USB_DRIVER=$(readlink -f "/sys/class/net/$MESH_IFACE/device/driver" 2>/dev/null || true)
+            if [ -n "$USB_DEV" ] && [ -n "$USB_DRIVER" ]; then
+                echo "$USB_DEV" > "$USB_DRIVER/unbind" 2>/dev/null || true
+                sleep 2
+                echo "$USB_DEV" > "$USB_DRIVER/bind" 2>/dev/null || true
+                sleep 5
+                log "USB unbind/rebind done"
+            else
+                log "Warning: could not reset USB device for $MESH_IFACE"
+            fi
+        fi
     fi
 
     # Load batman-adv
