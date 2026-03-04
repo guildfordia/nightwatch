@@ -185,8 +185,9 @@ EOF
 # ---- Update IRC config if peer list changed ----
 LAST_PEER_HASH=""
 update_irc_config() {
-    # Hash current peer file to detect changes
-    CURRENT_HASH=$(sort "$PEER_FILE" 2>/dev/null | cksum || echo "")
+    # Hash current peer file to detect changes (exclude timestamp field
+    # so that beacon refreshes don't trigger unnecessary restarts)
+    CURRENT_HASH=$(sort "$PEER_FILE" 2>/dev/null | cut -d'|' -f1-3 | cksum || echo "")
     if [ "$CURRENT_HASH" = "$LAST_PEER_HASH" ]; then
         return
     fi
@@ -197,23 +198,12 @@ update_irc_config() {
 
     generate_irc_config
 
-    # Reload ngircd config inside the container (with timeouts to avoid blocking)
-    # Send SIGHUP directly to the ngircd process (not PID 1 which is s6-init)
+    # Restart ngircd container to pick up new config.
+    # Note: SIGHUP only reloads [Global]/[Options]/[Channel] settings —
+    # new [Server] blocks (federation links) require a full restart.
     if timeout 5 docker ps --format '{{.Names}}' 2>/dev/null | grep -q ngircd; then
-        # Try sending HUP to ngircd process directly
-        if timeout 5 docker exec ngircd pkill -HUP ngircd 2>/dev/null; then
-            log "Sent HUP to ngircd process (config reload)"
-            # Verify ngircd survived the reload (bad config can crash it)
-            sleep 1
-            if ! timeout 5 docker exec ngircd pgrep -x ngircd >/dev/null 2>&1; then
-                log "WARNING: ngircd crashed after HUP — restarting container"
-                timeout 30 docker restart ngircd 2>/dev/null || true
-            fi
-        else
-            # Fallback: restart container
-            timeout 30 docker restart ngircd 2>/dev/null || true
-            log "Restarted ngircd (config reload)"
-        fi
+        timeout 30 docker restart ngircd 2>/dev/null || true
+        log "Restarted ngircd container (federation config updated)"
     fi
 }
 
