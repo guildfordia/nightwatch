@@ -162,6 +162,21 @@ setup_client_bridge() {
         dhcpcd --release "$AP_IFACE" 2>/dev/null || true
     fi
 
+    # Remove eth0's default route — it points to the GL.iNet router which has
+    # no internet. Without this, it shadows wlan0's route (which has internet)
+    # and Docker image pulls, apt, etc. all fail.
+    if ip route show default dev "$AP_IFACE" 2>/dev/null | grep -q .; then
+        ip route del default dev "$AP_IFACE" 2>/dev/null || true
+        echo "[+] Removed default route via $AP_IFACE (no internet on router)"
+    fi
+    # Make it persistent via NetworkManager
+    if command -v nmcli >/dev/null 2>&1; then
+        ETH_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep "$AP_IFACE" | head -1 | cut -d: -f1)
+        if [ -n "$ETH_CON" ]; then
+            nmcli con mod "$ETH_CON" ipv4.never-default yes 2>/dev/null || true
+        fi
+    fi
+
     # Remove any existing bridge
     ip link set "$BR_IFACE" down 2>/dev/null || true
     ip link del "$BR_IFACE" 2>/dev/null || true
