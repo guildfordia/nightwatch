@@ -148,12 +148,12 @@ sudo dd if=/dev/rdisk4 of=nightwatch.img bs=4m status=progress
 
 # 2. Shrink (download PiShrink: https://github.com/Drewsif/PiShrink)
 #    PiShrink requires Linux — on macOS, use Docker:
-#    sudo chmod 666 nightwatch.img
-#    docker run --rm --privileged -v $(pwd):/workdir ubuntu:latest bash -c \
-#      "apt-get update && apt-get install -y parted e2fsprogs && \
-#       cp /workdir/nightwatch.img /tmp/nightwatch.img && \
-#       bash /workdir/pishrink.sh /tmp/nightwatch.img && \
-#       cp /tmp/nightwatch.img /workdir/nightwatch.img"
+sudo chmod 666 nightwatch.img
+docker run --rm --privileged -v $(pwd):/workdir ubuntu:latest bash -c \
+  "apt-get update && apt-get install -y parted e2fsprogs && \
+   cp /workdir/nightwatch.img /tmp/nightwatch.img && \
+   bash /workdir/pishrink.sh /tmp/nightwatch.img && \
+   cat /tmp/nightwatch.img > /workdir/nightwatch.img"
 #    On Linux:
 sudo bash pishrink.sh nightwatch.img
 
