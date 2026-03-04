@@ -140,7 +140,8 @@ scan_mesh() {
         STABLE_FOR=0
         for attempt in $(seq 1 20); do
             # Count neighbors — skip header lines (first 2 lines of batctl output)
-            CUR_COUNT=$(batctl meshif bat0 n 2>/dev/null | tail -n +3 | grep -c "$MESH_IFACE" || echo 0)
+            CUR_COUNT=$(batctl meshif bat0 n 2>/dev/null | tail -n +3 | grep -c "$MESH_IFACE" || true)
+            CUR_COUNT=${CUR_COUNT:-0}
             if [ "$CUR_COUNT" -eq "$PREV_COUNT" ]; then
                 STABLE_FOR=$((STABLE_FOR + 1))
             else
@@ -173,7 +174,8 @@ scan_mesh() {
         # Collect neighbor MACs from batman-adv (skip 2 header lines to avoid
         # parsing "adv" from "[B.A.T.M.A.N. adv ...]" as a MAC address)
         NEIGHBOR_MACS=$(batctl meshif bat0 n 2>/dev/null | tail -n +3 | awk '{print $2}' | tr '[:upper:]' '[:lower:]' | sort)
-        MESH_PEER_COUNT=$(echo "$NEIGHBOR_MACS" | grep -c . || echo 0)
+        MESH_PEER_COUNT=$(echo "$NEIGHBOR_MACS" | grep -c . || true)
+        MESH_PEER_COUNT=${MESH_PEER_COUNT:-0}
         log "batman-adv sees $MESH_PEER_COUNT neighbor(s) on mesh"
 
         if [ -n "$NEIGHBOR_MACS" ] && [ "$MESH_PEER_COUNT" -gt 0 ]; then
