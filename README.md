@@ -147,7 +147,14 @@ diskutil list                    # Find the SD card (e.g. /dev/disk4)
 sudo dd if=/dev/rdisk4 of=nightwatch.img bs=4m status=progress
 
 # 2. Shrink (download PiShrink: https://github.com/Drewsif/PiShrink)
-#    Note: PiShrink requires Linux — use a VM or Docker on macOS
+#    PiShrink requires Linux — on macOS, use Docker:
+#    sudo chmod 666 nightwatch.img
+#    docker run --rm --privileged -v $(pwd):/workdir ubuntu:latest bash -c \
+#      "apt-get update && apt-get install -y parted e2fsprogs && \
+#       cp /workdir/nightwatch.img /tmp/nightwatch.img && \
+#       bash /workdir/pishrink.sh /tmp/nightwatch.img && \
+#       cp /tmp/nightwatch.img /workdir/nightwatch.img"
+#    On Linux:
 sudo bash pishrink.sh nightwatch.img
 
 # 3. Compress
@@ -311,6 +318,45 @@ sudo cat /var/log/nightwatch-firstboot.log
 sudo rm -f /opt/nightwatch/.firstboot-done
 sudo /opt/nightwatch/scripts/firstboot.sh
 ```
+
+## FAQ
+
+### I can't SSH to `nightwatch-N.local` after first boot
+
+The Pi needs ~2 minutes to complete the first boot cycle: nodeconfig waits 60s for mesh convergence, then assigns a node number and sets the hostname. Wait 2-3 minutes after powering on, then try `ping nightwatch-1.local`. If `nightwatch.local` still works but `nightwatch-1.local` doesn't, nodeconfig may have failed — check logs with `sudo journalctl -u nightwatch-firstboot`.
+
+### After `make image`, the Pi has failing services
+
+This is expected. `make image` strips all node-specific config (.env, .node-number, ngircd.conf) to prepare the SD card as a golden image for cloning. **The card is no longer meant to be used as a live node.** To continue using it:
+- Either re-run firstboot: `sudo rm -f /opt/nightwatch/.firstboot-done && sudo /opt/nightwatch/scripts/firstboot.sh`
+- Or use the card as intended: shut down, `dd` the image, and flash clones
+
+### Docker pulls fail / no internet even though WiFi is connected
+
+The GL.iNet router on eth0 gives the Pi a default route with no internet, shadowing the wlan0 route that does have internet. nodeconfig and mesh-fix.sh both fix this automatically, but if you hit it manually:
+```bash
+sudo ip route del default dev eth0
+```
+
+### USB WiFi dongle (wlan1) disappears or becomes unresponsive
+
+The ath9k_htc firmware can crash if NetworkManager repeatedly reclaims the interface. nodeconfig now writes a permanent rule to prevent this (`/etc/NetworkManager/conf.d/nightwatch-mesh-unmanaged.conf`). If the dongle is already in a bad state, unplug it, wait 5 seconds, and plug it back in. Then `sudo systemctl restart nightwatch-mesh`.
+
+### Can I reuse the golden image SD card as a normal node?
+
+Yes, but you need to re-run firstboot since `make image` removed the setup stamp:
+```bash
+sudo rm -f /opt/nightwatch/.firstboot-done
+sudo /opt/nightwatch/scripts/firstboot.sh
+```
+
+### All my cloned Pis have the same hostname
+
+Each clone auto-assigns a unique number on first boot via MAC-based sorting. If they all show `nightwatch` instead of `nightwatch-N`, nodeconfig didn't complete. Check `sudo journalctl -u nightwatch-firstboot` on the affected node. Common causes: wlan1 dongle not plugged in, or firstboot hit an error before nodeconfig could finish.
+
+### `make test` shows nginx FAIL after reboot
+
+If nginx shows `status=created` instead of running, Docker Compose didn't fully start. Run `make run` to restart all services, or `sudo systemctl restart nightwatch-docker`.
 
 ## Security
 
