@@ -58,6 +58,15 @@ load_batman_module() {
 setup_mesh_interface() {
     echo "[+] Configuring $MESH_IFACE for 802.11s mesh..."
 
+    # Check if already in mesh mode (e.g. after a service restart where
+    # the stop handler intentionally left wlan1 alone)
+    CURRENT_TYPE=$(iw dev "$MESH_IFACE" info 2>/dev/null | grep type | awk '{print $2}')
+    if [ "$CURRENT_TYPE" = "mesh" ]; then
+        echo "[+] $MESH_IFACE already in mesh mode — skipping reconfiguration"
+        ip link set "$MESH_IFACE" up 2>/dev/null || true
+        return 0
+    fi
+
     # Kill anything holding the interface (NetworkManager, wpa_supplicant)
     nmcli dev set "$MESH_IFACE" managed no 2>/dev/null || true
     pkill -f "wpa_supplicant.*$MESH_IFACE" 2>/dev/null || true
@@ -67,6 +76,31 @@ setup_mesh_interface() {
         pkill -9 -f "wpa_supplicant.*$MESH_IFACE" 2>/dev/null || true
         sleep 1
     fi
+
+    # The ath9k_htc firmware crashes when wlan1 is cycled down/up while
+    # NetworkManager or wpa_supplicant are interacting with it.
+    # Reload the kernel module instead — this cleanly resets the device.
+    echo "[+] Reloading ath9k_htc driver for clean mesh setup..."
+    modprobe -r ath9k_htc 2>/dev/null || true
+    sleep 2
+    modprobe ath9k_htc 2>/dev/null || true
+
+    # Wait for interface to reappear after driver reload
+    for _drv_wait in $(seq 1 15); do
+        if ip link show "$MESH_IFACE" >/dev/null 2>&1; then
+            echo "[+] $MESH_IFACE reappeared after driver reload"
+            break
+        fi
+        if [ "$_drv_wait" -eq 15 ]; then
+            echo "[-] $MESH_IFACE did not reappear after driver reload"
+            exit 1
+        fi
+        sleep 1
+    done
+
+    # Tell NM to leave it alone (again, after driver reload re-creates the device)
+    nmcli dev set "$MESH_IFACE" managed no 2>/dev/null || true
+    sleep 1
 
     # Bring down and set mesh type
     ip link set "$MESH_IFACE" down 2>/dev/null || true
