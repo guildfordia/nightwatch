@@ -125,50 +125,86 @@ scan_mesh() {
         batctl meshif bat0 if add "$MESH_IFACE" 2>/dev/null || true
         ip link set bat0 up 2>/dev/null || true
 
-        # Assign a temporary scan IP (.250) to check which nodes exist
-        ip addr add 192.168.199.250/24 dev bat0 2>/dev/null || true
-        sleep 2
-
         TEMP_MESH=true
-        log "Temporary mesh is up, scanning..."
+
+        # Wait for batman-adv to converge and neighbor count to stabilize.
+        # All nodes must see the same set of neighbors for MAC-based assignment
+        # to be consistent. Pi Zeros take ~45-60s to boot, so we wait 60s
+        # minimum, then check that the neighbor count is stable.
+        # This only runs on first boot (no .node-number file) — subsequent
+        # boots use the saved number and skip the scan.
+        log "Temporary mesh is up, waiting 60s for all nodes to boot..."
+        sleep 60
+        log "Checking neighbor convergence..."
+        PREV_COUNT=-1
+        STABLE_FOR=0
+        for attempt in $(seq 1 20); do
+            # Count neighbors — skip header lines (first 2 lines of batctl output)
+            CUR_COUNT=$(batctl meshif bat0 n 2>/dev/null | tail -n +3 | grep -c "$MESH_IFACE" || echo 0)
+            if [ "$CUR_COUNT" -eq "$PREV_COUNT" ]; then
+                STABLE_FOR=$((STABLE_FOR + 1))
+            else
+                STABLE_FOR=0
+                PREV_COUNT=$CUR_COUNT
+            fi
+            log "  convergence check $attempt: $CUR_COUNT neighbor(s) (stable for ${STABLE_FOR})"
+            # Consider stable after 5 consecutive identical counts (15s)
+            if [ "$STABLE_FOR" -ge 5 ]; then
+                break
+            fi
+            sleep 3
+        done
+        log "Scanning with $CUR_COUNT neighbor(s)..."
     else
         log "Warning: could not set $MESH_IFACE to mesh mode"
     fi
 
-    # Scan for taken node numbers
+    # Determine how many nodes are on the mesh using batman-adv neighbors.
+    # IP-based scanning doesn't work reliably because ARP can't resolve across
+    # batman-adv when the remote IP is on a bridge (br0) and we're not bridged.
+    # Instead, count batman-adv neighbors (L2) — this is always reliable.
+    MESH_PEER_COUNT=0
     TAKEN=""
     if [ "$TEMP_MESH" = true ]; then
-        if command -v fping >/dev/null 2>&1; then
-            # fping pings all 20 IPs in parallel — much faster than sequential ping
-            IPS=$(for i in $(seq 1 "$MAX_NODES"); do mesh_ip_for_node "$i"; done)
-            ALIVE=$(echo "$IPS" | fping -a -q -r 1 -t 500 2>/dev/null || true)
-            for ip in $ALIVE; do
-                i=$((${ip##*.} - 100))
-                TAKEN="$TAKEN $i"
-                log "  Node $i is taken ($ip responds)"
+        # Get our wlan1 MAC and all neighbor MACs, sort them to assign
+        # deterministic node numbers. Each node's position in the sorted
+        # MAC list determines its node number.
+        OUR_MAC=$(cat "/sys/class/net/$MESH_IFACE/address" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+        # Collect neighbor MACs from batman-adv (skip 2 header lines to avoid
+        # parsing "adv" from "[B.A.T.M.A.N. adv ...]" as a MAC address)
+        NEIGHBOR_MACS=$(batctl meshif bat0 n 2>/dev/null | tail -n +3 | awk '{print $2}' | tr '[:upper:]' '[:lower:]' | sort)
+        MESH_PEER_COUNT=$(echo "$NEIGHBOR_MACS" | grep -c . || echo 0)
+        log "batman-adv sees $MESH_PEER_COUNT neighbor(s) on mesh"
+
+        if [ -n "$NEIGHBOR_MACS" ] && [ "$MESH_PEER_COUNT" -gt 0 ]; then
+            # Build sorted list of all MACs (ours + neighbors)
+            ALL_MACS=$(printf '%s\n%s' "$OUR_MAC" "$NEIGHBOR_MACS" | sort)
+            # Our position in the sorted list is our node number
+            OUR_POSITION=1
+            while IFS= read -r mac; do
+                if [ "$mac" = "$OUR_MAC" ]; then
+                    break
+                fi
+                OUR_POSITION=$((OUR_POSITION + 1))
+            done <<< "$ALL_MACS"
+            # Mark all positions except ours as taken
+            TOTAL=$(echo "$ALL_MACS" | wc -l | tr -d ' ')
+            for i in $(seq 1 "$TOTAL"); do
+                if [ "$i" -ne "$OUR_POSITION" ]; then
+                    TAKEN="$TAKEN $i"
+                fi
             done
+            log "MAC-based assignment: $TOTAL nodes on mesh, we are position $OUR_POSITION"
+            log "  Our MAC: $OUR_MAC"
+            log "  All MACs (sorted): $(echo "$ALL_MACS" | tr '\n' ' ')"
         else
-            # Fallback: parallel ping via background jobs (fping not yet installed)
-            PING_DIR=$(mktemp -d /tmp/nightwatch-ping.XXXXXX)
-            for i in $(seq 1 "$MAX_NODES"); do
-                ip="$(mesh_ip_for_node "$i")"
-                ( ping -c 1 -W 1 "$ip" >/dev/null 2>&1 && echo "$i" > "$PING_DIR/$i" ) &
-            done
-            wait
-            for f in "$PING_DIR"/*; do
-                [ -f "$f" ] || continue
-                i=$(cat "$f")
-                TAKEN="$TAKEN $i"
-                log "  Node $i is taken ($(mesh_ip_for_node "$i") responds)"
-            done
-            rm -rf "$PING_DIR"
+            log "No neighbors found — we are the first node"
         fi
     fi
 }
 
 teardown_mesh() {
     if [ "$TEMP_MESH" = true ]; then
-        ip addr del 192.168.199.250/24 dev bat0 2>/dev/null || true
         batctl meshif bat0 if del "$MESH_IFACE" 2>/dev/null || true
         ip link set bat0 down 2>/dev/null || true
         iw dev "$MESH_IFACE" mesh leave 2>/dev/null || true
@@ -201,8 +237,8 @@ fi
 # Ensure temporary mesh is torn down on exit (e.g., if script crashes mid-scan)
 trap 'teardown_mesh' EXIT
 
-# Random delay (1-8s) to reduce collision when multiple Pis boot together
-DELAY=$((RANDOM % 8 + 1))
+# Random delay (1-5s) to stagger mesh interface setup and avoid RF collisions
+DELAY=$((RANDOM % 5 + 1))
 log "Waiting ${DELAY}s before scanning (collision avoidance)..."
 sleep "$DELAY"
 
@@ -259,6 +295,11 @@ if [ "$CURRENT_HOSTNAME" != "$NEW_HOSTNAME" ]; then
         log "Hostname set to $NEW_HOSTNAME"
     else
         log "Warning: hostname change to $NEW_HOSTNAME may not have taken effect (got: $ACTUAL_HOSTNAME)"
+    fi
+    # Restart Avahi so the new hostname is advertised via mDNS (.local)
+    if systemctl is-active --quiet avahi-daemon 2>/dev/null; then
+        systemctl restart avahi-daemon
+        log "Restarted avahi-daemon to advertise $NEW_HOSTNAME.local"
     fi
 fi
 
