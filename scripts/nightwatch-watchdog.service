@@ -1,0 +1,7 @@
+[Unit]
+Description=Nightwatch Mesh Watchdog
+After=nightwatch-mesh.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/nightwatch/scripts/mesh-watchdog.sh

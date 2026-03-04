@@ -54,7 +54,7 @@ fi
 # ---- Sync service files to systemd ----
 # Ensures golden image clones and updates always have the latest service files
 SERVICES_UPDATED=false
-for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch-docker; do
+for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch-docker nightwatch-watchdog; do
     SRC="$NIGHTWATCH_DIR/scripts/${svc}.service"
     DST="/etc/systemd/system/${svc}.service"
     if [ -f "$SRC" ]; then
@@ -67,9 +67,24 @@ for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch
         fi
     fi
 done
+# Sync watchdog timer
+TIMER_SRC="$NIGHTWATCH_DIR/scripts/nightwatch-watchdog.timer"
+TIMER_DST="/etc/systemd/system/nightwatch-watchdog.timer"
+if [ -f "$TIMER_SRC" ]; then
+    if [ ! -f "$TIMER_DST" ] || ! diff -q "$TIMER_SRC" "$TIMER_DST" >/dev/null 2>&1; then
+        cp "$TIMER_SRC" "$TIMER_DST"
+        SERVICES_UPDATED=true
+        log "Updated nightwatch-watchdog.timer"
+    fi
+fi
 if [ "$SERVICES_UPDATED" = true ]; then
     systemctl daemon-reload
     log "systemd reloaded"
+fi
+# Ensure watchdog timer is enabled
+if ! systemctl is-enabled --quiet nightwatch-watchdog.timer 2>/dev/null; then
+    systemctl enable --now nightwatch-watchdog.timer 2>/dev/null || true
+    log "Watchdog timer enabled"
 fi
 
 # Ensure Docker DNS is configured
