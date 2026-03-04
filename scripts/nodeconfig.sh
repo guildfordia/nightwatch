@@ -305,6 +305,25 @@ if [ "$CURRENT_HOSTNAME" != "$NEW_HOSTNAME" ]; then
     fi
 fi
 
+# ---- Ensure eth0 doesn't steal the default route from wlan0 ----
+# eth0 connects to the GL.iNet router (local AP, no internet). If DHCP on eth0
+# sets a default route, it shadows wlan0 (which has actual internet) and breaks
+# package installs during firstboot. Fix this early, before anything needs internet.
+AP_IFACE="${AP_IFACE:-eth0}"
+if ip route show default dev "$AP_IFACE" 2>/dev/null | grep -q .; then
+    if command -v nmcli >/dev/null 2>&1; then
+        ETH_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep "$AP_IFACE" | head -1 | cut -d: -f1)
+        if [ -n "$ETH_CON" ]; then
+            nmcli con mod "$ETH_CON" ipv4.never-default yes 2>/dev/null || true
+            nmcli con up "$ETH_CON" 2>/dev/null || true
+            log "NetworkManager: $AP_IFACE ($ETH_CON) set to never-default"
+        fi
+    fi
+    # Immediate fix: delete the bad default route (covers dhcpcd and other cases)
+    ip route del default dev "$AP_IFACE" 2>/dev/null || true
+    log "Removed default route via $AP_IFACE (no internet on that interface)"
+fi
+
 # ---- Check if .env already exists and is valid ----
 
 if [ -f "$ENV_FILE" ]; then
