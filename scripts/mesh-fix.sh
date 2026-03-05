@@ -77,48 +77,96 @@ setup_mesh_interface() {
         sleep 1
     fi
 
-    # The ath9k_htc firmware crashes when wlan1 is cycled down/up while
-    # NetworkManager or wpa_supplicant are interacting with it.
-    # Reload the kernel module instead — this cleanly resets the device.
-    echo "[+] Reloading ath9k_htc driver for clean mesh setup..."
-    modprobe -r ath9k_htc 2>/dev/null || true
-    sleep 2
-    modprobe ath9k_htc 2>/dev/null || true
-
-    # Wait for interface to reappear after driver reload
-    for _drv_wait in $(seq 1 15); do
-        if ip link show "$MESH_IFACE" >/dev/null 2>&1; then
-            echo "[+] $MESH_IFACE reappeared after driver reload"
-            break
-        fi
-        if [ "$_drv_wait" -eq 15 ]; then
-            echo "[-] $MESH_IFACE did not reappear after driver reload"
-            exit 1
-        fi
+    # Try setting mesh mode directly first — the driver reload is only needed
+    # when wpa_supplicant has left the firmware in a bad state.
+    ip link set "$MESH_IFACE" down 2>/dev/null || true
+    if iw dev "$MESH_IFACE" set type mesh 2>/dev/null; then
+        echo "[+] $MESH_IFACE set to mesh mode directly (no driver reload needed)"
+        ip link set "$MESH_IFACE" up
         sleep 1
-    done
+
+        IFACE_TYPE=$(iw dev "$MESH_IFACE" info 2>/dev/null | grep type | awk '{print $2}')
+        if [ "$IFACE_TYPE" = "mesh" ]; then
+            # Skip the rest of setup_mesh_interface — jump to mesh join below
+            _SKIP_MODE_SETUP=true
+        fi
+    fi
+
+    if [ "${_SKIP_MODE_SETUP:-}" != "true" ]; then
+        # Direct mode set failed — reload the driver to reset firmware state.
+        # The ath9k_htc firmware crashes when wlan1 is cycled down/up while
+        # NetworkManager or wpa_supplicant are interacting with it.
+        echo "[+] Reloading ath9k_htc driver for clean mesh setup..."
+        modprobe -r ath9k_htc 2>/dev/null || true
+        sleep 2
+        modprobe ath9k_htc 2>/dev/null || true
+
+        # Wait for interface to reappear after driver reload
+        RELOAD_OK=false
+        for _drv_wait in $(seq 1 15); do
+            if ip link show "$MESH_IFACE" >/dev/null 2>&1; then
+                echo "[+] $MESH_IFACE reappeared after driver reload"
+                RELOAD_OK=true
+                break
+            fi
+            sleep 1
+        done
+
+        # If driver reload failed, try USB authorized reset (more reliable on Pi 5)
+        if [ "$RELOAD_OK" = false ]; then
+            echo "[!] Driver reload failed — trying USB device reset..."
+            modprobe -r ath9k_htc 2>/dev/null || true
+            for dev in /sys/bus/usb/devices/*/idVendor; do
+                USB_DEV=$(dirname "$dev")
+                if [ "$(cat "$USB_DEV/idVendor" 2>/dev/null)" = "0cf3" ] && \
+                   [ "$(cat "$USB_DEV/idProduct" 2>/dev/null)" = "9271" ]; then
+                    echo "[+] Resetting AR9271 at $USB_DEV..."
+                    echo 0 > "$USB_DEV/authorized" 2>/dev/null || true
+                    sleep 2
+                    echo 1 > "$USB_DEV/authorized" 2>/dev/null || true
+                    break
+                fi
+            done
+            sleep 2
+            modprobe ath9k_htc 2>/dev/null || true
+            for _drv_wait in $(seq 1 15); do
+                if ip link show "$MESH_IFACE" >/dev/null 2>&1; then
+                    echo "[+] $MESH_IFACE recovered after USB reset"
+                    RELOAD_OK=true
+                    break
+                fi
+                sleep 1
+            done
+            if [ "$RELOAD_OK" = false ]; then
+                echo "[-] $MESH_IFACE did not reappear after driver + USB reset"
+                exit 1
+            fi
+        fi
+    fi
 
     # Tell NM to leave it alone (again, after driver reload re-creates the device)
     nmcli dev set "$MESH_IFACE" managed no 2>/dev/null || true
     sleep 1
 
-    # Bring down and set mesh type
-    ip link set "$MESH_IFACE" down 2>/dev/null || true
-    if ! iw dev "$MESH_IFACE" set type mesh; then
-        echo "[-] Failed to set $MESH_IFACE to mesh mode, retrying..."
-        sleep 2
-        iw dev "$MESH_IFACE" set type mesh
-    fi
-    ip link set "$MESH_IFACE" up
+    if [ "${_SKIP_MODE_SETUP:-}" != "true" ]; then
+        # Bring down and set mesh type
+        ip link set "$MESH_IFACE" down 2>/dev/null || true
+        if ! iw dev "$MESH_IFACE" set type mesh; then
+            echo "[-] Failed to set $MESH_IFACE to mesh mode, retrying..."
+            sleep 2
+            iw dev "$MESH_IFACE" set type mesh
+        fi
+        ip link set "$MESH_IFACE" up
 
-    sleep 1
+        sleep 1
 
-    # Verify mesh mode
-    IFACE_TYPE=$(iw dev "$MESH_IFACE" info 2>/dev/null | grep type | awk '{print $2}')
-    if [ "$IFACE_TYPE" != "mesh" ]; then
-        echo "[-] Error: $MESH_IFACE is '$IFACE_TYPE' instead of 'mesh'"
-        echo "[-] Check if another process is managing this interface"
-        exit 1
+        # Verify mesh mode
+        IFACE_TYPE=$(iw dev "$MESH_IFACE" info 2>/dev/null | grep type | awk '{print $2}')
+        if [ "$IFACE_TYPE" != "mesh" ]; then
+            echo "[-] Error: $MESH_IFACE is '$IFACE_TYPE' instead of 'mesh'"
+            echo "[-] Check if another process is managing this interface"
+            exit 1
+        fi
     fi
 
     # Join 802.11s mesh
