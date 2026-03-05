@@ -222,7 +222,8 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     fping \
     netcat-openbsd \
     socat \
-    sshpass
+    sshpass \
+    firmware-atheros
 echo "[+] System packages installed"
 
 # Disable system dnsmasq — we start our own instance on br0 via mesh-fix.sh
