@@ -551,13 +551,27 @@ if [ ! -f "$ENV_TEMPLATE" ]; then
     exit 1
 fi
 
+# Save caller-provided secrets BEFORE load_env overwrites them
+_SAVE_ROUTER_PASSWORD="${ROUTER_PASSWORD:-}"
+_SAVE_IRC_LINK_PASSWORD="${IRC_LINK_PASSWORD:-}"
+_SAVE_TAILSCALE_AUTH_KEY="${TAILSCALE_AUTH_KEY:-}"
+
 load_env "$ENV_TEMPLATE"
+
+# Restore caller-provided secrets (load_env clobbers them with .env.example defaults)
+[ -n "$_SAVE_ROUTER_PASSWORD" ] && ROUTER_PASSWORD="$_SAVE_ROUTER_PASSWORD"
+[ -n "$_SAVE_IRC_LINK_PASSWORD" ] && IRC_LINK_PASSWORD="$_SAVE_IRC_LINK_PASSWORD"
+[ -n "$_SAVE_TAILSCALE_AUTH_KEY" ] && TAILSCALE_AUTH_KEY="$_SAVE_TAILSCALE_AUTH_KEY"
 
 
 # ---- Prompt for secrets ----
 
 # Router password
 if [ -z "${ROUTER_PASSWORD:-}" ] || [ "$ROUTER_PASSWORD" = "CHANGE_ME_BEFORE_DEPLOY" ]; then
+    if [ "$AUTO_YES" = true ]; then
+        echo -e "${RED}Error: ROUTER_PASSWORD not set. Provide via environment or run without --yes.${NC}"
+        exit 1
+    fi
     echo ""
     echo -e "${BOLD}Set passwords for this deployment:${NC}"
     echo -e "${YELLOW}(These are baked into the SD card — same values for all nodes)${NC}"
@@ -568,18 +582,23 @@ fi
 
 # IRC link password
 if [ -z "${IRC_LINK_PASSWORD:-}" ] || [ "$IRC_LINK_PASSWORD" = "CHANGE_ME_BEFORE_DEPLOY" ]; then
+    if [ "$AUTO_YES" = true ]; then
+        echo -e "${RED}Error: IRC_LINK_PASSWORD not set. Provide via environment or run without --yes.${NC}"
+        exit 1
+    fi
     read -rsp "  IRC federation password (same on ALL nodes): " IRC_LINK_PASSWORD
     echo ""
 fi
 
-# Tailscale auth key
-if [ -z "${TAILSCALE_AUTH_KEY:-}" ]; then
+# Tailscale auth key (optional — skip silently with --yes)
+if [ -z "${TAILSCALE_AUTH_KEY:-}" ] && [ "$AUTO_YES" != true ]; then
     echo ""
     echo -e "  ${CYAN}Tailscale auth key (optional — enables remote SSH access)${NC}"
     echo -e "  ${CYAN}Generate at: https://login.tailscale.com/admin/settings/keys${NC}"
     echo -e "  ${CYAN}Use a reusable key so multiple Pis can join.${NC}"
     read -rp "  Tailscale auth key (or press Enter to skip): " TAILSCALE_AUTH_KEY
 fi
+TAILSCALE_AUTH_KEY="${TAILSCALE_AUTH_KEY:-}"
 
 # ---- macOS boot-partition staging: branch here ----
 if [ "$BOOT_STAGING" = true ]; then
