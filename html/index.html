@@ -65,19 +65,18 @@
       font-family: 'Courier New', 'Liberation Mono', monospace;
       background: var(--bg-primary);
       color: var(--text-primary);
-      /* Use real visual viewport on mobile */
+      /* Use real visual viewport on mobile — never exceed it */
       height: calc(var(--vh) * 100);
-      min-height: 100vh;
+      max-height: calc(var(--vh) * 100);
       font-size: 14px;
       line-height: 1.0;
-      /* Let the page scroll if it needs to; main chat area scrolls independently */
       overflow: hidden;
       transition: background-color 0.3s ease, color 0.3s ease;
     }
 
     .irssi-terminal {
       height: calc(var(--vh) * 100);
-      min-height: 100vh;
+      max-height: calc(var(--vh) * 100);
       display: flex;
       flex-direction: column;
     }
@@ -198,15 +197,12 @@
       background: var(--bg-primary);
       color: var(--text-secondary);
       padding: 0 1ch;
-      height: calc(1.2em + env(safe-area-inset-bottom));
+      min-height: 1.2em;
       line-height: 1.2em;
       display: flex;
       align-items: center;
       border-top: 1px solid var(--border-color);
-      /* Keep visible on mobile while scrolling */
-      position: sticky;
-      bottom: 0;
-      z-index: 2;
+      flex-shrink: 0;
       padding-bottom: env(safe-area-inset-bottom);
     }
     .input-prompt { color: var(--text-secondary); white-space: pre; }
@@ -278,17 +274,28 @@
   </div>
 
   <script>
-    // Visual viewport fix for mobile (keeps input bar visible)
+    // Visual viewport fix for mobile (keeps input bar visible when keyboard opens)
     function setRealVh() {
       const vh = window.visualViewport ? window.visualViewport.height * 0.01 : window.innerHeight * 0.01;
       document.documentElement.style.setProperty('--vh', `${vh}px`);
+      // On iOS, the visual viewport may scroll — reset to top
+      if (window.visualViewport && window.visualViewport.offsetTop > 0) {
+        window.scrollTo(0, 0);
+      }
     }
     setRealVh();
     window.addEventListener('resize', setRealVh);
-    window.addEventListener('orientationchange', setRealVh);
+    window.addEventListener('orientationchange', () => { setTimeout(setRealVh, 100); });
     if (window.visualViewport) {
       window.visualViewport.addEventListener('resize', setRealVh);
+      window.visualViewport.addEventListener('scroll', () => { window.scrollTo(0, 0); });
     }
+    // Prevent iOS from scrolling the page when focusing the input
+    document.addEventListener('focusin', (e) => {
+      if (e.target.classList.contains('input-field')) {
+        setTimeout(() => { window.scrollTo(0, 0); setRealVh(); }, 100);
+      }
+    });
 
     class ThemeManager {
       constructor() {

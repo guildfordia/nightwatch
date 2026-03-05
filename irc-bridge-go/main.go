@@ -55,17 +55,13 @@ var allowedOriginPrefixes = []string{
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
+	// Allow all origins: captive portal DNS hijacking means browsers send
+	// origins like "http://detectportal.firefox.com" or other connectivity
+	// check domains that would never match a static allowlist. Since this
+	// runs on an isolated mesh network with no internet, there's no
+	// cross-site risk to defend against.
 	CheckOrigin: func(r *http.Request) bool {
-		origin := r.Header.Get("Origin")
-		if origin == "" {
-			return true
-		}
-		for _, prefix := range allowedOriginPrefixes {
-			if strings.HasPrefix(origin, prefix) {
-				return true
-			}
-		}
-		return false
+		return true
 	},
 }
 

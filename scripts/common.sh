@@ -110,8 +110,8 @@ generate_dnsmasq_conf() {
     local conf_path="$1"
     local node_num="$2"
     local mesh_ip="${3%/*}"  # strip CIDR suffix if present
-    local dhcp_start=$((200 + (node_num - 1) * 2 + 1))
-    local dhcp_end=$((200 + (node_num - 1) * 2 + 2))
+    local dhcp_start=$((200 + (node_num - 1) * 5 + 1))
+    local dhcp_end=$((200 + (node_num - 1) * 5 + 5))
 
     mkdir -p "$(dirname "$conf_path")"
 
@@ -123,8 +123,9 @@ generate_dnsmasq_conf() {
 interface=br0
 bind-interfaces
 
-# DHCP range for WiFi clients (each node gets 2 addresses to avoid conflicts)
-# 20 nodes × 2 = 40 addresses → .201-.240 (all valid)
+# DHCP range for WiFi clients (each node gets 5 addresses to avoid conflicts)
+# Batman-adv bridges all routers, so DHCP broadcasts reach every node's dnsmasq.
+# Non-overlapping ranges prevent duplicate leases: 20 nodes × 5 = .201-.240+
 dhcp-range=192.168.199.${dhcp_start},192.168.199.${dhcp_end},255.255.255.0,1h
 
 # Tell clients to use this node as gateway and DNS

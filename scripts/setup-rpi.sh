@@ -253,8 +253,8 @@ fi
 # Generate dnsmasq config for client DHCP + captive portal
 echo "[+] Generating dnsmasq config..."
 generate_dnsmasq_conf "$INSTALL_DIR/dnsmasq/dnsmasq.conf" "$NODE_NUM" "$MESH_IP"
-DHCP_START=$((200 + (NODE_NUM - 1) * 2 + 1))
-DHCP_END=$((200 + (NODE_NUM - 1) * 2 + 2))
+DHCP_START=$((200 + (NODE_NUM - 1) * 5 + 1))
+DHCP_END=$((200 + (NODE_NUM - 1) * 5 + 5))
 echo "[+] dnsmasq.conf generated (DHCP: .${DHCP_START}-.${DHCP_END})"
 
 # ---- Step 7: Install systemd services ----

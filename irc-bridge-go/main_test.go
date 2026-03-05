@@ -455,6 +455,8 @@ func TestUpgraderAllowsAllOrigins(t *testing.T) {
 		"http://192.168.199.101",
 		"http://localhost",
 		"http://nightwatch.local",
+		"http://detectportal.firefox.com",
+		"http://connectivitycheck.gstatic.com",
 	}
 	for _, origin := range origins {
 		req := httptest.NewRequest("GET", "/", nil)
