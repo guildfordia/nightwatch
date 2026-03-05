@@ -17,6 +17,7 @@
 #   9. Install all systemd services (nodeconfig, mesh, discovery, docker)
 #  10. Build Docker images
 #  11. Start everything
+#  11b. Resolve node number conflicts (MAC-based reassignment)
 #  12. Disable this firstboot service
 #
 # Designed for the "flash and forget" workflow:
@@ -389,6 +390,66 @@ echo "[+] Starting Docker services..."
 $DC --env-file .env up -d
 sleep 3
 echo "[+] Services started"
+
+# ---- Step 11b: Resolve node number conflicts ----
+# On first boot, nodeconfig runs before other nodes have their mesh up,
+# so every node picks #1. Now that mesh is live, use deterministic
+# MAC-based sorting to assign unique numbers (same algorithm as
+# nodeconfig.sh scan_mesh).
+
+echo ""
+echo "[11b/12] Checking for node number conflicts..."
+
+PEER_WAIT=0
+PEER_COUNT=0
+while [ "$PEER_WAIT" -lt 120 ]; do
+    PEER_COUNT=$(batctl meshif bat0 n 2>/dev/null | tail -n +3 | grep -c . || true)
+    PEER_COUNT=${PEER_COUNT:-0}
+    if [ "$PEER_COUNT" -gt 0 ]; then
+        break
+    fi
+    sleep 10
+    PEER_WAIT=$((PEER_WAIT + 10))
+done
+
+if [ "$PEER_COUNT" -gt 0 ]; then
+    echo "[+] Mesh has $PEER_COUNT neighbor(s) — verifying node assignment..."
+
+    # Determine correct node number using MAC-based sorting
+    OUR_MAC=$(cat "/sys/class/net/${MESH_IFACE:-wlan1}/address" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
+    NEIGHBOR_MACS=$(batctl meshif bat0 n 2>/dev/null | tail -n +3 | awk '{print $2}' | tr '[:upper:]' '[:lower:]' | sort || true)
+
+    if [ -n "$OUR_MAC" ] && [ -n "$NEIGHBOR_MACS" ]; then
+        ALL_MACS=$(printf '%s\n%s' "$OUR_MAC" "$NEIGHBOR_MACS" | sort)
+        OUR_POSITION=1
+        while IFS= read -r mac; do
+            if [ "$mac" = "$OUR_MAC" ]; then
+                break
+            fi
+            OUR_POSITION=$((OUR_POSITION + 1))
+        done <<< "$ALL_MACS"
+
+        CURRENT_NUM="${PI_NUMBER:-1}"
+        if [ "$OUR_POSITION" != "$CURRENT_NUM" ]; then
+            echo "[!] Conflict: currently #$CURRENT_NUM, should be #$OUR_POSITION (MAC sort)"
+            echo "[+] Reassigning to node #$OUR_POSITION..."
+            # Pre-generate dnsmasq config so mesh restart picks it up
+            NEW_MESH_IP=$(mesh_ip_for_node "$OUR_POSITION")
+            generate_dnsmasq_conf "$NIGHTWATCH_DIR/dnsmasq/dnsmasq.conf" "$OUR_POSITION" "$NEW_MESH_IP"
+            # Write correct number — nodeconfig detects the change and
+            # regenerates .env, ngircd.conf, hostname, restarts services
+            echo "$OUR_POSITION" > "$NIGHTWATCH_DIR/.node-number"
+            "$NIGHTWATCH_DIR/scripts/nodeconfig.sh"
+            # Reload .env so stamp file and summary use updated values
+            load_env "$NIGHTWATCH_DIR/.env"
+            echo "[+] Reassigned to Pi #${PI_NUMBER} (${MESH_IP})"
+        else
+            echo "[+] Node #$CURRENT_NUM confirmed — no conflict"
+        fi
+    fi
+else
+    echo "[+] Solo node (no mesh peers yet) — keeping node #${PI_NUMBER:-1}"
+fi
 
 # ---- Step 12: Mark complete & disable firstboot ----
 
