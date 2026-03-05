@@ -204,12 +204,20 @@ setup_client_bridge() {
         ip route del default dev "$AP_IFACE" 2>/dev/null || true
         echo "[+] Removed default route via $AP_IFACE (no internet on router)"
     fi
-    # Make it persistent via NetworkManager
+
+    # Tell NetworkManager to stop managing eth0 entirely.
+    # Without this, NM's netplan-eth0 connection runs DHCP on eth0; when DHCP
+    # fails (no server on the router side), NM detaches eth0 from br0, breaking
+    # the captive portal. On dhcpcd systems this is handled by denyinterfaces.
     if command -v nmcli >/dev/null 2>&1; then
+        # Deactivate any active NM connection on eth0 first
         ETH_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep "$AP_IFACE" | head -1 | cut -d: -f1)
         if [ -n "$ETH_CON" ]; then
-            nmcli con mod "$ETH_CON" ipv4.never-default yes 2>/dev/null || true
+            nmcli con down "$ETH_CON" 2>/dev/null || true
+            echo "[+] Deactivated NM connection '$ETH_CON' on $AP_IFACE"
         fi
+        nmcli dev set "$AP_IFACE" managed no 2>/dev/null || true
+        echo "[+] NetworkManager: $AP_IFACE set to unmanaged"
     fi
 
     # Remove any existing bridge

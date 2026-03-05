@@ -237,14 +237,32 @@ DENYEOF
         fi
         systemctl restart dhcpcd 2>/dev/null || true
     elif command -v nmcli >/dev/null 2>&1; then
+        # eth0 is a bridge port (br0 = bat0 + eth0). NetworkManager must NOT
+        # manage eth0, otherwise it runs DHCP, fails, and detaches eth0 from
+        # br0 — breaking the captive portal. Use a persistent udev-style
+        # unmanaged rule so NM ignores eth0 across reboots.
+        mkdir -p /etc/NetworkManager/conf.d
+        cat > /etc/NetworkManager/conf.d/nightwatch-unmanaged.conf << 'NMEOF'
+# Nightwatch: eth0 and bat0 are bridge ports managed by mesh-fix.sh
+[keyfile]
+unmanaged-devices=interface-name:eth0;interface-name:bat0;interface-name:br0
+NMEOF
+        echo "[+] NetworkManager: eth0/bat0/br0 set as permanently unmanaged"
+
+        # Deactivate any existing NM connection on eth0
         local ETH_CON
         ETH_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep 'eth0' | head -1 | cut -d: -f1)
         if [ -n "$ETH_CON" ]; then
-            nmcli con mod "$ETH_CON" ipv4.never-default yes 2>/dev/null || true
-            nmcli con mod "$ETH_CON" ipv4.dns "8.8.8.8 1.1.1.1" 2>/dev/null || true
-            nmcli con up "$ETH_CON" 2>/dev/null || true
-            echo "[+] NetworkManager: eth0 ($ETH_CON) — never-default route, DNS 8.8.8.8 + 1.1.1.1"
+            nmcli con down "$ETH_CON" 2>/dev/null || true
+            # Prevent auto-activation
+            nmcli con mod "$ETH_CON" connection.autoconnect no 2>/dev/null || true
+            echo "[+] Disabled auto-connect for NM connection '$ETH_CON'"
         fi
+        nmcli dev set eth0 managed no 2>/dev/null || true
+
+        # Reload NM config so unmanaged rule takes effect
+        systemctl reload NetworkManager 2>/dev/null || nmcli general reload 2>/dev/null || true
+
         mkdir -p /etc/systemd/resolved.conf.d
         cat > /etc/systemd/resolved.conf.d/nightwatch-fallback.conf << 'DNSEOF'
 [Resolve]

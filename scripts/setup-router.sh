@@ -54,7 +54,7 @@ fi
 
 # Validate inputs to prevent shell injection in UCI commands sent over SSH
 # Reject characters that would be interpreted by remote shell: ' \ $ ` " !
-UNSAFE_CHARS='[\x27\\$`"!]'
+UNSAFE_CHARS=$'[\'\\\\$`"!]'
 if [[ "$WIFI_SSID" =~ $UNSAFE_CHARS ]]; then
     echo -e "${RED}Error: WIFI_SSID contains unsafe characters (no quotes, $, backticks, !, or backslashes)${NC}"
     exit 1
