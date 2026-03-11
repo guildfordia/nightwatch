@@ -13,6 +13,8 @@ RestartSec=5
 StandardOutput=journal
 StandardError=journal
 
+# Bridge connects to local ngircd (not Docker DNS)
+Environment=IRC_SERVER=127.0.0.1:6667
 # Bridge data directory for nick counter persistence
 Environment=DATA_DIR=/opt/nightwatch/irc-bridge-go/data
 
