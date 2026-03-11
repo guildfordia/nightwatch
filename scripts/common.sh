@@ -2,7 +2,6 @@
 # Nightwatch — Shared helper library
 #
 # Sourced by all scripts that need common patterns:
-#   - Docker Compose detection
 #   - .env file loading
 #   - ngircd.conf base template generation
 #   - Mesh IP calculation
@@ -14,17 +13,6 @@
 
 # Maximum number of nodes in the mesh (IPs .101-.120)
 MAX_NODES=20
-
-# detect_docker_compose — sets DC to "docker compose" or "docker-compose"
-detect_docker_compose() {
-    if docker compose version >/dev/null 2>&1; then
-        DC="docker compose"
-    elif command -v docker-compose >/dev/null 2>&1; then
-        DC="docker-compose"
-    else
-        DC="docker compose"
-    fi
-}
 
 # load_env <path> — loads .env file with allexport, exits on missing file
 load_env() {
@@ -169,7 +157,7 @@ set_env_value() {
     fi
 
     # Wrap in single quotes if value contains shell-sensitive characters
-    # Simple single quotes work for both bash `source` and Docker Compose .env
+    # Simple single quotes work for both bash `source` and .env loading
     local quoted_value="$value"
     if [[ "$value" == *'$'* ]] || [[ "$value" == *'`'* ]] || [[ "$value" == *'\'* ]] || [[ "$value" == *'"'* ]] || [[ "$value" == *'!'* ]] || [[ "$value" == *"'"* ]]; then
         quoted_value="'$value'"
@@ -190,6 +178,33 @@ set_env_value() {
         # Append new key
         printf '%s=%s\n' "$key" "$quoted_value" >> "$file"
     fi
+}
+
+# resolve_node_mode — sets NODE_MODE from env, with backward compat for MESH_GATEWAY
+# Valid modes: mesh (default), gateway, sound-bridge
+# If NODE_MODE is not set but MESH_GATEWAY=true, maps to gateway mode.
+resolve_node_mode() {
+    local mode="${NODE_MODE:-}"
+
+    # Backward compat: MESH_GATEWAY=true → gateway mode
+    if [ -z "$mode" ] && [ "${MESH_GATEWAY:-false}" = "true" ]; then
+        mode="gateway"
+    fi
+
+    # Default to mesh
+    mode="${mode:-mesh}"
+
+    # Validate
+    case "$mode" in
+        mesh|gateway|sound-bridge) ;;
+        *)
+            echo "resolve_node_mode: unknown mode '$mode' (valid: mesh, gateway, sound-bridge)" >&2
+            mode="mesh"
+            ;;
+    esac
+
+    NODE_MODE="$mode"
+    export NODE_MODE
 }
 
 # check_deps <cmd1> [cmd2] ... — verifies required commands exist, exits with message if missing
@@ -299,7 +314,7 @@ install_systemd_services() {
 
     chmod +x "$project_dir"/scripts/*.sh 2>/dev/null || true
 
-    for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch-docker; do
+    for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch-docker nightwatch-bridge nightwatch-led nightwatch-debug; do
         local src="$project_dir/scripts/${svc}.service"
         if [ -f "$src" ]; then
             sed "s|/opt/nightwatch|$project_dir|g" "$src" > "/etc/systemd/system/${svc}.service"
@@ -316,6 +331,9 @@ install_systemd_services() {
     systemctl enable nightwatch-mesh.service
     systemctl enable nightwatch-discovery.service
     systemctl enable nightwatch-docker.service
+    systemctl enable nightwatch-bridge.service
+    systemctl enable nightwatch-led.service
+    systemctl enable nightwatch-debug.service
 
     echo "[+] Systemd services installed and enabled"
 }

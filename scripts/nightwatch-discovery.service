@@ -2,6 +2,7 @@
 Description=Nightwatch Node Discovery (UDP broadcast)
 After=nightwatch-mesh.service
 Requires=nightwatch-mesh.service
+PartOf=nightwatch-mesh.service
 
 [Service]
 Type=simple

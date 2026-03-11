@@ -6,11 +6,11 @@
 #   1. Local mesh health (batman-adv, 802.11s, interfaces)
 #   2. Node discovery (ping all configured nodes, find who's online)
 #   3. batman-adv topology (neighbors, originators)
-#   4. Docker services (local + remote live nodes)
+#   4. App services (local + remote live nodes)
 #   5. IRC cross-node messaging (if >1 node online)
 #   6. Access point status
 #   7. Gateway / internet connectivity
-#   8. Local Docker container health
+#   8. Local service health
 #
 # Usage: sudo ./scripts/test-mesh.sh [--quick]
 #   --quick  Skip slow tests (cross-node IRC, latency matrix)
@@ -68,7 +68,6 @@ BR_IFACE="${BR_IFACE:-br0}"
 MESH_IFACE="${MESH_IFACE:-wlan1}"
 AP_IFACE="${AP_IFACE:-eth0}"
 IRC_PORT="${IRC_PORT:-6667}"
-BRIDGE_PORT="${BRIDGE_PORT:-8080}"
 NGINX_PORT="${NGINX_PORT:-80}"
 LOCAL_IP="${MESH_IP%/*}"
 
@@ -84,9 +83,11 @@ echo "======================================"
 echo "  Nightwatch Mesh Integration Test"
 echo "======================================"
 echo ""
+resolve_node_mode
 echo "  This node:  $LOCAL_IP (node #${PI_NUMBER:-?})"
+echo "  Node mode:  $NODE_MODE"
 echo "  Scanning:   192.168.199.101-$((100 + MAX_NODES)) (max $MAX_NODES nodes)"
-echo "  Mode:       $([ "$QUICK_MODE" = true ] && echo 'quick' || echo 'full')"
+echo "  Test mode:  $([ "$QUICK_MODE" = true ] && echo 'quick' || echo 'full')"
 echo ""
 
 # ---- Check we're running as root ----
@@ -94,6 +95,46 @@ echo ""
 if [ "$(id -u)" -ne 0 ]; then
     echo -e "${YELLOW}Warning: some tests require root. Run with sudo for full coverage.${NC}"
     echo ""
+fi
+
+# ============================================================
+# 0. Hardware & System
+# ============================================================
+
+section "0. Hardware & System"
+
+# USB WiFi dongle (AR9271) detected
+if lsusb 2>/dev/null | grep -q "0cf3:9271"; then
+    pass "USB WiFi dongle (AR9271) detected"
+elif ip link show "$MESH_IFACE" >/dev/null 2>&1; then
+    pass "Mesh interface $MESH_IFACE present (dongle detected)"
+else
+    fail "USB WiFi dongle (AR9271) not detected"
+fi
+
+# Disk space — warn if root partition is >90% full
+DISK_USAGE=$(df / 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}' || echo "0")
+if [ "$DISK_USAGE" -lt 90 ]; then
+    pass "Disk usage: ${DISK_USAGE}%"
+elif [ "$DISK_USAGE" -lt 95 ]; then
+    warn "Disk usage high: ${DISK_USAGE}%"
+else
+    fail "Disk nearly full: ${DISK_USAGE}%"
+fi
+
+# Internet connectivity (via wlan0 or default route, not mesh)
+if ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
+    pass "Internet reachable (ping 8.8.8.8)"
+else
+    warn "No internet (8.8.8.8 unreachable — Tailscale/apt/git won't work)"
+fi
+
+# Ethernet link state
+ETH_STATE=$(cat /sys/class/net/"$AP_IFACE"/operstate 2>/dev/null || echo "unknown")
+if [ "$ETH_STATE" = "up" ]; then
+    pass "$AP_IFACE link: up"
+else
+    warn "$AP_IFACE link: $ETH_STATE (router may be off)"
 fi
 
 # ============================================================
@@ -153,7 +194,7 @@ fi
 
 # batman-adv gateway mode
 gw_mode=$(batctl meshif "$BAT_IFACE" gw_mode 2>/dev/null || batctl gw_mode 2>/dev/null || echo "unknown")
-if [ "${MESH_GATEWAY:-false}" = "true" ]; then
+if [ "$NODE_MODE" = "gateway" ]; then
     if echo "$gw_mode" | grep -qi "server"; then
         pass "Gateway mode: server (as configured)"
     else
@@ -161,7 +202,7 @@ if [ "${MESH_GATEWAY:-false}" = "true" ]; then
     fi
 else
     if echo "$gw_mode" | grep -qi "client\|off"; then
-        pass "Gateway mode: client (as configured)"
+        pass "Gateway mode: client (as configured — mode: $NODE_MODE)"
     else
         warn "Gateway mode unexpected: $gw_mode"
     fi
@@ -359,10 +400,24 @@ else
 fi
 
 # ============================================================
-# 6. Docker Services (local + live remote nodes)
+# 6. App Services (local + live remote nodes)
 # ============================================================
 
-section "6. Docker Services"
+section "6. App Services"
+
+# Wait for services to be ready before testing ports (prevents false fails
+# when tests run right after startup)
+for _wait_attempt in 1 2 3 4 5 6; do
+    _all_ready=true
+    for _svc in ngircd nightwatch-bridge nginx; do
+        if ! systemctl is-active --quiet "$_svc" 2>/dev/null; then
+            _all_ready=false
+            break
+        fi
+    done
+    $_all_ready && break
+    [ "$_wait_attempt" -lt 6 ] && sleep 10
+done
 
 # Local services
 echo -e "  ${BOLD}$LOCAL_IP (this node) — local:${NC}"
@@ -373,7 +428,7 @@ else
     fail "  IRC (port $IRC_PORT) not reachable"
 fi
 
-health=$(timeout 5 docker exec irc-bridge wget -qO- http://localhost:3000/health 2>/dev/null || echo "")
+health=$(curl -sf --max-time 3 http://localhost:3000/health 2>/dev/null || echo "")
 if [ "$health" = "OK" ]; then
     pass "  Bridge /health returns OK"
 else
@@ -440,7 +495,7 @@ if [ "$QUICK_MODE" = false ] && [ ${#LIVE_IPS[@]} -gt 0 ]; then
     else
         # Pre-check: verify IRC servers are actually federated before messaging test
         FED_OK=true
-        irc_logs=$(docker logs ngircd --since 5m 2>&1 || true)
+        irc_logs=$(journalctl -u ngircd --no-pager --since "5 minutes ago" 2>&1 || true)
 
         # Check for bad password errors (federation broken)
         if echo "$irc_logs" | grep -q "Bad password"; then
@@ -557,12 +612,26 @@ if [ -d "/sys/class/net/$BR_IFACE" ]; then
         fail "$BAT_IFACE not in $BR_IFACE (mesh traffic won't reach bridge)"
     fi
 
-    # Check eth0 is a bridge port
-    if [ -d "/sys/class/net/$BR_IFACE/brif/$AP_IFACE" ]; then
-        pass "$AP_IFACE is a port of $BR_IFACE"
+    # Check eth0 is a bridge port (not expected in sound-bridge mode)
+    if [ "$NODE_MODE" = "sound-bridge" ]; then
+        if [ -d "/sys/class/net/$BR_IFACE/brif/$AP_IFACE" ]; then
+            warn "$AP_IFACE should NOT be in $BR_IFACE in sound-bridge mode"
+        else
+            pass "$AP_IFACE correctly excluded from $BR_IFACE (sound-bridge mode)"
+        fi
+        # Check eth0 has the Mac Mini subnet IP
+        eth0_ip=$(ip -4 addr show dev "$AP_IFACE" 2>/dev/null | grep -oP 'inet \K[0-9.]+' || echo "")
+        if [ "$eth0_ip" = "10.0.0.1" ]; then
+            pass "$AP_IFACE has 10.0.0.1 (Mac Mini subnet)"
+        else
+            fail "$AP_IFACE should have 10.0.0.1 but has '$eth0_ip'"
+        fi
     else
-        # eth0 role varies (router AP, Mac Mini, or unplugged) — warn, don't fail
-        warn "$AP_IFACE not in $BR_IFACE (run: sudo ip link set $AP_IFACE master $BR_IFACE)"
+        if [ -d "/sys/class/net/$BR_IFACE/brif/$AP_IFACE" ]; then
+            pass "$AP_IFACE is a port of $BR_IFACE"
+        else
+            warn "$AP_IFACE not in $BR_IFACE (run: sudo ip link set $AP_IFACE master $BR_IFACE)"
+        fi
     fi
 else
     fail "$BR_IFACE bridge not found (eth0 and bat0 are not bridged)"
@@ -574,7 +643,7 @@ fi
 
 section "9. Gateway & Internet"
 
-if [ "${MESH_GATEWAY:-false}" = "true" ]; then
+if [ "$NODE_MODE" = "gateway" ]; then
     echo "  This node is configured as gateway"
 
     fwd=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo "0")
@@ -595,6 +664,21 @@ if [ "${MESH_GATEWAY:-false}" = "true" ]; then
     else
         fail "Internet not reachable from gateway"
     fi
+elif [ "$NODE_MODE" = "sound-bridge" ]; then
+    echo "  This node is configured as sound-bridge"
+
+    fwd=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo "0")
+    if [ "$fwd" = "1" ]; then
+        pass "IP forwarding enabled (mesh <-> Mac Mini)"
+    else
+        fail "IP forwarding disabled (sound-bridge needs it)"
+    fi
+
+    if ping -c 1 -W 2 10.0.0.2 >/dev/null 2>&1; then
+        pass "Mac Mini reachable at 10.0.0.2"
+    else
+        warn "Mac Mini not reachable at 10.0.0.2 (may not be connected)"
+    fi
 else
     if [ "$gw_count" -gt 0 ]; then
         pass "Gateway available in mesh ($gw_count gateway(s))"
@@ -609,21 +693,82 @@ else
 fi
 
 # ============================================================
-# 10. Local Docker Health
+# 10. Captive Portal & DNS
 # ============================================================
 
-section "10. Local Docker Health"
+section "10. Captive Portal & DNS"
 
-for svc in ngircd irc-bridge nginx; do
-    status=$(docker inspect --format='{{.State.Status}}' "$svc" 2>/dev/null || echo "not found")
-    health=$(docker inspect --format='{{.State.Health.Status}}' "$svc" 2>/dev/null || echo "none")
+# dnsmasq running
+DNSMASQ_PID="/var/run/dnsmasq-nightwatch.pid"
+if [ -f "$DNSMASQ_PID" ] && kill -0 "$(cat "$DNSMASQ_PID" 2>/dev/null)" 2>/dev/null; then
+    pass "dnsmasq running (PID $(cat "$DNSMASQ_PID"))"
+else
+    fail "dnsmasq not running"
+fi
 
-    if [ "$status" = "running" ] && [ "$health" = "healthy" ]; then
-        pass "$svc: running + healthy"
-    elif [ "$status" = "running" ]; then
-        warn "$svc: running but health=$health"
+# Use iptables -S for exact rule matching (includes interface spec)
+IPTABLES_NAT=$(iptables -t nat -S PREROUTING 2>/dev/null || true)
+
+# iptables DNS redirect (port 53 on br0)
+if echo "$IPTABLES_NAT" | grep -q "\-i $BR_IFACE.*--dport 53.*DNAT"; then
+    pass "iptables DNS redirect active (port 53 on $BR_IFACE)"
+else
+    fail "iptables DNS redirect missing (port 53 on $BR_IFACE)"
+fi
+
+# iptables HTTP redirect (port 80 on br0)
+if echo "$IPTABLES_NAT" | grep -q "\-i $BR_IFACE.*--dport 80.*DNAT"; then
+    pass "iptables HTTP redirect active (port 80 on $BR_IFACE)"
+else
+    fail "iptables HTTP redirect missing (port 80 on $BR_IFACE)"
+fi
+
+# NO port 443 DNAT rule on br0 (causes "requires secure connection" error)
+if echo "$IPTABLES_NAT" | grep -q "\-i $BR_IFACE.*--dport 443.*DNAT"; then
+    fail "iptables HTTPS redirect present on port 443 (should be removed)"
+else
+    pass "No port 443 DNAT rule on $BR_IFACE (correct)"
+fi
+
+# DNS resolution — all domains should resolve to local IP
+DNS_RESULT=$(dig +short @"$LOCAL_IP" google.com A 2>/dev/null || nslookup google.com "$LOCAL_IP" 2>/dev/null | grep -oP 'Address: \K[0-9.]+' | tail -1 || echo "")
+if [ "$DNS_RESULT" = "$LOCAL_IP" ]; then
+    pass "DNS captive portal: google.com resolves to $LOCAL_IP"
+elif [ -n "$DNS_RESULT" ]; then
+    fail "DNS captive portal: google.com resolves to $DNS_RESULT (expected $LOCAL_IP)"
+else
+    # Try with host command as fallback
+    DNS_RESULT2=$(host google.com "$LOCAL_IP" 2>/dev/null | grep -oP 'address \K[0-9.]+' | head -1 || echo "")
+    if [ "$DNS_RESULT2" = "$LOCAL_IP" ]; then
+        pass "DNS captive portal: google.com resolves to $LOCAL_IP"
     else
-        fail "$svc: status=$status"
+        warn "DNS resolution test inconclusive (dig/nslookup/host not available or failed)"
+    fi
+fi
+
+# DHCP leases — check dnsmasq is handing out leases
+LEASE_FILE="/var/lib/misc/dnsmasq.leases"
+if [ -f "$LEASE_FILE" ]; then
+    LEASE_COUNT=$(wc -l < "$LEASE_FILE" 2>/dev/null || echo "0")
+    pass "DHCP lease file exists ($LEASE_COUNT active lease(s))"
+else
+    skip "No DHCP leases yet (no clients have connected)"
+fi
+
+# ============================================================
+# 11. Local Service Health
+# ============================================================
+
+section "11. Local Service Health"
+
+for svc in ngircd nightwatch-bridge nginx; do
+    state=$(systemctl is-active "$svc" 2>/dev/null || echo "not found")
+    if [ "$state" = "active" ]; then
+        pass "$svc: active"
+    elif [ "$state" = "activating" ]; then
+        warn "$svc: still starting"
+    else
+        fail "$svc: $state"
     fi
 done
 

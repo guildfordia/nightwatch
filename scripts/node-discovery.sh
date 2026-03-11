@@ -42,8 +42,6 @@ SERVER_NAME="node${NODE_NUM}.nightwatch.irc"
 IRC_LINK_PASSWORD="${IRC_LINK_PASSWORD:-nightwatch-mesh-link}"
 BROADCAST_IP="192.168.199.255"
 
-detect_docker_compose
-
 CONFLICT_FILE="/tmp/nightwatch-conflict"
 
 log() { echo "[discovery] $(date '+%H:%M:%S') $1"; }
@@ -56,8 +54,10 @@ log() { echo "[discovery] $(date '+%H:%M:%S') $1"; }
 send_beacons() {
     while true; do
         PAYLOAD="NIGHTWATCH|${NODE_NUM}|${LOCAL_IP}|${SERVER_NAME}|$(date +%s)"
-        # Send UDP broadcast on bat0
-        echo "$PAYLOAD" | socat - UDP4-DATAGRAM:${BROADCAST_IP}:${DISCOVERY_PORT},broadcast,interface=${BAT_IFACE} 2>/dev/null || \
+        # Send on br0 (where MESH_IP lives) — bat0 is a virtual L2 interface with
+        # no IP, so interface=bat0 can fail. Fall back to bat0 then /dev/udp.
+        echo "$PAYLOAD" | socat - UDP4-DATAGRAM:${BROADCAST_IP}:${DISCOVERY_PORT},broadcast,interface=br0 2>/dev/null || \
+            echo "$PAYLOAD" | socat - UDP4-DATAGRAM:${BROADCAST_IP}:${DISCOVERY_PORT},broadcast,interface=${BAT_IFACE} 2>/dev/null || \
             echo "$PAYLOAD" > /dev/udp/${BROADCAST_IP}/${DISCOVERY_PORT} 2>/dev/null || true
         sleep "$BEACON_INTERVAL"
     done
@@ -184,6 +184,7 @@ EOF
 
 # ---- Update IRC config if peer list changed ----
 LAST_PEER_HASH=""
+LAST_PEER_COUNT=0
 update_irc_config() {
     # Hash current peer file to detect changes (exclude timestamp field
     # so that beacon refreshes don't trigger unnecessary restarts)
@@ -191,19 +192,29 @@ update_irc_config() {
     if [ "$CURRENT_HASH" = "$LAST_PEER_HASH" ]; then
         return
     fi
-    LAST_PEER_HASH="$CURRENT_HASH"
 
     PEER_COUNT=$(wc -l < "$PEER_FILE" 2>/dev/null || echo "0")
+    PEER_COUNT=$((PEER_COUNT + 0))
+    local PREV_COUNT=$LAST_PEER_COUNT
+
+    LAST_PEER_HASH="$CURRENT_HASH"
+    LAST_PEER_COUNT=$PEER_COUNT
+
     log "Peer list changed ($PEER_COUNT peers) — regenerating ngircd.conf"
 
     generate_irc_config
 
-    # Restart ngircd container to pick up new config.
-    # Note: SIGHUP only reloads [Global]/[Options]/[Channel] settings —
-    # new [Server] blocks (federation links) require a full restart.
-    if timeout 5 docker ps --format '{{.Names}}' 2>/dev/null | grep -q ngircd; then
-        timeout 30 docker restart ngircd 2>/dev/null || true
-        log "Restarted ngircd container (federation config updated)"
+    # Only restart ngircd when peers are ADDED (new [Server] blocks need a
+    # full restart). When peers are removed, just regenerate the config —
+    # ngircd will stop retrying the dead peer on its own, and restarting
+    # would kill all active client connections for no benefit.
+    if [ "$PEER_COUNT" -gt "$PREV_COUNT" ]; then
+        if systemctl is-active --quiet ngircd 2>/dev/null; then
+            systemctl restart ngircd 2>/dev/null || true
+            log "Restarted ngircd (new peer added)"
+        fi
+    else
+        log "Peers removed — config updated, skipping ngircd restart (connections preserved)"
     fi
 }
 
@@ -240,8 +251,18 @@ case "${1:-start}" in
         expire_peers &
         EXPIRY_PID=$!
 
-        # Handle cleanup on exit
-        trap 'log "Stopping..."; kill $SENDER_PID $EXPIRY_PID 2>/dev/null; rm -f "$PID_FILE"; exit 0' SIGTERM SIGINT EXIT
+        # Handle cleanup on exit (guard prevents double-fire: SIGTERM calls
+        # exit 0, which triggers EXIT trap again → bash pop_var_context crash)
+        _cleanup_done=false
+        cleanup() {
+            $_cleanup_done && return
+            _cleanup_done=true
+            log "Stopping..."
+            kill $SENDER_PID $EXPIRY_PID 2>/dev/null || true
+            rm -f "$PID_FILE"
+        }
+        trap 'cleanup; exit 0' SIGTERM SIGINT
+        trap 'cleanup' EXIT
 
         # Receive beacons (blocking — this is the main loop)
         # Retry if socat dies (e.g., interface goes down temporarily)

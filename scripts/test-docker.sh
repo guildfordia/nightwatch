@@ -1,14 +1,15 @@
 #!/bin/bash
-# Nightwatch — Docker services test (tests RUNNING services)
+# Nightwatch — App services test (tests RUNNING services)
 #
 # Tests:
-#   1. All containers running
-#   2. Health checks passing
-#   3. IRC server accepting connections
-#   4. Bridge /health endpoint
-#   5. Nginx serving frontend
-#   6. Nginx proxying WebSocket path
-#   7. No fatal errors in logs
+#   1. All services running (ngircd, nightwatch-bridge, nginx)
+#   2. IRC server accepting connections
+#   3. Bridge /health endpoint
+#   4. Nginx serving frontend
+#   5. Nginx proxying WebSocket path
+#   6. No fatal errors in logs
+#   7. Captive portal probes
+#   8. Nick format
 #
 # Usage: ./scripts/test-docker.sh
 
@@ -32,72 +33,45 @@ skip() { ((SKIPPED++)) || true; echo -e "  ${YELLOW}[SKIP]${NC} $1"; }
 section() { echo ""; echo -e "${BOLD}${CYAN}== $1 ==${NC}"; }
 
 echo "======================================"
-echo "  Nightwatch Docker Tests"
+echo "  Nightwatch Service Tests"
 echo "======================================"
 
 # ---- Pre-flight ----
 
-if ! command -v docker >/dev/null 2>&1; then
-    echo -e "${RED}docker not found${NC}"
-    exit 1
-fi
-
-# Check services are running
-RUNNING=$(docker ps --format '{{.Names}}' 2>/dev/null | wc -l)
-if [ "$RUNNING" -eq 0 ]; then
-    echo -e "${RED}No Docker containers running. Run 'make run' first.${NC}"
+# Check services are enabled
+SERVICES_FOUND=0
+for svc in ngircd nightwatch-bridge nginx; do
+    if systemctl is-enabled --quiet "$svc" 2>/dev/null; then
+        SERVICES_FOUND=$((SERVICES_FOUND + 1))
+    fi
+done
+if [ "$SERVICES_FOUND" -eq 0 ]; then
+    echo -e "${RED}No Nightwatch services enabled. Run 'make install' first.${NC}"
     exit 1
 fi
 
 # ============================================================
-# 1. Container Status
+# 1. Service Status
 # ============================================================
 
-section "1. Container Status"
+section "1. Service Status"
 
-for svc in ngircd irc-bridge nginx; do
-    status=$(docker inspect --format='{{.State.Status}}' "$svc" 2>/dev/null || echo "not found")
-    if [ "$status" = "running" ]; then
-        uptime=$(docker inspect --format='{{.State.StartedAt}}' "$svc" 2>/dev/null | cut -dT -f1,2 || echo "?")
-        pass "$svc is running (since $uptime)"
+for svc in ngircd nightwatch-bridge nginx; do
+    if systemctl is-active --quiet "$svc" 2>/dev/null; then
+        # Get uptime from service start time
+        started=$(systemctl show -p ActiveEnterTimestamp --value "$svc" 2>/dev/null | cut -d' ' -f1,2 || echo "?")
+        pass "$svc is running (since $started)"
     else
-        fail "$svc status: $status"
+        state=$(systemctl is-active "$svc" 2>/dev/null || echo "not found")
+        fail "$svc status: $state"
     fi
 done
 
 # ============================================================
-# 2. Health Checks
+# 2. IRC Server
 # ============================================================
 
-section "2. Health Checks"
-
-for svc in ngircd irc-bridge nginx; do
-    health=$(docker inspect --format='{{.State.Health.Status}}' "$svc" 2>/dev/null || echo "none")
-    if [ "$health" = "healthy" ]; then
-        pass "$svc: healthy"
-    elif [ "$health" = "starting" ]; then
-        # Wait up to 30s
-        echo "  Waiting for $svc..."
-        for _ in $(seq 1 6); do
-            sleep 5
-            health=$(docker inspect --format='{{.State.Health.Status}}' "$svc" 2>/dev/null || echo "none")
-            [ "$health" = "healthy" ] && break
-        done
-        if [ "$health" = "healthy" ]; then
-            pass "$svc: healthy"
-        else
-            fail "$svc: $health (after 30s)"
-        fi
-    else
-        fail "$svc: $health"
-    fi
-done
-
-# ============================================================
-# 3. IRC Server
-# ============================================================
-
-section "3. IRC Server"
+section "2. IRC Server"
 
 # Port listening
 if nc -z localhost 6667 2>/dev/null; then
@@ -119,21 +93,22 @@ else
 fi
 
 # ============================================================
-# 4. Bridge Service
+# 3. Bridge Service
 # ============================================================
 
-section "4. IRC Bridge"
+section "3. IRC Bridge"
 
-# Health endpoint (bridge port not exposed — check inside container)
-HEALTH=$(timeout 5 docker exec irc-bridge wget -qO- http://localhost:3000/health 2>/dev/null || echo "")
+# Health endpoint (bridge listens on localhost:3000)
+HEALTH=$(curl -sf --max-time 3 http://localhost:3000/health 2>/dev/null || echo "")
 if [ "$HEALTH" = "OK" ]; then
-    pass "Bridge /health returns OK (via docker exec)"
+    pass "Bridge /health returns OK"
 else
-    fail "Bridge /health returned: '$HEALTH' (via docker exec)"
+    fail "Bridge /health returned: '$HEALTH'"
 fi
 
 # WebSocket endpoint via nginx proxy (should get upgrade required or bad request)
-WS_RESP=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" "http://localhost:${NGINX_PORT:-80}/ws" 2>/dev/null || echo "000")
+NGINX_PORT="${NGINX_PORT:-80}"
+WS_RESP=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" "http://localhost:${NGINX_PORT}/ws" 2>/dev/null || echo "000")
 if [ "$WS_RESP" = "400" ] || [ "$WS_RESP" = "426" ] || [ "$WS_RESP" = "200" ]; then
     pass "Bridge /ws responds via nginx (HTTP $WS_RESP)"
 else
@@ -141,12 +116,10 @@ else
 fi
 
 # ============================================================
-# 5. Nginx
+# 4. Nginx
 # ============================================================
 
-section "5. Nginx Web Server"
-
-NGINX_PORT=$(docker port nginx 2>/dev/null | grep 80 | head -1 | awk -F: '{print $NF}' || echo "80")
+section "4. Nginx Web Server"
 
 # Serves HTML
 NGINX_RESP=$(curl -s --max-time 3 "http://localhost:${NGINX_PORT}/" 2>/dev/null || echo "")
@@ -173,14 +146,15 @@ else
 fi
 
 # ============================================================
-# 6. Container Logs
+# 5. Service Logs
 # ============================================================
 
-section "6. Container Logs (error check)"
+section "5. Service Logs (error check)"
 
-for svc in ngircd irc-bridge nginx; do
-    fatal_count=$(docker logs "$svc" 2>&1 | grep -iE "fatal|panic|segfault|SIGSEGV" | grep -cvE "s6-" || true)
-    error_count=$(docker logs "$svc" 2>&1 | grep -ciE "^error|ERROR" || true)
+for svc in ngircd nightwatch-bridge nginx; do
+    logs=$(journalctl -u "$svc" --no-pager -n 200 2>/dev/null || echo "")
+    fatal_count=$(echo "$logs" | grep -ciE "fatal|panic|segfault|SIGSEGV" || true)
+    error_count=$(echo "$logs" | grep -ciE "^error|ERROR" || true)
     if [ "$fatal_count" -eq 0 ]; then
         if [ "$error_count" -gt 5 ]; then
             skip "$svc: no fatal errors ($error_count warnings)"
@@ -193,27 +167,78 @@ for svc in ngircd irc-bridge nginx; do
 done
 
 # ============================================================
-# 7. Docker Network
+# 6. Captive Portal Probes
 # ============================================================
 
-section "7. Docker Network"
+section "6. Captive Portal Probes"
 
-NETWORK=$(docker inspect --format='{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' ngircd 2>/dev/null || echo "")
-if [ -n "$NETWORK" ]; then
-    pass "Containers on network: $NETWORK"
+# iOS captive portal probe — must return "Success" (follow redirects with -L)
+IOS_RESP=$(curl -sL --max-time 3 "http://localhost:${NGINX_PORT}/hotspot-detect.html" 2>/dev/null || echo "")
+if echo "$IOS_RESP" | grep -q "Success"; then
+    pass "iOS probe /hotspot-detect.html returns 'Success'"
 else
-    fail "Could not detect Docker network"
+    fail "iOS probe /hotspot-detect.html missing 'Success' response"
 fi
 
-# Check all services on same network
-for svc in irc-bridge nginx; do
-    svc_net=$(docker inspect --format='{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' "$svc" 2>/dev/null || echo "")
-    if [ "$svc_net" = "$NETWORK" ]; then
-        pass "$svc on same network as ngircd"
+# Android captive portal probe — must return HTTP 204 (follow redirects)
+ANDROID_CODE=$(curl -sL --max-time 3 -o /dev/null -w "%{http_code}" "http://localhost:${NGINX_PORT}/generate_204" 2>/dev/null || echo "000")
+if [ "$ANDROID_CODE" = "204" ]; then
+    pass "Android probe /generate_204 returns HTTP 204"
+else
+    fail "Android probe /generate_204 returned HTTP $ANDROID_CODE (expected 204)"
+fi
+
+# Firefox captive portal probe — must return "success" (follow redirects)
+FF_RESP=$(curl -sL --max-time 3 "http://localhost:${NGINX_PORT}/canonical.html" 2>/dev/null || echo "")
+if echo "$FF_RESP" | grep -q "success"; then
+    pass "Firefox probe /canonical.html returns 'success'"
+else
+    fail "Firefox probe /canonical.html missing 'success' response"
+fi
+
+# Windows captive portal probe — must return "Microsoft Connect Test"
+WIN_RESP=$(curl -sL --max-time 3 "http://localhost:${NGINX_PORT}/connecttest.txt" 2>/dev/null || echo "")
+if echo "$WIN_RESP" | grep -q "Microsoft Connect Test"; then
+    pass "Windows probe /connecttest.txt returns correct text"
+else
+    fail "Windows probe /connecttest.txt missing expected response"
+fi
+
+# ============================================================
+# 7. Nick Format
+# ============================================================
+
+section "7. Nick Format"
+
+# Connect to IRC via bridge and check that assigned nick is guestN
+NICK_OUTPUT=$( { printf "NICK nicktest%s\r\n" "$$"; sleep 1; printf "USER nicktest%s 0 * :test\r\n" "$$"; sleep 3; printf "QUIT\r\n"; } | nc -w 6 localhost 6667 2>/dev/null || echo "")
+# The 001 (RPL_WELCOME) line contains the assigned nick
+ASSIGNED_NICK=$(echo "$NICK_OUTPUT" | grep " 001 " | awk '{print $3}' || echo "")
+if echo "$ASSIGNED_NICK" | grep -qE "^guest[0-9]+$"; then
+    pass "IRC assigns guestN nicks (got: $ASSIGNED_NICK)"
+elif [ -n "$ASSIGNED_NICK" ]; then
+    # We connected with a custom nick so it kept it — test with bridge instead
+    # Check bridge status endpoint for nick format
+    BRIDGE_STATUS=$(curl -sf --max-time 3 http://localhost:3000/status 2>/dev/null || echo "")
+    if echo "$BRIDGE_STATUS" | grep -q '"guest[0-9]'; then
+        pass "Bridge assigns guestN nicks"
+    elif echo "$BRIDGE_STATUS" | grep -q '"web[0-9]'; then
+        fail "Bridge still assigns webN nicks (expected guestN)"
     else
-        fail "$svc on different network ($svc_net vs $NETWORK)"
+        skip "Nick format test inconclusive (no bridge clients to check)"
     fi
-done
+else
+    skip "Nick format test: could not connect to IRC"
+fi
+
+# Check nick counter file
+COUNTER_DIR="/opt/nightwatch/irc-bridge-go/data"
+COUNTER_VAL=$(cat "$COUNTER_DIR/nick-counter" 2>/dev/null || echo "")
+if [ -n "$COUNTER_VAL" ]; then
+    pass "Nick counter active (value: $(echo "$COUNTER_VAL" | tr -d '[:space:]'))"
+else
+    pass "Nick counter not yet created (no clients have connected via bridge)"
+fi
 
 # ============================================================
 # Summary
@@ -221,7 +246,7 @@ done
 
 echo ""
 echo "======================================"
-echo "  Docker Test Results"
+echo "  Service Test Results"
 echo "======================================"
 echo -e "  ${GREEN}Passed:  $PASSED${NC}"
 echo -e "  ${RED}Failed:  $FAILED${NC}"
@@ -229,9 +254,9 @@ echo -e "  ${YELLOW}Skipped: $SKIPPED${NC}"
 echo ""
 
 if [ "$FAILED" -eq 0 ]; then
-    echo -e "  ${GREEN}${BOLD}ALL DOCKER TESTS PASSED${NC}"
+    echo -e "  ${GREEN}${BOLD}ALL SERVICE TESTS PASSED${NC}"
     exit 0
 else
-    echo -e "  ${RED}${BOLD}DOCKER TESTS FAILED${NC}"
+    echo -e "  ${RED}${BOLD}SERVICE TESTS FAILED${NC}"
     exit 1
 fi

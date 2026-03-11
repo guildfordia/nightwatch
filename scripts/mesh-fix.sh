@@ -18,6 +18,7 @@ ENV_FILE="$PROJECT_DIR/.env"
 source "$SCRIPT_DIR/common.sh"
 
 load_env "$ENV_FILE"
+resolve_node_mode
 
 # Defaults
 MESH_IFACE="${MESH_IFACE:-wlan1}"
@@ -247,7 +248,7 @@ setup_client_bridge() {
 
     # Remove eth0's default route — it points to the GL.iNet router which has
     # no internet. Without this, it shadows wlan0's route (which has internet)
-    # and Docker image pulls, apt, etc. all fail.
+    # and apt, git pull, etc. all fail.
     if ip route show default dev "$AP_IFACE" 2>/dev/null | grep -q .; then
         ip route del default dev "$AP_IFACE" 2>/dev/null || true
         echo "[+] Removed default route via $AP_IFACE (no internet on router)"
@@ -298,6 +299,59 @@ setup_client_bridge() {
     echo "[+] Ports: $BAT_IFACE (mesh) + $AP_IFACE (router)"
 }
 
+setup_sound_bridge() {
+    # Sound-bridge mode: eth0 connects to a Mac Mini running nightwatch-sound.
+    # eth0 is NOT added to the br0 bridge. Instead it gets its own subnet
+    # (10.0.0.1/24) so the Pi can route traffic between mesh and Mac Mini.
+    echo "[+] Sound-bridge mode: configuring $AP_IFACE for Mac Mini (10.0.0.0/24)..."
+
+    # Create br0 with ONLY bat0 (no eth0)
+    ip link set "$BR_IFACE" down 2>/dev/null || true
+    ip link del "$BR_IFACE" 2>/dev/null || true
+
+    ip addr flush dev "$BAT_IFACE" 2>/dev/null || true
+    ip addr flush dev "$AP_IFACE" 2>/dev/null || true
+
+    # Release any DHCP lease on eth0
+    if command -v dhcpcd >/dev/null 2>&1; then
+        dhcpcd --release "$AP_IFACE" 2>/dev/null || true
+    fi
+
+    # Remove eth0's default route (no internet on this link)
+    ip route del default dev "$AP_IFACE" 2>/dev/null || true
+
+    # Tell NetworkManager to stop managing eth0
+    if command -v nmcli >/dev/null 2>&1; then
+        ETH_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep "$AP_IFACE" | head -1 | cut -d: -f1)
+        if [ -n "$ETH_CON" ]; then
+            nmcli con down "$ETH_CON" 2>/dev/null || true
+        fi
+        nmcli dev set "$AP_IFACE" managed no 2>/dev/null || true
+    fi
+
+    # Bridge: only bat0 (mesh traffic), no eth0
+    ip link add name "$BR_IFACE" type bridge
+    ip link set "$BAT_IFACE" master "$BR_IFACE"
+    ip link set "$BR_IFACE" up
+    ip addr add "$MESH_IP" dev "$BR_IFACE"
+
+    echo "[+] Bridge $BR_IFACE up with IP ${MESH_IP%/*} (bat0 only, no eth0)"
+
+    # eth0: static IP on a separate subnet for the Mac Mini
+    ip link set "$AP_IFACE" up
+    ip addr add 10.0.0.1/24 dev "$AP_IFACE"
+
+    echo "[+] $AP_IFACE configured: 10.0.0.1/24 (Mac Mini subnet)"
+
+    # Enable IP forwarding so Mac Mini (10.0.0.x) can reach the mesh (192.168.199.x)
+    sysctl -w net.ipv4.ip_forward=1 > /dev/null
+
+    # Route between subnets (no NAT needed — both sides are private)
+    # Mesh nodes can reach 10.0.0.x via this node's mesh IP
+    # Mac Mini can reach 192.168.199.x via 10.0.0.1 (this node)
+    echo "[+] IP forwarding enabled (mesh <-> Mac Mini routing)"
+}
+
 start_dnsmasq() {
     DNSMASQ_CONF="$PROJECT_DIR/dnsmasq/dnsmasq.conf"
     DNSMASQ_PID="/var/run/dnsmasq-nightwatch.pid"
@@ -321,10 +375,34 @@ start_dnsmasq() {
     else
         echo "[!] dnsmasq config not found at $DNSMASQ_CONF — run 'make install' to generate"
     fi
+
+    # ---- Captive portal iptables rules ----
+    # Intercept ALL DNS traffic (port 53) from clients and redirect to local
+    # dnsmasq. Modern phones use hardcoded DNS (8.8.8.8, 1.1.1.1) or
+    # DNS-over-HTTPS, bypassing DHCP-provided DNS. Without this, those
+    # queries go to unreachable IPs and the phone can't resolve anything.
+    local LOCAL_IP="${MESH_IP%/*}"
+    echo "[+] Setting up captive portal iptables rules..."
+
+    # DNS redirect: any DNS query not already destined for us → redirect to us
+    iptables -t nat -C PREROUTING -i "$BR_IFACE" -p udp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || \
+        iptables -t nat -A PREROUTING -i "$BR_IFACE" -p udp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53
+    iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || \
+        iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53
+
+    # HTTP redirect: catch any HTTP traffic to external IPs → redirect to nginx
+    iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80 2>/dev/null || \
+        iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80
+
+    # NOTE: No port 443 redirect — browsers reject the self-signed cert and
+    # show "this site requires a secure connection" instead of the chat page.
+    # DNS + HTTP redirects are sufficient for captive portal detection.
+
+    echo "[+] Captive portal iptables rules active (DNS + HTTP redirect)"
 }
 
 setup_gateway() {
-    if [ "$MESH_GATEWAY" = "true" ]; then
+    if [ "$NODE_MODE" = "gateway" ]; then
         echo "[+] Configuring this node as a mesh gateway..."
         batctl meshif "$BAT_IFACE" gw_mode server 2>/dev/null || \
             batctl gw_mode server 2>/dev/null || true
@@ -413,29 +491,48 @@ case "$1" in
         # Clean up WPA config files on unexpected exit (contain SAE password)
         trap 'rm -f /tmp/nightwatch-mesh-wpa.* 2>/dev/null' EXIT
 
+        echo "[+] Node mode: $NODE_MODE"
+
         load_batman_module
         setup_mesh_interface
         setup_batman
-        # Retry bridge setup (eth0 may not be ready immediately after boot)
-        for _attempt in 1 2 3; do
-            if setup_client_bridge; then
-                break
-            fi
-            if [ "$_attempt" -eq 3 ]; then
-                echo "[!] Client bridge setup failed after 3 attempts — mesh still operational"
-                break
-            fi
-            echo "[!] Bridge setup failed (attempt $_attempt/3), retrying in ${_attempt}s..."
-            sleep "$_attempt"
-        done
-        start_dnsmasq
-        setup_gateway
+
+        if [ "$NODE_MODE" = "sound-bridge" ]; then
+            # Sound-bridge: eth0 on separate subnet, not bridged
+            setup_sound_bridge
+            start_dnsmasq
+            # batman-adv gw_mode client (sound-bridge is not a gateway)
+            batctl meshif "$BAT_IFACE" gw_mode client 2>/dev/null || \
+                batctl gw_mode client 2>/dev/null || true
+        else
+            # mesh or gateway: eth0 bridged into br0 with bat0
+            # Retry bridge setup (eth0 may not be ready immediately after boot)
+            for _attempt in 1 2 3; do
+                if setup_client_bridge; then
+                    break
+                fi
+                if [ "$_attempt" -eq 3 ]; then
+                    echo "[!] Client bridge setup failed after 3 attempts — mesh still operational"
+                    break
+                fi
+                echo "[!] Bridge setup failed (attempt $_attempt/3), retrying in ${_attempt}s..."
+                sleep "$_attempt"
+            done
+            start_dnsmasq
+            setup_gateway
+        fi
 
         echo ""
         echo "====================================="
         echo "  Mesh network is UP"
+        echo "  Mode:    $NODE_MODE"
         echo "  Mesh IP: ${MESH_IP%/*} (on $BR_IFACE)"
+        if [ "$NODE_MODE" = "sound-bridge" ]; then
+        echo "  Bridge:  $BAT_IFACE → $BR_IFACE (no eth0)"
+        echo "  eth0:    10.0.0.1/24 (Mac Mini)"
+        else
         echo "  Bridge:  $BAT_IFACE + $AP_IFACE → $BR_IFACE"
+        fi
         echo "====================================="
         ;;
 
@@ -475,7 +572,16 @@ case "$1" in
         # NOTE: wlan0 and eth0 are never touched here — wlan0 provides internet,
         # eth0 connects to the external router (both must stay up)
 
-        # Remove only the Nightwatch MASQUERADE rule (preserve Docker/Tailscale NAT)
+        # Clean up sound-bridge eth0 address if present
+        ip addr del 10.0.0.1/24 dev "$AP_IFACE" 2>/dev/null || true
+
+        # Remove captive portal iptables rules
+        LOCAL_IP="${MESH_IP%/*}"
+        iptables -t nat -D PREROUTING -i "$BR_IFACE" -p udp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || true
+        iptables -t nat -D PREROUTING -i "$BR_IFACE" -p tcp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || true
+        iptables -t nat -D PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80 2>/dev/null || true
+
+        # Remove only the Nightwatch MASQUERADE rule (preserve Tailscale NAT)
         INET_IFACE="${INET_IFACE:-wlan0}"
         iptables -t nat -D POSTROUTING -o "$INET_IFACE" -j MASQUERADE 2>/dev/null || true
         iptables -D FORWARD -i "$BR_IFACE" -o "$INET_IFACE" -j ACCEPT 2>/dev/null || true
@@ -488,6 +594,8 @@ case "$1" in
         echo "==============================="
         echo "  Nightwatch Mesh Status"
         echo "==============================="
+        echo ""
+        echo "  Node mode: $NODE_MODE"
         echo ""
 
         echo "== batman-adv =="

@@ -59,7 +59,8 @@ usage() {
     echo "  sdcard_path:  Block device (e.g. /dev/sdf) or mounted rootfs path"
     echo ""
     echo "Options:"
-    echo "  --gateway     Mark this node as the internet gateway"
+    echo "  --mode MODE   Set node mode: mesh (default), gateway, sound-bridge"
+    echo "  --gateway     Shorthand for --mode gateway"
     echo "  --yes         Skip confirmation prompts"
     echo ""
     echo "Examples (Linux):"
@@ -81,19 +82,28 @@ usage() {
 }
 
 GATEWAY_MODE=false
+NODE_MODE="mesh"
 SD_ROOT=""
 AUTO_YES=false
 
 # Parse args
 while [ $# -gt 0 ]; do
     case "$1" in
-        --gateway) GATEWAY_MODE=true ;;
-        --yes|-y)  AUTO_YES=true ;;
-        --help|-h) usage ;;
-        *)         SD_ROOT="$1" ;;
+        --gateway)    NODE_MODE="gateway"; GATEWAY_MODE=true ;;
+        --mode)       shift; NODE_MODE="${1:-mesh}" ;;
+        --yes|-y)     AUTO_YES=true ;;
+        --help|-h)    usage ;;
+        *)            SD_ROOT="$1" ;;
     esac
     shift
 done
+
+# Validate mode
+case "$NODE_MODE" in
+    mesh|gateway|sound-bridge) ;;
+    *) echo -e "${RED}Error: invalid mode '$NODE_MODE' (valid: mesh, gateway, sound-bridge)${NC}"; exit 1 ;;
+esac
+GATEWAY_MODE=$( [ "$NODE_MODE" = "gateway" ] && echo true || echo false )
 
 # ---- Validate SD card path ----
 
@@ -209,9 +219,7 @@ prepare_via_boot_partition() {
     printf 'ROUTER_PASSWORD=%s\n' "$ROUTER_PASSWORD" >> "$secrets_file"
     printf 'IRC_LINK_PASSWORD=%s\n' "$IRC_LINK_PASSWORD" >> "$secrets_file"
     printf 'TAILSCALE_AUTH_KEY=%s\n' "${TAILSCALE_AUTH_KEY:-}" >> "$secrets_file"
-    if [ "$GATEWAY_MODE" = true ]; then
-        printf 'MESH_GATEWAY=true\n' >> "$secrets_file"
-    fi
+    printf 'NODE_MODE=%s\n' "$NODE_MODE" >> "$secrets_file"
     echo "[+] Secrets staged"
     echo "    ROUTER_PASSWORD=***"
     echo "    IRC_LINK_PASSWORD=***"
@@ -470,7 +478,7 @@ FIRSTEOF
     echo ""
     echo "  After first boot completes, the Pi will:"
     echo "  - Start the mesh network automatically on every boot"
-    echo "  - Start Docker services (IRC, bridge, web UI)"
+    echo "  - Start app services (IRC, bridge, web UI)"
     echo "  - Broadcast WiFi hotspot '${WIFI_SSID:-Nightwatch}'"
     if [ -n "${TAILSCALE_AUTH_KEY:-}" ]; then
     echo "  - Be accessible remotely via Tailscale"
@@ -653,9 +661,7 @@ printf 'IRC_LINK_PASSWORD=%s\n' "$IRC_LINK_PASSWORD" | sudo tee -a "$SECRETS_DES
 printf 'TAILSCALE_AUTH_KEY=%s\n' "${TAILSCALE_AUTH_KEY:-}" | sudo tee -a "$SECRETS_DEST" > /dev/null
 sudo chmod 600 "$SECRETS_DEST"
 
-if [ "$GATEWAY_MODE" = true ]; then
-    echo "MESH_GATEWAY=true" | sudo tee -a "$SECRETS_DEST" > /dev/null
-fi
+printf 'NODE_MODE=%s\n' "$NODE_MODE" | sudo tee -a "$SECRETS_DEST" > /dev/null
 
 # Remove any .env so nodeconfig generates a fresh one
 sudo rm -f "$DEST/.env"
@@ -698,7 +704,7 @@ echo "[+] Firstboot service installed and enabled"
 echo "[5/5] Verifying..."
 
 ERRORS=0
-for f in .env.example .secrets scripts/firstboot.sh scripts/mesh-fix.sh scripts/nodeconfig.sh scripts/node-discovery.sh scripts/setup-distributed-irc.sh docker-compose.yml irc-bridge-go/Dockerfile html/index.html; do
+for f in .env.example .secrets scripts/firstboot.sh scripts/mesh-fix.sh scripts/nodeconfig.sh scripts/node-discovery.sh scripts/setup-distributed-irc.sh irc-bridge-go/irc-bridge html/index.html; do
     if [ ! -f "$DEST/$f" ]; then
         echo -e "  ${RED}[MISS] $f${NC}"
         ((ERRORS++))
@@ -745,7 +751,7 @@ echo "     tail -f /var/log/nightwatch-firstboot.log"
 echo ""
 echo "  After first boot completes, the Pi will:"
 echo "  - Start the mesh network automatically on every boot"
-echo "  - Start Docker services (IRC, bridge, web UI)"
+echo "  - Start app services (IRC, bridge, web UI)"
 echo "  - Broadcast WiFi hotspot '${WIFI_SSID:-Nightwatch}'"
 if [ -n "${TAILSCALE_AUTH_KEY:-}" ]; then
 echo "  - Be accessible remotely via Tailscale"

@@ -1,18 +1,17 @@
 [Unit]
-Description=Nightwatch Docker Services (IRC, bridge, nginx)
-After=nightwatch-mesh.service docker.service
-Requires=nightwatch-mesh.service docker.service
+Description=Nightwatch App Services (ngircd, irc-bridge, nginx)
+After=nightwatch-mesh.service
+Requires=nightwatch-mesh.service
 PartOf=nightwatch-mesh.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-WorkingDirectory=/opt/nightwatch
-ExecStart=/bin/bash -c 'if docker compose version >/dev/null 2>&1; then docker compose --env-file .env up -d; else docker-compose --env-file .env up -d; fi'
-ExecStop=/bin/bash -c 'if docker compose version >/dev/null 2>&1; then docker compose --env-file .env down; else docker-compose --env-file .env down; fi'
-TimeoutStartSec=120
+ExecStart=/bin/bash -c 'systemctl start ngircd && systemctl start nightwatch-bridge && systemctl start nginx'
+ExecStop=/bin/bash -c 'systemctl stop nginx; systemctl stop nightwatch-bridge; systemctl stop ngircd'
+TimeoutStartSec=60
 Restart=on-failure
-RestartSec=30
+RestartSec=15
 StandardOutput=journal+console
 StandardError=journal+console
 

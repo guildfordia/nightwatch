@@ -20,7 +20,10 @@ fi
 NIGHTWATCH_DIR="${NIGHTWATCH_DIR:-/opt/nightwatch}"
 
 MESH_IFACE="wlan1"
-if [ -f "$NIGHTWATCH_DIR/.env.example" ]; then
+# Read from .env (actual config), fall back to .env.example (template)
+if [ -f "$NIGHTWATCH_DIR/.env" ]; then
+    MESH_IFACE=$(grep '^MESH_IFACE=' "$NIGHTWATCH_DIR/.env" | cut -d= -f2 || echo "wlan1")
+elif [ -f "$NIGHTWATCH_DIR/.env.example" ]; then
     MESH_IFACE=$(grep '^MESH_IFACE=' "$NIGHTWATCH_DIR/.env.example" | cut -d= -f2 || echo "wlan1")
 fi
 

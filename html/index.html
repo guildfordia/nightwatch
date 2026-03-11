@@ -91,9 +91,14 @@
       display: flex;
       justify-content: space-between;
       flex-shrink: 0;
+      gap: 1ch;
+      overflow: hidden;
+      white-space: nowrap;
     }
-    .top-status-left { color: var(--text-secondary); }
-    .top-status-right { color: var(--text-secondary); }
+    .top-status-left { color: var(--text-secondary); display: flex; gap: 1ch; align-items: center; }
+    .top-status-right { color: var(--text-secondary); display: flex; gap: 1ch; align-items: center; }
+    .top-status-bar .mesh-info { opacity: 0.85; }
+    .top-status-bar .node-label { font-weight: bold; }
 
     .main-content {
       flex: 1;
@@ -196,25 +201,27 @@
     .input-bar {
       background: var(--bg-primary);
       color: var(--text-secondary);
-      padding: 0 1ch;
-      min-height: 1.2em;
-      line-height: 1.2em;
+      padding: 0.5em 1ch;
+      min-height: 2.4em;
+      line-height: 1.4em;
       display: flex;
       align-items: center;
-      border-top: 1px solid var(--border-color);
+      gap: 0.5ch;
+      border-top: 1px solid var(--text-system);
       flex-shrink: 0;
-      padding-bottom: env(safe-area-inset-bottom);
+      padding-bottom: calc(0.5em + env(safe-area-inset-bottom));
     }
-    .input-prompt { color: var(--text-secondary); white-space: pre; }
+    .input-prompt { color: var(--text-system); white-space: pre; font-weight: bold; }
     .input-field {
-      background: transparent;
-      border: none;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border-color);
+      border-radius: 2px;
       color: var(--text-secondary);
       font-family: inherit;
       font-size: inherit;
       flex: 1;
       outline: none;
-      padding: 0;
+      padding: 0.2em 0.5ch;
       margin: 0;
       /* mobile typing niceties */
       -webkit-appearance: none;
@@ -240,8 +247,12 @@
 <body>
   <div class="irssi-terminal">
     <div class="top-status-bar">
-      <div class="top-status-left" id="topStatusLeft">NIGHTWATCH</div>
+      <div class="top-status-left" id="topStatusLeft">
+        <span class="node-label" id="nodeLabel">NIGHTWATCH</span>
+        <span class="mesh-info" id="meshInfo"></span>
+      </div>
       <div class="top-status-right">
+        <span class="mesh-info" id="meshStats"></span>
         <span id="connectionStatus">[disconnected]</span>
         <button class="about-link" id="aboutLink">about</button>
       </div>
@@ -268,7 +279,7 @@
     </div>
 
     <div class="input-bar">
-      <span class="input-prompt" id="inputPrompt">[guest] </span>
+      <span class="input-prompt" id="inputPrompt">[connecting...] </span>
       <input type="text" class="input-field" id="inputField" disabled />
     </div>
   </div>
@@ -334,7 +345,8 @@
       constructor() {
         this.ws = null;
         this.connected = false;
-        this.nickname = 'guest';
+        this.nickname = 'connecting...';
+        this.savedNick = localStorage.getItem('nightwatch-nick') || null;
         this.channel = '#nightwatch';
         this.registered = false;
         this.userCount = 0;
@@ -347,8 +359,13 @@
         this.maxReconnectDelay = 30000; // cap at 30s
 
         this.themeManager = new ThemeManager();
+        // Debug state for live status bar
+        this.debugData = null;
+        this.bridgeData = null;
+        this.knownPeers = new Set(); // track discovered peers for join/leave announcements
         this.initElements();
         this.connect();
+        this.startDebugPolling();
       }
 
       initElements() {
@@ -361,6 +378,9 @@
         this.toggleButton = document.getElementById('toggleUsers');
         this.themeSelector = document.getElementById('themeSelector');
         this.connectionStatus = document.getElementById('connectionStatus');
+        this.nodeLabel = document.getElementById('nodeLabel');
+        this.meshInfo = document.getElementById('meshInfo');
+        this.meshStats = document.getElementById('meshStats');
         this.aboutLink = document.getElementById('aboutLink');
 
         this.inputField.addEventListener('keypress', (e) => { if (e.key === 'Enter') this.sendMessage(); });
@@ -414,16 +434,19 @@
           this.addSystemMessage('Welcome to NIGHTWATCH');
           this.addSystemMessage('Decentralized Mesh Network');
           this.addSystemMessage('Off-Grid conversation');
-          this.addSystemMessage('Type /nick <name> to change nick');
+          this.addSystemMessage('Type /help for commands');
         } else {
           this.addSystemMessage('Welcome to NIGHTWATCH - Decentralized Mesh Network - Off-Grid conversation');
-          this.addSystemMessage('Type /nick <name> to change your nickname');
+          this.addSystemMessage('Type /help for commands, /debug for diagnostics');
         }
         this.addSystemMessage('Connecting to IRC bridge...');
       }
 
       connect() {
-        const wsUrl = `ws://${window.location.hostname}/ws`;
+        const wsHost = window.location.port ? `${window.location.hostname}:${window.location.port}` : window.location.hostname;
+        // Pass saved nick so the bridge registers with it directly (avoids zombie nick conflicts)
+        const nickParam = this.savedNick ? `?nick=${encodeURIComponent(this.savedNick)}` : '';
+        const wsUrl = `ws://${wsHost}/ws${nickParam}`;
         try { this.ws = new WebSocket(wsUrl); }
         catch (error) { this.addSystemMessage(`WebSocket error: ${error.message}`); return; }
 
@@ -467,6 +490,28 @@
           return;
         }
 
+        if (input === '/debug' || input === '/status') {
+          this.inputField.value = '';
+          this.showDebugInfo();
+          return;
+        }
+
+        if (input === '/nodes' || input === '/mesh') {
+          this.inputField.value = '';
+          this.showNodesInfo();
+          return;
+        }
+
+        if (input === '/help') {
+          this.inputField.value = '';
+          this.addSystemMessage('Commands:');
+          this.addSystemMessage('  /nick <name>  - Change your nickname');
+          this.addSystemMessage('  /nodes        - Show mesh network map');
+          this.addSystemMessage('  /debug        - Show full node diagnostics');
+          this.addSystemMessage('  /help         - Show this help');
+          return;
+        }
+
         if (!this.registered) {
           this.addSystemMessage('Not connected to IRC yet, please wait...');
           this.inputField.value = '';
@@ -487,6 +532,9 @@
             const idx001 = parts.indexOf('001');
             if (idx001 !== -1 && parts[idx001 + 1]) {
               this.nickname = parts[idx001 + 1];
+              // Always persist nick so reconnections reuse it
+              this.savedNick = this.nickname;
+              localStorage.setItem('nightwatch-nick', this.nickname);
               this.updatePrompt();
             }
             this.registered = true;
@@ -501,6 +549,8 @@
           else if (line.includes(' 433 ')) {
             this.nickname = this.nickname + '_';
             this.send(`NICK ${this.nickname}`);
+            this.savedNick = this.nickname;
+            localStorage.setItem('nightwatch-nick', this.nickname);
             this.addSystemMessage(`Nickname in use, trying ${this.nickname}`);
             this.updatePrompt();
           }
@@ -528,9 +578,17 @@
               if (isOurNickChange) {
                 this.nickname = this.pendingNickChange || newIrcNick;
                 this.pendingNickChange = null;
+                // Update users array: replace old IRC nick with new one
+                const ownIdx = this.users.indexOf(oldIrcNick);
+                if (ownIdx !== -1) this.users[ownIdx] = newIrcNick;
                 this.nickMap[newIrcNick] = this.nickname;
+                delete this.nickMap[oldIrcNick];
+                // Persist custom nick for reconnections
+                localStorage.setItem('nightwatch-nick', this.nickname);
                 this.updatePrompt();
                 this.updateUserList();
+                // Re-request NAMES to get a clean user list from server
+                this.send(`NAMES ${this.channel}`);
                 this.addSystemMessage(`You are now known as ${this.nickname}`);
               } else {
                 const idx = this.users.indexOf(oldIrcNick);
@@ -589,7 +647,15 @@
           // PRIVMSG & CTCP ACTION
           else if (line.includes(' PRIVMSG ')) {
             const match = line.match(/:([^!]+)![^:]+PRIVMSG [^:]+:(.+)/);
-            if (match && match[1] !== this.nickname) {
+            // Filter own messages: check both IRC nick and display nick
+            // (after /nick, the IRC server may echo back our message with
+            // the new IRC nick before the NICK confirmation arrives)
+            const isOwnMsg = match && (
+              match[1] === this.nickname ||
+              this.nickMap[match[1]] === this.nickname ||
+              (this.pendingNickChange && match[1] === this.pendingNickChange)
+            );
+            if (match && !isOwnMsg) {
               const nick = match[1];
               const message = match[2];
               if (message.startsWith('\x01ACTION') && message.endsWith('\x01')) {
@@ -718,7 +784,7 @@
       }
 
       showAbout() {
-        [
+        const lines = [
           "╔════════════════════════════════════════════════════════════════════╗",
           "║                            NIGHTWATCH                             ║",
           "║                    Decentralized Mesh Network                     ║",
@@ -734,10 +800,378 @@
           "║                                                                    ║",
           "║  Commands:                                                         ║",
           "║  /nick <name>  - Change your nickname                             ║",
+          "║  /nodes        - Show mesh network map                            ║",
+          "║  /debug        - Show full node diagnostics                       ║",
+          "║  /help         - Show all commands                                ║",
           "║                                                                    ║",
           "║  Built with love for decentralized communication                  ║",
           "╚════════════════════════════════════════════════════════════════════╝"
-        ].forEach(line => this.appendSystemLine(line));
+        ];
+        lines.forEach(line => this.appendSystemLine(line));
+        // Fetch node info and display
+        fetch('/nodeinfo.json')
+          .then(r => r.ok ? r.json() : Promise.reject('not found'))
+          .then(info => {
+            this.appendSystemLine('');
+            this.appendSystemLine(`  Node #${info.node} (${info.hostname})`);
+            this.appendSystemLine(`  Mesh IP: ${info.mesh_ip}`);
+            if (info.gateway) this.appendSystemLine('  Role: Gateway (internet sharing)');
+            if (info.version) this.appendSystemLine(`  Version: ${info.version}`);
+            this.scrollToBottom();
+          })
+          .catch(() => {}); // nodeinfo.json not available — skip silently
+        this.scrollToBottom();
+      }
+
+      async showDebugInfo() {
+        this.addSystemMessage('Collecting debug info...');
+        const sep = '─'.repeat(50);
+
+        // Fetch both endpoints in parallel
+        const [debugRes, bridgeRes] = await Promise.allSettled([
+          fetch('/api/debug').then(r => r.ok ? r.json() : null).catch(() => null),
+          fetch('/api/bridge-status').then(r => r.ok ? r.json() : null).catch(() => null)
+        ]);
+
+        const debug = debugRes.status === 'fulfilled' ? debugRes.value : null;
+        const bridge = bridgeRes.status === 'fulfilled' ? bridgeRes.value : null;
+
+        this.appendSystemLine('');
+        this.appendSystemLine(`${sep}`);
+        this.appendSystemLine('  NIGHTWATCH DEBUG INFO');
+        this.appendSystemLine(`${sep}`);
+
+        // ---- Node info ----
+        if (debug && debug.node) {
+          const n = debug.node;
+          this.appendSystemLine('');
+          this.appendSystemLine('  NODE');
+          this.appendSystemLine(`    Hostname:    ${n.hostname}`);
+          if (n.model) this.appendSystemLine(`    Model:       ${n.model}`);
+          this.appendSystemLine(`    Node #:      ${n.number}`);
+          this.appendSystemLine(`    Mesh IP:     ${n.mesh_ip}`);
+          this.appendSystemLine(`    Gateway:     ${n.gateway}`);
+          this.appendSystemLine(`    Uptime:      ${n.uptime}`);
+        }
+
+        // ---- System resources ----
+        if (debug && debug.system) {
+          const s = debug.system;
+          this.appendSystemLine('');
+          this.appendSystemLine('  SYSTEM');
+          this.appendSystemLine(`    Memory:      ${s.memory_available_mb}MB free / ${s.memory_total_mb}MB total`);
+          this.appendSystemLine(`    CPU temp:    ${s.cpu_temp_c}°C`);
+          this.appendSystemLine(`    Disk:        ${s.disk_usage_pct}% used`);
+        }
+
+        // ---- Mesh ----
+        if (debug && debug.mesh) {
+          const m = debug.mesh;
+          this.appendSystemLine('');
+          this.appendSystemLine('  MESH INTERFACE');
+          this.appendSystemLine(`    Interface:   ${m.interface}`);
+          this.appendSystemLine(`    Mode:        ${m.type}`);
+          if (m.channel) this.appendSystemLine(`    Channel:     ${m.channel}`);
+
+          if (m.stations && m.stations.length > 0) {
+            this.appendSystemLine(`    Stations:    ${m.stations.length} peer(s)`);
+            m.stations.forEach(s => {
+              const signal = s.signal ? ` (${s.signal} dBm)` : '';
+              const plink = s.plink ? ` [${s.plink}]` : '';
+              this.appendSystemLine(`      ${s.mac}${signal}${plink}`);
+            });
+          } else {
+            this.appendSystemLine('    Stations:    none');
+          }
+        }
+
+        // ---- Batman-adv ----
+        if (debug && debug.batman) {
+          const b = debug.batman;
+          this.appendSystemLine('');
+          this.appendSystemLine('  BATMAN-ADV');
+          this.appendSystemLine(`    Version:     ${b.version}`);
+          this.appendSystemLine(`    Algorithm:   ${b.algorithm}`);
+          this.appendSystemLine(`    GW mode:     ${b.gateway_mode}`);
+          this.appendSystemLine(`    Neighbors:   ${b.neighbor_count}`);
+
+          if (b.neighbors && b.neighbors.length > 0) {
+            b.neighbors.forEach(n => {
+              this.appendSystemLine(`      ${n.mac} via ${n.interface} (seen ${n.last_seen})`);
+            });
+          }
+
+          if (b.originators && b.originators.length > 0) {
+            this.appendSystemLine(`    Originators: ${b.originators.length}`);
+            b.originators.forEach(o => {
+              this.appendSystemLine(`      ${o.originator} TQ:${o.tq}/255 via ${o.nexthop || 'direct'} (${o.last_seen})`);
+            });
+          }
+        }
+
+        // ---- Bridge ----
+        if (debug && debug.bridge) {
+          const br = debug.bridge;
+          this.appendSystemLine('');
+          this.appendSystemLine('  BRIDGE');
+          this.appendSystemLine(`    Status:      ${br.status}`);
+          this.appendSystemLine(`    IP:          ${br.ip}`);
+          this.appendSystemLine(`    Ports:       ${br.ports}`);
+        }
+
+        // ---- Discovery peers ----
+        if (debug && debug.discovery && debug.discovery.peers) {
+          const peers = debug.discovery.peers;
+          this.appendSystemLine('');
+          this.appendSystemLine('  DISCOVERED PEERS');
+          if (peers.length > 0) {
+            peers.forEach(p => {
+              this.appendSystemLine(`    Node #${p.node}: ${p.name} @ ${p.ip} (${p.age_seconds}s ago)`);
+            });
+          } else {
+            this.appendSystemLine('    No peers discovered yet');
+          }
+        }
+
+        // ---- Docker services ----
+        if (debug && debug.docker && debug.docker.length > 0) {
+          this.appendSystemLine('');
+          this.appendSystemLine('  DOCKER CONTAINERS');
+          debug.docker.forEach(c => {
+            const health = c.health !== 'no healthcheck' ? ` [${c.health}]` : '';
+            const restarts = c.restarts > 0 ? ` (${c.restarts} restarts)` : '';
+            this.appendSystemLine(`    ${c.name.padEnd(15)} ${c.status}${health}${restarts}`);
+          });
+        }
+
+        // ---- Systemd services ----
+        if (debug && debug.systemd) {
+          this.appendSystemLine('');
+          this.appendSystemLine('  SYSTEMD SERVICES');
+          debug.systemd.forEach(s => {
+            const icon = s.active === 'active' ? '+' : '-';
+            this.appendSystemLine(`    [${icon}] ${s.name.padEnd(28)} ${s.active} (${s.sub})`);
+          });
+        }
+
+        // ---- IRC bridge status ----
+        if (bridge) {
+          this.appendSystemLine('');
+          this.appendSystemLine('  IRC BRIDGE');
+          if (bridge.bridge) {
+            const b = bridge.bridge;
+            this.appendSystemLine(`    Uptime:      ${b.uptime_human}`);
+            this.appendSystemLine(`    Clients:     ${b.active_clients} active, ${b.total_served} total served`);
+            this.appendSystemLine(`    Memory:      ${b.memory_mb.toFixed(1)}MB`);
+            this.appendSystemLine(`    Goroutines:  ${b.goroutines}`);
+            if (b.clients && b.clients.length > 0) {
+              b.clients.forEach(c => {
+                this.appendSystemLine(`      ${c.id} from ${c.ip} (buf: ${c.send_buffer}/256)`);
+              });
+            }
+          }
+          if (bridge.irc) {
+            this.appendSystemLine(`    IRC server:  ${bridge.irc.server} [${bridge.irc.status}]`);
+            if (bridge.irc.latency_ms >= 0) {
+              this.appendSystemLine(`    IRC latency: ${bridge.irc.latency_ms}ms`);
+            }
+          }
+        }
+
+        // ---- Conflict warning ----
+        if (debug && debug.conflict) {
+          this.appendSystemLine('');
+          this.appendSystemLine(`  *** CONFLICT: ${debug.conflict} ***`);
+        }
+
+        // ---- WebSocket client-side info ----
+        this.appendSystemLine('');
+        this.appendSystemLine('  CLIENT (your browser)');
+        this.appendSystemLine(`    WebSocket:   ${this.connected ? 'connected' : 'disconnected'}`);
+        this.appendSystemLine(`    WS URL:      ws://${window.location.host}/ws`);
+        this.appendSystemLine(`    Page origin: ${window.location.origin}`);
+        this.appendSystemLine(`    IRC nick:    ${this.nickname} (registered: ${this.registered})`);
+        this.appendSystemLine(`    Users seen:  ${this.userCount}`);
+        this.appendSystemLine(`    User agent:  ${navigator.userAgent.substring(0, 80)}`);
+
+        // ---- Errors ----
+        if (!debug && !bridge) {
+          this.appendSystemLine('');
+          this.appendSystemLine('  ERROR: Could not fetch debug info from server');
+          this.appendSystemLine('  Both /api/debug and /api/bridge-status failed');
+          this.appendSystemLine('  Check if nightwatch-debug service is running');
+        } else if (!debug) {
+          this.appendSystemLine('');
+          this.appendSystemLine('  WARNING: /api/debug unavailable (nightwatch-debug service may not be running)');
+        }
+
+        this.appendSystemLine('');
+        this.appendSystemLine(`${sep}`);
+        this.appendSystemLine(`  Collected at: ${debug ? debug.collected_at : new Date().toISOString()}`);
+        this.appendSystemLine(`${sep}`);
+
+        this.scrollToBottom();
+      }
+
+      // ---- Debug polling & live status bar ----
+      startDebugPolling() {
+        // Initial fetch after short delay (let WebSocket connect first)
+        setTimeout(() => this.fetchDebugData(), 2000);
+        // Then poll every 15s
+        this.debugInterval = setInterval(() => this.fetchDebugData(), 15000);
+      }
+
+      async fetchDebugData() {
+        try {
+          const [debugRes, bridgeRes] = await Promise.allSettled([
+            fetch('/api/debug').then(r => r.ok ? r.json() : null).catch(() => null),
+            fetch('/api/bridge-status').then(r => r.ok ? r.json() : null).catch(() => null)
+          ]);
+          const newDebug = debugRes.status === 'fulfilled' ? debugRes.value : null;
+          const newBridge = bridgeRes.status === 'fulfilled' ? bridgeRes.value : null;
+
+          // Detect peer changes before updating state
+          if (newDebug && newDebug.discovery && newDebug.discovery.peers) {
+            this.detectPeerChanges(newDebug.discovery.peers);
+          }
+
+          this.debugData = newDebug;
+          this.bridgeData = newBridge;
+          this.updateTopStatusBar();
+        } catch (e) {
+          // Silently ignore — status bar just stays stale
+        }
+      }
+
+      detectPeerChanges(peers) {
+        const currentPeerIds = new Set(peers.map(p => p.node));
+
+        // Detect new peers
+        currentPeerIds.forEach(id => {
+          if (!this.knownPeers.has(id)) {
+            const peer = peers.find(p => p.node === id);
+            if (peer && this.knownPeers.size > 0) {
+              // Only announce if we already had peers (skip initial load)
+              this.addJoinPart(`Node #${peer.node} (${peer.ip}) joined the mesh`);
+            }
+          }
+        });
+
+        // Detect lost peers
+        this.knownPeers.forEach(id => {
+          if (!currentPeerIds.has(id)) {
+            this.addJoinPart(`Node #${id} left the mesh`);
+          }
+        });
+
+        this.knownPeers = currentPeerIds;
+      }
+
+      updateTopStatusBar() {
+        const d = this.debugData;
+        if (!d) return;
+
+        // Left side: node identity
+        if (d.node) {
+          this.nodeLabel.textContent = `NIGHTWATCH #${d.node.number}`;
+        }
+
+        // Middle: mesh peers and signal
+        const parts = [];
+        if (d.discovery && d.discovery.peers) {
+          const peerCount = d.discovery.peers.length;
+          const totalNodes = peerCount + 1; // include self
+          parts.push(`Nodes:${totalNodes}`);
+        }
+        if (d.mesh && d.mesh.stations && d.mesh.stations.length > 0) {
+          const bestSignal = d.mesh.stations.reduce((best, s) =>
+            s.signal && parseInt(s.signal) > best ? parseInt(s.signal) : best, -999);
+          if (bestSignal > -999) parts.push(`Sig:${bestSignal}dBm`);
+        }
+        this.meshInfo.textContent = parts.length > 0 ? parts.join(' | ') : '';
+
+        // Right side: system stats
+        const stats = [];
+        if (d.system) {
+          stats.push(`${d.system.cpu_temp_c}C`);
+          stats.push(`${d.system.memory_available_mb}MB`);
+        }
+        if (this.bridgeData && this.bridgeData.bridge) {
+          stats.push(`WS:${this.bridgeData.bridge.active_clients}`);
+        }
+        this.meshStats.textContent = stats.length > 0 ? stats.join(' | ') : '';
+      }
+
+      // /nodes command — lightweight network map
+      async showNodesInfo() {
+        // Use cached data if fresh enough, otherwise fetch
+        if (!this.debugData) {
+          this.addSystemMessage('Fetching mesh info...');
+          await this.fetchDebugData();
+        }
+        const d = this.debugData;
+        const b = this.bridgeData;
+
+        this.appendSystemLine('');
+        const sep = '~'.repeat(40);
+        this.appendSystemLine(sep);
+        this.appendSystemLine('  MESH NETWORK MAP');
+        this.appendSystemLine(sep);
+
+        // This node
+        if (d && d.node) {
+          const n = d.node;
+          const gw = n.gateway ? ' [GATEWAY]' : '';
+          this.appendSystemLine('');
+          this.appendSystemLine(`  * Node #${n.number} (${n.hostname}) ${n.mesh_ip}${gw}  <-- you are here`);
+          if (n.model) this.appendSystemLine(`    Model: ${n.model}`);
+          this.appendSystemLine(`    Uptime: ${n.uptime}`);
+          if (d.system) {
+            this.appendSystemLine(`    CPU: ${d.system.cpu_temp_c}C | RAM: ${d.system.memory_available_mb}/${d.system.memory_total_mb}MB | Disk: ${d.system.disk_usage_pct}%`);
+          }
+        }
+
+        // Peer nodes
+        if (d && d.discovery && d.discovery.peers && d.discovery.peers.length > 0) {
+          d.discovery.peers.forEach(p => {
+            this.appendSystemLine('');
+            const peerName = `nightwatch-${p.node}`;
+            this.appendSystemLine(`    Node #${p.node} (${peerName}) ${p.ip}  [seen ${p.age_seconds}s ago]`);
+          });
+        } else {
+          this.appendSystemLine('');
+          this.appendSystemLine('    (no other nodes discovered)');
+        }
+
+        // Mesh links with signal
+        if (d && d.mesh && d.mesh.stations && d.mesh.stations.length > 0) {
+          this.appendSystemLine('');
+          this.appendSystemLine('  MESH LINKS');
+          d.mesh.stations.forEach(s => {
+            const sig = s.signal ? `${s.signal}dBm` : '?';
+            const plink = s.plink || '?';
+            this.appendSystemLine(`    ${s.mac} [${plink}] signal: ${sig}`);
+          });
+        }
+
+        // Connected IRC users
+        if (b && b.bridge && b.bridge.clients && b.bridge.clients.length > 0) {
+          this.appendSystemLine('');
+          this.appendSystemLine(`  CONNECTED USERS (${b.bridge.active_clients})`);
+          b.bridge.clients.forEach(c => {
+            this.appendSystemLine(`    ${c.id} from ${c.ip}`);
+          });
+        } else if (this.users.length > 0) {
+          this.appendSystemLine('');
+          this.appendSystemLine(`  CHAT USERS (${this.userCount})`);
+          this.users.filter(u => !u.includes('.irc')).forEach(u => {
+            const label = u === this.nickname ? `${u} (you)` : u;
+            this.appendSystemLine(`    ${label}`);
+          });
+        }
+
+        this.appendSystemLine('');
+        this.appendSystemLine(sep);
         this.scrollToBottom();
       }
 

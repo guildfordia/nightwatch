@@ -3,12 +3,14 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,19 +20,118 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+var startTime = time.Now()
+
+func envOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
 // Monotonic counters for unique client IDs and IRC nicks
 var clientCounter atomic.Uint64
 
+// nickRegistry tracks all ever-assigned guestN nicks so they're never reused.
+// The counter persists across restarts via a file.
+type NickRegistry struct {
+	mu          sync.Mutex
+	assigned    map[string]bool // all nicks ever assigned (guestN nicks)
+	activeNicks map[string]bool // nicks currently in use by connected clients
+	counter     uint64          // high-water mark for guestN generation
+	counterFile string          // path to persist counter
+}
+
+func nickCounterPath() string {
+	if dir := os.Getenv("DATA_DIR"); dir != "" {
+		return dir + "/nick-counter"
+	}
+	return "/data/nick-counter"
+}
+
+func newNickRegistry() *NickRegistry {
+	nr := &NickRegistry{
+		assigned:    make(map[string]bool),
+		activeNicks: make(map[string]bool),
+		counterFile: nickCounterPath(),
+	}
+	nr.loadCounter()
+	return nr
+}
+
+func (nr *NickRegistry) loadCounter() {
+	data, err := os.ReadFile(nr.counterFile)
+	if err != nil {
+		log.Printf("No saved nick counter (starting fresh): %v", err)
+		return
+	}
+	var val uint64
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &val); err == nil {
+		nr.counter = val
+		// Mark all previously assigned guestN nicks as taken
+		for i := uint64(1); i <= val; i++ {
+			nr.assigned[fmt.Sprintf("guest%d", i)] = true
+		}
+		log.Printf("Loaded nick counter: %d (guest1-guest%d reserved)", val, val)
+	}
+}
+
+func (nr *NickRegistry) saveCounter() {
+	if err := os.MkdirAll("/data", 0755); err != nil {
+		log.Printf("Failed to create /data dir: %v", err)
+		return
+	}
+	if err := os.WriteFile(nr.counterFile, []byte(fmt.Sprintf("%d\n", nr.counter)), 0644); err != nil {
+		log.Printf("Failed to save nick counter: %v", err)
+	}
+}
+
+// NextNick generates a new unique guestN nick that has never been used
+func (nr *NickRegistry) NextNick() string {
+	nr.mu.Lock()
+	defer nr.mu.Unlock()
+	nr.counter++
+	nick := fmt.Sprintf("guest%d", nr.counter)
+	nr.assigned[nick] = true
+	nr.activeNicks[nick] = true
+	nr.saveCounter()
+	return nick
+}
+
+// ClaimNick tries to reclaim a previously assigned nick (reconnecting client).
+// Returns true if the nick is recognized and not currently active.
+func (nr *NickRegistry) ClaimNick(nick string) bool {
+	nr.mu.Lock()
+	defer nr.mu.Unlock()
+	if nr.activeNicks[nick] {
+		return false // someone else is using it right now
+	}
+	nr.assigned[nick] = true
+	nr.activeNicks[nick] = true
+	return true
+}
+
+// ReleaseNick marks a nick as no longer actively connected (but still reserved)
+func (nr *NickRegistry) ReleaseNick(nick string) {
+	nr.mu.Lock()
+	defer nr.mu.Unlock()
+	delete(nr.activeNicks, nick)
+	// Nick stays in nr.assigned — it's reserved forever
+}
+
+var nickRegistry *NickRegistry
+
 // --- Configuration ---
 
+var ircServer = envOrDefault("IRC_SERVER", "127.0.0.1:6667")
+
 const (
-	ircServer       = "ngircd:6667"
 	ircChannel      = "#nightwatch"
 	listenAddr      = ":3000"
 	maxConnsPerIP   = 5
 	wsReadLimit     = 4096
-	wsPongWait      = 60 * time.Second
-	wsPingPeriod    = 50 * time.Second // must be < pongWait
+	wsPongWait      = 5 * time.Minute   // mobile browsers may background for minutes
+	wsPingPeriod    = 4 * time.Minute   // must be < pongWait
 	wsWriteWait     = 10 * time.Second
 	ircDialTimeout  = 5 * time.Second
 	shutdownTimeout = 10 * time.Second
@@ -105,6 +206,7 @@ type Client struct {
 	once   sync.Once     // ensures done is closed only once
 	id     string
 	ip     string
+	nick   string        // IRC nick assigned to this client
 }
 
 func (c *Client) close() {
@@ -154,11 +256,15 @@ func (h *Hub) run() {
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
 				client.close()
+				// Release nick from active set (stays reserved forever)
+				if client.nick != "" && nickRegistry != nil {
+					nickRegistry.ReleaseNick(client.nick)
+				}
 				// Don't close(client.send) — ircPump may still be mid-send.
 				// writePump exits via <-c.done instead.
 			}
 			h.mu.Unlock()
-			log.Printf("[%s] Client unregistered. Total: %d", client.id, len(h.clients))
+			log.Printf("[%s] Client unregistered (nick=%s). Total: %d", client.id, client.nick, len(h.clients))
 
 		case <-h.done:
 			h.mu.Lock()
@@ -193,12 +299,8 @@ func (c *Client) readPump(hub *Hub) {
 	})
 
 	for {
-		select {
-		case <-c.done:
-			return
-		default:
-		}
-
+		// No need to select on c.done here — c.close() closes the WebSocket,
+		// which unblocks ReadMessage with an error, causing a clean return.
 		_, message, err := c.ws.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
@@ -309,6 +411,25 @@ func (c *Client) ircPump() {
 	}
 }
 
+// isValidIRCNick checks that a nick contains only safe IRC characters
+func isValidIRCNick(nick string) bool {
+	if len(nick) == 0 {
+		return false
+	}
+	for _, c := range nick {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '-' || c == '_' || c == '[' ||
+			c == ']' || c == '\\' || c == '`' || c == '^' || c == '{' || c == '}') {
+			return false
+		}
+	}
+	// First char must not be a digit
+	if nick[0] >= '0' && nick[0] <= '9' {
+		return false
+	}
+	return true
+}
+
 // --- WebSocket handler ---
 
 func handleWebSocket(hub *Hub, limiter *RateLimiter, cleanupWg *sync.WaitGroup, w http.ResponseWriter, r *http.Request) {
@@ -353,8 +474,21 @@ func handleWebSocket(hub *Hub, limiter *RateLimiter, cleanupWg *sync.WaitGroup, 
 		return
 	}
 
-	// Register with IRC — single registration, no double NICK/USER
-	nick := fmt.Sprintf("web%d", seq)
+	// Use nick from query param if provided (reconnecting client),
+	// otherwise generate a new one. Sanitize to prevent IRC injection.
+	nick := r.URL.Query().Get("nick")
+	if nick != "" && len(nick) <= 16 && isValidIRCNick(nick) {
+		// Reconnecting client — try to reclaim their saved nick
+		if nickRegistry.ClaimNick(nick) {
+			log.Printf("[%s] Reclaimed nick: %s", clientID, nick)
+		} else {
+			// Nick is actively in use by someone else — assign a new one
+			log.Printf("[%s] Nick %s in use, assigning new nick", clientID, nick)
+			nick = nickRegistry.NextNick()
+		}
+	} else {
+		nick = nickRegistry.NextNick()
+	}
 	log.Printf("[%s] Registering with IRC as %s", clientID, nick)
 
 	if _, err = ircConn.Write([]byte(fmt.Sprintf("NICK %s\r\n", nick))); err != nil {
@@ -379,6 +513,7 @@ func handleWebSocket(hub *Hub, limiter *RateLimiter, cleanupWg *sync.WaitGroup, 
 		done: make(chan struct{}),
 		id:   clientID,
 		ip:   clientIP,
+		nick: nick,
 	}
 
 	hub.register <- client
@@ -445,9 +580,89 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, "OK")
 }
 
+// --- Status endpoint (debug diagnostics) ---
+
+func handleStatus(hub *Hub, limiter *RateLimiter) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		hub.mu.RLock()
+		clientCount := len(hub.clients)
+		clients := make([]map[string]interface{}, 0, clientCount)
+		for c := range hub.clients {
+			clients = append(clients, map[string]interface{}{
+				"id":          c.id,
+				"ip":          c.ip,
+				"nick":        c.nick,
+				"send_buffer": len(c.send),
+			})
+		}
+		hub.mu.RUnlock()
+
+		limiter.mu.Lock()
+		connsByIP := make(map[string]int, len(limiter.conns))
+		for ip, count := range limiter.conns {
+			connsByIP[ip] = count
+		}
+		limiter.mu.Unlock()
+
+		// Check IRC connectivity
+		ircStatus := "ok"
+		ircLatencyMs := int64(-1)
+		ircStart := time.Now()
+		conn, err := net.DialTimeout("tcp", ircServer, 2*time.Second)
+		if err != nil {
+			ircStatus = fmt.Sprintf("error: %v", err)
+		} else {
+			ircLatencyMs = time.Since(ircStart).Milliseconds()
+			conn.Close()
+		}
+
+		var memStats runtime.MemStats
+		runtime.ReadMemStats(&memStats)
+
+		// Nick registry stats
+		nickRegistry.mu.Lock()
+		nickTotal := len(nickRegistry.assigned)
+		nickActive := len(nickRegistry.activeNicks)
+		nickCounter := nickRegistry.counter
+		nickRegistry.mu.Unlock()
+
+		status := map[string]interface{}{
+			"nick_registry": map[string]interface{}{
+				"counter":       nickCounter,
+				"total_reserved": nickTotal,
+				"active":        nickActive,
+			},
+			"bridge": map[string]interface{}{
+				"uptime_seconds":  int(time.Since(startTime).Seconds()),
+				"uptime_human":    time.Since(startTime).Round(time.Second).String(),
+				"goroutines":      runtime.NumGoroutine(),
+				"memory_mb":       float64(memStats.Alloc) / 1024 / 1024,
+				"total_served":    clientCounter.Load(),
+				"active_clients":  clientCount,
+				"clients":         clients,
+				"conns_by_ip":     connsByIP,
+				"max_conns_per_ip": maxConnsPerIP,
+			},
+			"irc": map[string]interface{}{
+				"server":     ircServer,
+				"status":     ircStatus,
+				"latency_ms": ircLatencyMs,
+				"channel":    ircChannel,
+			},
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		enc.Encode(status)
+	}
+}
+
 // --- Main ---
 
 func main() {
+	nickRegistry = newNickRegistry()
+
 	hub := newHub()
 	go hub.run()
 
@@ -459,6 +674,7 @@ func main() {
 		handleWebSocket(hub, limiter, cleanupWg, w, r)
 	})
 	mux.HandleFunc("/health", handleHealth)
+	mux.HandleFunc("/status", handleStatus(hub, limiter))
 
 	server := &http.Server{
 		Addr:    listenAddr,

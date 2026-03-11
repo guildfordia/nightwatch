@@ -54,7 +54,7 @@ fi
 # ---- Sync service files to systemd ----
 # Ensures golden image clones and updates always have the latest service files
 SERVICES_UPDATED=false
-for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch-docker nightwatch-watchdog; do
+for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch-docker nightwatch-watchdog nightwatch-led nightwatch-debug; do
     SRC="$NIGHTWATCH_DIR/scripts/${svc}.service"
     DST="/etc/systemd/system/${svc}.service"
     if [ -f "$SRC" ]; then
@@ -87,12 +87,8 @@ if ! systemctl is-enabled --quiet nightwatch-watchdog.timer 2>/dev/null; then
     log "Watchdog timer enabled"
 fi
 
-# Ensure Docker DNS is configured
-if [ ! -f /etc/docker/daemon.json ]; then
-    mkdir -p /etc/docker
-    echo '{"dns":["8.8.8.8","1.1.1.1"]}' > /etc/docker/daemon.json
-    log "Docker DNS configured"
-fi
+# Ensure irc-bridge data directory exists
+mkdir -p "$NIGHTWATCH_DIR/irc-bridge-go/data" 2>/dev/null || true
 
 # Load mesh config defaults from template
 MESH_IFACE="wlan1"
@@ -281,19 +277,31 @@ CURRENT_HOSTNAME=$(hostname)
 log "Hostname: $CURRENT_HOSTNAME"
 
 IS_GATEWAY=false
+NODE_MODE="mesh"
 
-# Check for gateway hostname (matches nightwatch-gw-3, nightwatch-gw, nightwatch-gateway)
+# Detect mode from hostname
 if [[ "$CURRENT_HOSTNAME" =~ -gw(-|$) ]] || [[ "$CURRENT_HOSTNAME" =~ -gateway(-|$) ]]; then
+    NODE_MODE="gateway"
     IS_GATEWAY=true
-    log "Gateway mode detected"
+    log "Gateway mode detected from hostname"
+elif [[ "$CURRENT_HOSTNAME" =~ -sb(-|$) ]] || [[ "$CURRENT_HOSTNAME" =~ -sound(-|$) ]]; then
+    NODE_MODE="sound-bridge"
+    log "Sound-bridge mode detected from hostname"
 fi
 
-# Check gateway flag in .secrets
+# Check mode/gateway flag in .secrets
 SECRETS_FILE="$NIGHTWATCH_DIR/.secrets"
-if [ -f "$SECRETS_FILE" ] && grep -q '^MESH_GATEWAY=true' "$SECRETS_FILE" 2>/dev/null; then
-    IS_GATEWAY=true
-    log "Gateway mode from .secrets"
+if [ -f "$SECRETS_FILE" ]; then
+    SECRETS_MODE=$(grep '^NODE_MODE=' "$SECRETS_FILE" 2>/dev/null | cut -d= -f2 || true)
+    if [ -n "$SECRETS_MODE" ]; then
+        NODE_MODE="$SECRETS_MODE"
+        log "Node mode from .secrets: $NODE_MODE"
+    elif grep -q '^MESH_GATEWAY=true' "$SECRETS_FILE" 2>/dev/null; then
+        NODE_MODE="gateway"
+        log "Gateway mode from .secrets (legacy MESH_GATEWAY)"
+    fi
 fi
+IS_GATEWAY=$( [ "$NODE_MODE" = "gateway" ] && echo true || echo false )
 
 # Ensure temporary mesh is torn down on exit (e.g., if script crashes mid-scan)
 trap 'teardown_mesh' EXIT
@@ -338,12 +346,12 @@ teardown_mesh
 echo "$NODE_NUM" > "$NODE_NUM_FILE"
 log "Node number: $NODE_NUM (saved to $NODE_NUM_FILE)"
 
-# Set hostname to match the assigned number
-if [ "$IS_GATEWAY" = true ]; then
-    NEW_HOSTNAME="nightwatch-gw-${NODE_NUM}"
-else
-    NEW_HOSTNAME="nightwatch-${NODE_NUM}"
-fi
+# Set hostname to match the assigned number and mode
+case "$NODE_MODE" in
+    gateway)      NEW_HOSTNAME="nightwatch-gw-${NODE_NUM}" ;;
+    sound-bridge) NEW_HOSTNAME="nightwatch-sb-${NODE_NUM}" ;;
+    *)            NEW_HOSTNAME="nightwatch-${NODE_NUM}" ;;
+esac
 if [ "$CURRENT_HOSTNAME" != "$NEW_HOSTNAME" ]; then
     hostnamectl set-hostname "$NEW_HOSTNAME" 2>/dev/null || echo "$NEW_HOSTNAME" > /etc/hostname
     sed -i "s/^127\.0\.1\.1[[:space:]]\+[^#]*/127.0.1.1\t$NEW_HOSTNAME /" /etc/hosts 2>/dev/null || true
@@ -401,7 +409,7 @@ if [ -f "$ENV_FILE" ]; then
     fi
     log "Node number changed ($EXISTING_NUM → $NODE_NUM) — regenerating config"
     # Restart services that depend on the node number/IP
-    # mesh-fix.sh configures br0 with MESH_IP, Docker services bind to it
+    # mesh-fix.sh configures br0 with MESH_IP, app services bind to it
     RESTART_SERVICES=true
 fi
 
@@ -421,12 +429,12 @@ fi
 set_env_value "$ENV_FILE" "PI_NUMBER" "$NODE_NUM"
 set_env_value "$ENV_FILE" "MESH_IP" "$MESH_IP"
 
-# Gateway config
-if [ "$IS_GATEWAY" = true ]; then
-    set_env_value "$ENV_FILE" "MESH_GATEWAY" "true"
-    set_env_value "$ENV_FILE" "INET_IFACE" "eth0"
-    log "Gateway mode enabled"
+# Node mode
+set_env_value "$ENV_FILE" "NODE_MODE" "$NODE_MODE"
+if [ "$NODE_MODE" = "gateway" ]; then
+    set_env_value "$ENV_FILE" "INET_IFACE" "wlan0"
 fi
+log "Node mode: $NODE_MODE"
 
 # Inject secrets from .secrets file (preserved by build-image.sh)
 if [ -f "$SECRETS_FILE" ]; then
@@ -441,13 +449,14 @@ if [ -f "$SECRETS_FILE" ]; then
         value="${line#*=}"
         [[ -z "$key" ]] && continue
         [[ "$key" = "MESH_GATEWAY" ]] && continue
+        [[ "$key" = "NODE_MODE" ]] && continue
         # Use set_env_value — no escaping needed
         set_env_value "$ENV_FILE" "$key" "$value"
     done < "$SECRETS_FILE"
     log "Secrets injected"
 fi
 
-log "Config: PI_NUMBER=$NODE_NUM MESH_IP=$MESH_IP GATEWAY=$IS_GATEWAY"
+log "Config: PI_NUMBER=$NODE_NUM MESH_IP=$MESH_IP MODE=$NODE_MODE"
 
 # ---- Tailscale setup (if auth key present and not yet connected) ----
 
@@ -491,7 +500,7 @@ fi
 # ---- Restart services if node number changed ----
 
 if [ "$RESTART_SERVICES" = true ]; then
-    log "Node number changed — restarting mesh and Docker services..."
+    log "Node number changed — restarting mesh and app services..."
     systemctl restart nightwatch-mesh.service 2>/dev/null || true
     sleep 5
     systemctl restart nightwatch-docker.service 2>/dev/null || true

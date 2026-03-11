@@ -30,6 +30,7 @@ docker-compose.override.yml
 ngircd/ngircd.conf
 dnsmasq/dnsmasq.conf
 arp-entries.conf
+html/debug.json
 
 # Logs
 *.log
@@ -51,6 +52,12 @@ Thumbs.db
 
 # Misc
 nightwatch-optimized.tar.gz
+nightwatch.img.xz
+PiShrink/
+pishrink.sh
+
+# TLS certs (generated per-node)
+nginx/certs/
 
 # Ignore compiled Go binaries
 irc-bridge-go/irc-bridge

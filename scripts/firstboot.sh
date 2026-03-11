@@ -8,14 +8,14 @@
 # What it does:
 #   1. Wait for network (to apt install)
 #   2. Install all system dependencies
-#   3. Install Docker + Docker Compose
+#   3. Install app services (ngircd, nginx)
 #   4. Load batman-adv, disable system hostapd/dnsmasq
 #   5. Configure dhcpcd + DNS (resolv.conf locked)
 #   6. Install Tailscale (if TAILSCALE_AUTH_KEY set)
 #   7. Setup distributed IRC config
 #   8. Generate dnsmasq config
-#   9. Install all systemd services (nodeconfig, mesh, discovery, docker)
-#  10. Build Docker images
+#   9. Install all systemd services (nodeconfig, mesh, discovery, app)
+#  10. Verify irc-bridge binary
 #  11. Start everything
 #  11b. Resolve node number conflicts (MAC-based reassignment)
 #  12. Disable this firstboot service
@@ -45,6 +45,14 @@ echo "  Nightwatch First Boot Setup"
 echo "  $(date)"
 echo "======================================"
 echo ""
+
+# Set LED to heartbeat pattern to indicate setup is in progress
+for led in /sys/class/leds/ACT /sys/class/leds/led0; do
+    if [ -d "$led" ]; then
+        echo "heartbeat" > "$led/trigger" 2>/dev/null || true
+        break
+    fi
+done
 
 # Skip if already completed
 if [ -f "$STAMP_FILE" ]; then
@@ -208,7 +216,8 @@ for attempt in 1 2 3; do
     APT_DELAY=$((APT_DELAY * 2))
 done
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    docker.io \
+    ngircd \
+    nginx \
     batctl \
     bridge-utils \
     dnsmasq \
@@ -231,41 +240,37 @@ echo "[+] System packages installed"
 systemctl disable dnsmasq 2>/dev/null || true
 systemctl stop dnsmasq 2>/dev/null || true
 
-# ---- Step 3: Install Docker Compose ----
+# ---- Step 3: Configure native services ----
 
 echo ""
-echo "[3/12] Installing Docker Compose..."
-if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
-    ARCH=$(uname -m)
-    case "$ARCH" in
-        aarch64|arm64) COMPOSE_ARCH="linux-aarch64" ;;
-        armv7l|armhf)  COMPOSE_ARCH="linux-armv7" ;;
-        x86_64)        COMPOSE_ARCH="linux-x86_64" ;;
-        *)             echo "[-] Unsupported arch: $ARCH"; exit 1 ;;
-    esac
-    COMPOSE_VERSION="v2.24.6"
-    curl -SL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-${COMPOSE_ARCH}" \
-        -o /usr/local/bin/docker-compose
-    chmod +x /usr/local/bin/docker-compose
-    echo "[+] Docker Compose $COMPOSE_VERSION installed"
-else
-    echo "[+] Docker Compose already available"
+echo "[3/12] Configuring native services..."
+
+# Stop and disable default services
+systemctl stop ngircd 2>/dev/null || true
+systemctl disable ngircd 2>/dev/null || true
+systemctl stop nginx 2>/dev/null || true
+systemctl disable nginx 2>/dev/null || true
+
+# Remove default nginx config
+rm -f /etc/nginx/sites-enabled/default
+
+# Symlink Nightwatch configs
+ln -sf "$NIGHTWATCH_DIR/nginx/nginx.conf" /etc/nginx/conf.d/nightwatch.conf
+rm -rf /usr/share/nginx/html
+ln -sf "$NIGHTWATCH_DIR/html" /usr/share/nginx/html
+ln -sf "$NIGHTWATCH_DIR/nginx/certs" /etc/nginx/certs
+ln -sf "$NIGHTWATCH_DIR/ngircd/ngircd.conf" /etc/ngircd/ngircd.conf
+
+# Create data directory for irc-bridge
+mkdir -p "$NIGHTWATCH_DIR/irc-bridge-go/data"
+chown "$REAL_USER:$REAL_USER" "$NIGHTWATCH_DIR/irc-bridge-go/data"
+
+# Make irc-bridge binary executable
+if [ -f "$NIGHTWATCH_DIR/irc-bridge-go/irc-bridge" ]; then
+    chmod +x "$NIGHTWATCH_DIR/irc-bridge-go/irc-bridge"
 fi
 
-# Configure Docker DNS (containers can't resolve without this)
-mkdir -p /etc/docker
-echo '{"dns":["8.8.8.8","1.1.1.1"]}' > /etc/docker/daemon.json
-echo "[+] Docker DNS configured (8.8.8.8, 1.1.1.1)"
-
-# Enable Docker to start on boot
-systemctl enable docker
-systemctl start docker
-
-# Add default user to docker group
-if [ -n "$REAL_USER" ]; then
-    usermod -aG docker "$REAL_USER"
-    echo "[+] Added $REAL_USER to docker group"
-fi
+echo "[+] Native services configured"
 
 # ---- Step 4: Setup batman-adv ----
 
@@ -355,26 +360,21 @@ echo "[+] Services installed and enabled:"
 echo "    - nightwatch-nodeconfig (generates config from hostname)"
 echo "    - nightwatch-mesh (802.11s + batman-adv + bridge)"
 echo "    - nightwatch-discovery (UDP broadcast node discovery)"
-echo "    - nightwatch-docker (IRC + bridge + nginx)"
+echo "    - nightwatch-docker (IRC + bridge + nginx orchestrator)"
+echo "    - nightwatch-led (green LED readiness indicator)"
+echo "    - nightwatch-debug (debug info collector)"
 
-# ---- Step 10: Build Docker images ----
+# ---- Step 10: Verify irc-bridge binary ----
 
 echo ""
-echo "[10/12] Building Docker images (this may take a few minutes)..."
+echo "[10/12] Verifying irc-bridge binary..."
 cd "$NIGHTWATCH_DIR"
-detect_docker_compose
-for attempt in 1 2 3; do
-    if timeout 1200 $DC --env-file .env build; then
-        break
-    fi
-    if [ "$attempt" -eq 3 ]; then
-        echo "[-] Docker build failed after 3 attempts"
-        exit 1
-    fi
-    echo "[!] Docker build failed (attempt $attempt/3), retrying in 10s..."
-    sleep 10
-done
-echo "[+] Docker images built"
+if [ -f "$NIGHTWATCH_DIR/irc-bridge-go/irc-bridge" ]; then
+    echo "[+] irc-bridge binary found"
+else
+    echo "[!] Warning: irc-bridge binary not found at $NIGHTWATCH_DIR/irc-bridge-go/irc-bridge"
+    echo "[!] The binary needs to be cross-compiled for ARM before deployment"
+fi
 
 # ---- Step 11: Start everything ----
 
@@ -386,10 +386,18 @@ sleep 5
 echo "[+] Starting node discovery..."
 systemctl start nightwatch-discovery.service 2>/dev/null || true
 
-echo "[+] Starting Docker services..."
-$DC --env-file .env up -d
+echo "[+] Starting native services..."
+systemctl start ngircd
+systemctl start nightwatch-bridge
+systemctl start nginx
 sleep 3
 echo "[+] Services started"
+
+echo "[+] Starting LED readiness indicator..."
+systemctl start nightwatch-led.service 2>/dev/null || true
+
+echo "[+] Starting debug info collector..."
+systemctl start nightwatch-debug.service 2>/dev/null || true
 
 # ---- Step 11b: Resolve node number conflicts ----
 # On first boot, nodeconfig runs before other nodes have their mesh up,
