@@ -258,7 +258,17 @@ rm -f /etc/nginx/sites-enabled/default
 ln -sf "$NIGHTWATCH_DIR/nginx/nginx.conf" /etc/nginx/conf.d/nightwatch.conf
 rm -rf /usr/share/nginx/html
 ln -sf "$NIGHTWATCH_DIR/html" /usr/share/nginx/html
-ln -sf "$NIGHTWATCH_DIR/nginx/certs" /etc/nginx/certs
+# Generate self-signed certs for captive portal HTTPS redirect (if missing)
+CERT_DIR="$NIGHTWATCH_DIR/nginx/certs"
+if [ ! -f "$CERT_DIR/captive.crt" ] || [ ! -f "$CERT_DIR/captive.key" ]; then
+    mkdir -p "$CERT_DIR"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+        -keyout "$CERT_DIR/captive.key" \
+        -out "$CERT_DIR/captive.crt" \
+        -subj "/CN=nightwatch.local" 2>/dev/null
+    echo "[+] Self-signed TLS cert generated for captive portal"
+fi
+ln -sf "$CERT_DIR" /etc/nginx/certs
 ln -sf "$NIGHTWATCH_DIR/ngircd/ngircd.conf" /etc/ngircd/ngircd.conf
 
 # Create data directory for irc-bridge
@@ -345,8 +355,8 @@ echo ""
 echo "[8/12] Generating dnsmasq config..."
 NODE_NUM="${PI_NUMBER:-1}"
 generate_dnsmasq_conf "$NIGHTWATCH_DIR/dnsmasq/dnsmasq.conf" "$NODE_NUM" "$MESH_IP"
-DHCP_START=$((200 + (NODE_NUM - 1) * 2 + 1))
-DHCP_END=$((200 + (NODE_NUM - 1) * 2 + 2))
+DHCP_START=$((200 + (NODE_NUM - 1) * 5 + 1))
+DHCP_END=$((200 + (NODE_NUM - 1) * 5 + 5))
 echo "[+] dnsmasq.conf generated (DHCP: .${DHCP_START}-.${DHCP_END})"
 
 # ---- Step 9: Install systemd services ----
@@ -458,6 +468,10 @@ if [ "$PEER_COUNT" -gt 0 ]; then
 else
     echo "[+] Solo node (no mesh peers yet) — keeping node #${PI_NUMBER:-1}"
 fi
+
+# Regenerate dnsmasq config with final node number (may have changed in 11b)
+NODE_NUM="${PI_NUMBER:-1}"
+generate_dnsmasq_conf "$NIGHTWATCH_DIR/dnsmasq/dnsmasq.conf" "$NODE_NUM" "$MESH_IP"
 
 # ---- Step 12: Mark complete & disable firstboot ----
 

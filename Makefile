@@ -94,7 +94,7 @@ test:
 	@echo ""
 	@sudo scripts/test-mesh.sh
 	@echo ""
-	@scripts/test-docker.sh
+	@scripts/test-services.sh
 	@echo ""
 	@scripts/test-load.sh $(or $(CLIENTS),5) $(or $(MSGS),3)
 

@@ -11,7 +11,7 @@
 #   7. Captive portal probes
 #   8. Nick format
 #
-# Usage: ./scripts/test-docker.sh
+# Usage: ./scripts/test-services.sh
 
 set -euo pipefail
 

@@ -201,8 +201,17 @@ ln -sf "$INSTALL_DIR/nginx/nginx.conf" /etc/nginx/conf.d/nightwatch.conf
 rm -rf /usr/share/nginx/html
 ln -sf "$INSTALL_DIR/html" /usr/share/nginx/html
 
-# Symlink nginx certs
-ln -sf "$INSTALL_DIR/nginx/certs" /etc/nginx/certs
+# Generate self-signed certs for captive portal HTTPS redirect (if missing)
+CERT_DIR="$INSTALL_DIR/nginx/certs"
+if [ ! -f "$CERT_DIR/captive.crt" ] || [ ! -f "$CERT_DIR/captive.key" ]; then
+    mkdir -p "$CERT_DIR"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+        -keyout "$CERT_DIR/captive.key" \
+        -out "$CERT_DIR/captive.crt" \
+        -subj "/CN=nightwatch.local" 2>/dev/null
+    echo "[+] Self-signed TLS cert generated for captive portal"
+fi
+ln -sf "$CERT_DIR" /etc/nginx/certs
 
 # Symlink ngircd config
 ln -sf "$INSTALL_DIR/ngircd/ngircd.conf" /etc/ngircd/ngircd.conf
@@ -315,9 +324,12 @@ echo "[8/10] Verifying irc-bridge binary..."
 if [ -x "$INSTALL_DIR/irc-bridge-go/irc-bridge" ]; then
     echo "[+] irc-bridge binary found ($( ls -lh "$INSTALL_DIR/irc-bridge-go/irc-bridge" | awk '{print $5}'))"
 else
-    echo "[-] irc-bridge binary not found!"
+    echo -e "${RED}[-] irc-bridge binary not found!${NC}"
     echo "    Cross-compile on your laptop: cd irc-bridge-go && make build-bridge"
     echo "    Or copy a pre-built binary to $INSTALL_DIR/irc-bridge-go/irc-bridge"
+    echo ""
+    echo -e "${RED}    Setup cannot continue without the bridge binary.${NC}"
+    exit 1
 fi
 
 # ---- Step 9: Configure GL.iNet router ----
