@@ -49,8 +49,8 @@ AdminInfo2 = Mesh Network
 AdminEMail = admin@nightwatch.local
 Listen = 0.0.0.0
 MotdPhrase = Nightwatch mesh node $node_num
-ServerUID = abc
-ServerGID = abc
+ServerUID = irc
+ServerGID = irc
 
 [Limits]
 MaxConnections = 150
