@@ -101,6 +101,13 @@ generate_dnsmasq_conf() {
     local conf_path="$1"
     local node_num="$2"
     local mesh_ip="${3%/*}"  # strip CIDR suffix if present
+
+    # Validate node_num is within range (prevents invalid DHCP ranges)
+    if ! [[ "$node_num" =~ ^[0-9]+$ ]] || [ "$node_num" -lt 1 ] || [ "$node_num" -gt "$MAX_NODES" ]; then
+        echo "generate_dnsmasq_conf: node_num $node_num out of range (1-$MAX_NODES)" >&2
+        return 1
+    fi
+
     local dhcp_start=$((200 + (node_num - 1) * 5 + 1))
     local dhcp_end=$((200 + (node_num - 1) * 5 + 5))
 
@@ -162,11 +169,14 @@ set_env_value() {
         value="${BASH_REMATCH[1]}"
     fi
 
-    # Wrap in single quotes if value contains shell-sensitive characters
-    # Simple single quotes work for both bash `source` and .env loading
+    # Wrap in single quotes if value contains shell-sensitive characters.
+    # Single quotes in the value must be escaped as '\'' (end quote, escaped
+    # literal quote, reopen quote) — the standard POSIX idiom.
     local quoted_value="$value"
     if [[ "$value" == *'$'* ]] || [[ "$value" == *'`'* ]] || [[ "$value" == *'\'* ]] || [[ "$value" == *'"'* ]] || [[ "$value" == *'!'* ]] || [[ "$value" == *"'"* ]]; then
-        quoted_value="'$value'"
+        # Escape any single quotes inside the value: ' → '\''
+        local escaped="${value//\'/\'\\\'\'}"
+        quoted_value="'$escaped'"
     fi
 
     if grep -q "^${key}=" "$file" 2>/dev/null; then
@@ -307,8 +317,11 @@ DNSEOF
 nameserver 8.8.8.8
 nameserver 1.1.1.1
 DNSEOF
-    chattr +i /etc/resolv.conf
-    echo "[+] /etc/resolv.conf locked (immutable) with 8.8.8.8 + 1.1.1.1"
+    if chattr +i /etc/resolv.conf 2>/dev/null; then
+        echo "[+] /etc/resolv.conf locked (immutable) with 8.8.8.8 + 1.1.1.1"
+    else
+        echo "[!] Warning: could not lock /etc/resolv.conf (filesystem may not support chattr)"
+    fi
 }
 
 # install_systemd_services <project_dir>

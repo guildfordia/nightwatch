@@ -174,7 +174,7 @@ setup_mesh_interface() {
     if [ -n "$MESH_SAE_PASSWORD" ]; then
         echo "[+] Joining encrypted mesh '$MESH_ID' on $FREQ MHz (SAE)..."
         # SAE encryption requires wpa_supplicant — generate config
-        WPA_CONF=$(mktemp /tmp/nightwatch-mesh-wpa.XXXXXX)
+        WPA_CONF=$(mktemp /run/nightwatch-mesh-wpa.XXXXXX)
         chmod 600 "$WPA_CONF"
         cat > "$WPA_CONF" << WPAEOF
 ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
@@ -492,7 +492,7 @@ case "$1" in
         check_deps iw batctl ip || exit 1
 
         # Clean up WPA config files on unexpected exit (contain SAE password)
-        trap 'rm -f /tmp/nightwatch-mesh-wpa.* 2>/dev/null' EXIT
+        trap 'rm -f /run/nightwatch-mesh-wpa.* 2>/dev/null' EXIT
 
         echo "[+] Node mode: $NODE_MODE"
 
@@ -565,7 +565,7 @@ case "$1" in
 
         # Clean up mesh wpa_supplicant (SAE mode only — don't kill internet wpa_supplicant)
         pkill -f "nightwatch-mesh-wpa" 2>/dev/null || true
-        rm -f /tmp/nightwatch-mesh-wpa.* 2>/dev/null || true
+        rm -f /run/nightwatch-mesh-wpa.* 2>/dev/null || true
 
         # Do NOT bring wlan1 down or leave mesh mode here.
         # The ath9k_htc firmware crashes when wlan1 is cycled down/up,

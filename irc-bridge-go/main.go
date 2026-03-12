@@ -133,10 +133,20 @@ const (
 	wsPongWait      = 5 * time.Minute   // mobile browsers may background for minutes
 	wsPingPeriod    = 4 * time.Minute   // must be < pongWait
 	wsWriteWait     = 10 * time.Second
-	ircDialTimeout  = 5 * time.Second
 	shutdownTimeout = 10 * time.Second
 	maxIRCMsgLen    = 400 // IRC limit minus protocol overhead
 )
+
+// ircDialTimeout is configurable via IRC_DIAL_TIMEOUT env var (default 10s).
+// Pi Zero on congested mesh may need more than the previous 5s default.
+var ircDialTimeout = func() time.Duration {
+	if v := os.Getenv("IRC_DIAL_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return 10 * time.Second
+}()
 
 // --- WebSocket upgrader with origin check ---
 

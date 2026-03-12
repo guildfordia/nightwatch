@@ -23,7 +23,7 @@ PASSED=0
 FAILED=0
 WARNINGS=0
 
-trap 'cleanup' EXIT
+trap 'cleanup' EXIT INT TERM HUP QUIT
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'

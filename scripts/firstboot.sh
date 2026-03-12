@@ -182,7 +182,7 @@ fi
 # Check if clock is behind the build date of this script (Pi has no RTC)
 SCRIPT_YEAR=$(date -r "$NIGHTWATCH_DIR/scripts/firstboot.sh" +%Y 2>/dev/null || echo "2025")
 if [ "$(date +%Y)" -lt "$SCRIPT_YEAR" ]; then
-    HTTP_DATE=$(curl -sI http://deb.debian.org 2>/dev/null | grep -i "^date:" | sed 's/^[Dd]ate: //')
+    HTTP_DATE=$(curl -sI --max-time 10 http://deb.debian.org 2>/dev/null | grep -i "^date:" | sed 's/^[Dd]ate: //')
     if [ -n "$HTTP_DATE" ] && date -d "$HTTP_DATE" >/dev/null 2>&1; then
         date -s "$HTTP_DATE" 2>/dev/null || true
         echo "[+] Clock set from HTTP: $(date)"
@@ -420,15 +420,20 @@ echo "[11b/12] Checking for node number conflicts..."
 
 PEER_WAIT=0
 PEER_COUNT=0
-while [ "$PEER_WAIT" -lt 120 ]; do
-    PEER_COUNT=$(batctl meshif bat0 n 2>/dev/null | tail -n +3 | grep -c . || true)
-    PEER_COUNT=${PEER_COUNT:-0}
-    if [ "$PEER_COUNT" -gt 0 ]; then
-        break
-    fi
-    sleep 10
-    PEER_WAIT=$((PEER_WAIT + 10))
-done
+# Skip peer wait entirely if bat0 isn't up (solo deployment, no mesh dongle, etc.)
+if [ -d /sys/class/net/bat0 ]; then
+    while [ "$PEER_WAIT" -lt 120 ]; do
+        PEER_COUNT=$(batctl meshif bat0 n 2>/dev/null | tail -n +3 | grep -c . || true)
+        PEER_COUNT=${PEER_COUNT:-0}
+        if [ "$PEER_COUNT" -gt 0 ]; then
+            break
+        fi
+        sleep 10
+        PEER_WAIT=$((PEER_WAIT + 10))
+    done
+else
+    echo "[+] bat0 not found — skipping peer discovery wait"
+fi
 
 if [ "$PEER_COUNT" -gt 0 ]; then
     echo "[+] Mesh has $PEER_COUNT neighbor(s) — verifying node assignment..."

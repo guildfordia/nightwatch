@@ -155,7 +155,7 @@ collect_debug_info() {
     # ---- Systemd services ----
     local SYSTEMD_JSON="["
     local FIRST=true
-    for svc in nightwatch-mesh nightwatch-docker nightwatch-discovery nightwatch-nodeconfig nightwatch-led nightwatch-watchdog; do
+    for svc in nightwatch-mesh nightwatch-docker nightwatch-discovery nightwatch-nodeconfig nightwatch-led nightwatch-bridge nightwatch-debug; do
         local STATE
         STATE=$(systemctl show -p ActiveState --value "$svc" 2>/dev/null || echo "unknown")
         local SUB
@@ -204,10 +204,12 @@ collect_debug_info() {
 
     # ---- System resources ----
     local MEM_TOTAL MEM_AVAIL CPU_TEMP DISK_USAGE
-    MEM_TOTAL=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{printf "%.0f", $2/1024}' || echo "0")
-    MEM_AVAIL=$(grep MemAvailable /proc/meminfo 2>/dev/null | awk '{printf "%.0f", $2/1024}' || echo "0")
-    CPU_TEMP=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null | awk '{printf "%.1f", $1/1000}' || echo "0")
-    DISK_USAGE=$(df / 2>/dev/null | tail -1 | awk '{print $5}' | tr -d '%' || echo "0")
+    MEM_TOTAL=$(awk '/MemTotal/ {printf "%.0f", $2/1024}' /proc/meminfo 2>/dev/null || echo "0")
+    MEM_AVAIL=$(awk '/MemAvailable/ {printf "%.0f", $2/1024}' /proc/meminfo 2>/dev/null || echo "0")
+    CPU_TEMP=$(awk '{printf "%.1f", $1/1000}' /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo "0")
+    DISK_USAGE=$(df / 2>/dev/null | awk 'NR==2 {gsub(/%/,""); print $5}' || echo "0")
+    # Guard against empty values producing invalid JSON
+    : "${MEM_TOTAL:=0}" "${MEM_AVAIL:=0}" "${CPU_TEMP:=0}" "${DISK_USAGE:=0}"
 
     # ---- Write JSON (atomic: write to tmp + mv) ----
     local TMP_JSON="${DEBUG_JSON}.tmp.$$"

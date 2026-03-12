@@ -40,7 +40,7 @@ LOCAL_IP="${MESH_IP%/*}"
 NODE_NUM="${PI_NUMBER:-1}"
 SERVER_NAME="node${NODE_NUM}.nightwatch.irc"
 IRC_LINK_PASSWORD="${IRC_LINK_PASSWORD:-nightwatch-mesh-link}"
-BROADCAST_IP="192.168.199.255"
+BROADCAST_IP="${LOCAL_IP%.*}.255"
 
 CONFLICT_FILE="/tmp/nightwatch-conflict"
 
