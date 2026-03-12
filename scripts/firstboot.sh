@@ -36,8 +36,21 @@ NIGHTWATCH_DIR="${NIGHTWATCH_DIR:-/opt/nightwatch}"
 LOG_FILE="/var/log/nightwatch-firstboot.log"
 STAMP_FILE="$NIGHTWATCH_DIR/.firstboot-done"
 
-# Redirect all output to log + console
-exec > >(tee -a "$LOG_FILE") 2>&1
+# Boot-partition log — readable on macOS (FAT32) for debugging
+BOOT_LOG=""
+for _bdir in /boot/firmware /boot; do
+    if [ -d "$_bdir" ] && mount | grep -q "$_bdir.*vfat"; then
+        BOOT_LOG="$_bdir/nightwatch-firstboot.log"
+        break
+    fi
+done
+
+# Redirect all output to log + console (+ boot partition if available)
+if [ -n "$BOOT_LOG" ]; then
+    exec > >(tee -a "$LOG_FILE" "$BOOT_LOG") 2>&1
+else
+    exec > >(tee -a "$LOG_FILE") 2>&1
+fi
 
 echo ""
 echo "======================================"
@@ -46,13 +59,30 @@ echo "  $(date)"
 echo "======================================"
 echo ""
 
-# Set LED to heartbeat pattern to indicate setup is in progress
+# Find onboard LED for status indication
+LED_PATH=""
 for led in /sys/class/leds/ACT /sys/class/leds/led0; do
     if [ -d "$led" ]; then
+        LED_PATH="$led"
         echo "heartbeat" > "$led/trigger" 2>/dev/null || true
         break
     fi
 done
+
+# On any error: set LED to fast blink and log the failure
+firstboot_fail() {
+    echo ""
+    echo "[-] FIRSTBOOT FAILED: $1"
+    echo "[-] Check log: $LOG_FILE"
+    [ -n "$BOOT_LOG" ] && echo "[-] Boot partition log: $BOOT_LOG"
+    if [ -n "$LED_PATH" ]; then
+        echo "timer" > "$LED_PATH/trigger" 2>/dev/null || true
+        echo 100 > "$LED_PATH/delay_on" 2>/dev/null || true
+        echo 100 > "$LED_PATH/delay_off" 2>/dev/null || true
+    fi
+    exit 1
+}
+trap 'firstboot_fail "unexpected error at line $LINENO"' ERR
 
 # Skip if already completed
 if [ -f "$STAMP_FILE" ]; then
@@ -61,9 +91,7 @@ if [ -f "$STAMP_FILE" ]; then
 fi
 
 if [ ! -d "$NIGHTWATCH_DIR" ]; then
-    echo "[-] Error: $NIGHTWATCH_DIR not found"
-    echo "[-] The project must be copied to $NIGHTWATCH_DIR before first boot"
-    exit 1
+    firstboot_fail "$NIGHTWATCH_DIR not found — project must be copied before first boot"
 fi
 
 cd "$NIGHTWATCH_DIR"
@@ -73,18 +101,15 @@ if [ ! -f ".env" ]; then
     echo "[+] No .env found — running nodeconfig for dynamic node assignment..."
     if [ -x scripts/nodeconfig.sh ]; then
         if ! scripts/nodeconfig.sh; then
-            echo "[-] Error: nodeconfig.sh failed"
-            exit 1
+            firstboot_fail "nodeconfig.sh failed"
         fi
     else
-        echo "[-] Error: .env not found and nodeconfig.sh not available"
-        exit 1
+        firstboot_fail ".env not found and nodeconfig.sh not available"
     fi
 fi
 
 if [ ! -f ".env" ]; then
-    echo "[-] Error: .env still not found after nodeconfig"
-    exit 1
+    firstboot_fail ".env still not found after nodeconfig"
 fi
 
 # shellcheck source=scripts/common.sh
@@ -155,9 +180,7 @@ MAX_TRIES=30
 while ! ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; do
     TRIES=$((TRIES + 1))
     if [ "$TRIES" -ge "$MAX_TRIES" ]; then
-        echo "[-] No internet after ${MAX_TRIES} attempts."
-        echo "[-] Connect Ethernet or configure WiFi, then run: sudo systemctl start nightwatch-firstboot"
-        exit 1
+        firstboot_fail "No internet after ${MAX_TRIES} attempts (150s). Connect Ethernet or fix WiFi, then: sudo systemctl start nightwatch-firstboot"
     fi
     echo "  Waiting... ($TRIES/$MAX_TRIES)"
     sleep 5
@@ -215,7 +238,7 @@ for attempt in 1 2 3; do
     sleep "$APT_DELAY"
     APT_DELAY=$((APT_DELAY * 2))
 done
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+if ! DEBIAN_FRONTEND=noninteractive timeout 600 apt-get install -y -qq \
     ngircd \
     nginx \
     batctl \
@@ -233,7 +256,9 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     netcat-openbsd \
     socat \
     sshpass \
-    firmware-atheros
+    firmware-atheros; then
+    firstboot_fail "apt-get install failed or timed out (10 min limit)"
+fi
 echo "[+] System packages installed"
 
 # Disable system dnsmasq — we start our own instance on br0 via mesh-fix.sh

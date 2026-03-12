@@ -245,6 +245,15 @@ else
     exit 1
 fi
 
+# Log to boot partition (readable on macOS for debugging)
+STAGE_LOG="$BOOT/nightwatch-firstboot.log"
+exec > >(tee -a "$STAGE_LOG") 2>&1
+
+echo ""
+echo "======================================"
+echo "  Nightwatch Staging"
+echo "  $(date)"
+echo "======================================"
 echo "[+] nightwatch-stage: unpacking from $BOOT to /opt/nightwatch/"
 
 # Extract project
