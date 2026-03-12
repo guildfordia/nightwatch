@@ -393,13 +393,18 @@ func (c *Client) ircPump() {
 			log.Printf("[%s] IRC->WS: %s", c.id, line)
 		}
 
+		// Check if client is already closed before attempting send
+		select {
+		case <-c.done:
+			return
+		default:
+		}
+		// Try to send; if channel is full, close rather than drop messages
 		select {
 		case c.send <- []byte(line + "\n"):
 		case <-c.done:
 			return
 		default:
-			// Channel full — close the connection rather than silently
-			// dropping messages, which would confuse the user
 			log.Printf("[%s] Send channel full, closing connection", c.id)
 			c.close()
 			return

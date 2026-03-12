@@ -68,8 +68,9 @@ if [ "$IFACE_TYPE" != "mesh" ]; then
     exit 0
 fi
 
-# Check if wlan1 is registered in batman-adv
-if ! batctl meshif bat0 if 2>/dev/null | grep -q "$MESH_IFACE"; then
+# Check if wlan1 is registered in batman-adv (try new syntax, fall back to old)
+if ! batctl meshif bat0 if 2>/dev/null | grep -q "$MESH_IFACE" && \
+   ! batctl if 2>/dev/null | grep -q "$MESH_IFACE"; then
     log "$MESH_IFACE not in batman-adv — restarting mesh service"
     systemctl restart nightwatch-mesh
     exit 0

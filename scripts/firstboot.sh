@@ -451,11 +451,8 @@ if [ "$PEER_COUNT" -gt 0 ]; then
         if [ "$OUR_POSITION" != "$CURRENT_NUM" ]; then
             echo "[!] Conflict: currently #$CURRENT_NUM, should be #$OUR_POSITION (MAC sort)"
             echo "[+] Reassigning to node #$OUR_POSITION..."
-            # Pre-generate dnsmasq config so mesh restart picks it up
-            NEW_MESH_IP=$(mesh_ip_for_node "$OUR_POSITION")
-            generate_dnsmasq_conf "$NIGHTWATCH_DIR/dnsmasq/dnsmasq.conf" "$OUR_POSITION" "$NEW_MESH_IP"
             # Write correct number — nodeconfig detects the change and
-            # regenerates .env, ngircd.conf, hostname, restarts services
+            # regenerates .env, ngircd.conf, dnsmasq.conf, hostname, restarts services
             echo "$OUR_POSITION" > "$NIGHTWATCH_DIR/.node-number"
             "$NIGHTWATCH_DIR/scripts/nodeconfig.sh"
             # Reload .env so stamp file and summary use updated values

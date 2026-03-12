@@ -365,12 +365,19 @@ if [ "$ROUTER_ALREADY_CONFIGURED" = true ]; then
     echo "  Skipping. To reconfigure: sudo scripts/setup-router.sh"
 else
     # Try to configure — if it fails, let the user retry or skip
+    ROUTER_RETRIES=0
     while true; do
         if "$INSTALL_DIR/scripts/setup-router.sh"; then
             break
         fi
+        ROUTER_RETRIES=$((ROUTER_RETRIES + 1))
         echo ""
         echo -e "  ${YELLOW}[!] Router not found.${NC}"
+        # Non-interactive or max retries: skip automatically
+        if [ ! -t 0 ] || [ "$ROUTER_RETRIES" -ge 3 ]; then
+            echo "  Skipping router setup. Configure later with: make router"
+            break
+        fi
         echo "      Plug the router into eth0 and press ${BOLD}r${NC} to retry"
         echo "      or press ${BOLD}s${NC} to skip (you can do it later with: make router)"
         read -rp "  [r/s] " router_choice

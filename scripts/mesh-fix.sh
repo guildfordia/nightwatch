@@ -216,8 +216,11 @@ setup_batman() {
     echo "[+] Setting up batman-adv on $BAT_IFACE..."
 
     # Add mesh interface to batman
-    batctl meshif "$BAT_IFACE" if add "$MESH_IFACE" 2>/dev/null || \
-        batctl if add "$MESH_IFACE" 2>/dev/null || true
+    if ! batctl meshif "$BAT_IFACE" if add "$MESH_IFACE" 2>/dev/null && \
+       ! batctl if add "$MESH_IFACE" 2>/dev/null; then
+        echo "[-] Error: failed to add $MESH_IFACE to batman-adv (is batctl installed?)"
+        return 1
+    fi
 
     # Bring up bat0 (no IP here — br0 gets the IP)
     ip link set "$BAT_IFACE" up

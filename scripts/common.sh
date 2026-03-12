@@ -23,12 +23,15 @@ load_env() {
     fi
     # Temporarily disable nounset — .env values may contain $literal text
     # that bash would try to expand as variables (e.g. passwords with $)
+    # Use subshell-free approach: always restore nounset even if source fails
     set +o nounset
     set -o allexport
     # shellcheck source=/dev/null
-    source "$env_file"
+    local _load_env_rc=0
+    source "$env_file" || _load_env_rc=$?
     set +o allexport
     set -o nounset
+    return $_load_env_rc
 }
 
 # generate_ngircd_base_conf <conf_path> <server_name> <node_num>
@@ -147,6 +150,9 @@ set_env_value() {
     local key="$2"
     local value="$3"
     local tmp="${file}.tmp.$$"
+
+    # Secure temp file (may contain secrets like passwords)
+    (umask 077 && : > "$tmp")
 
     # Strip surrounding quotes if the value is already quoted
     # (e.g. .secrets files may have KEY='value' to protect $)
