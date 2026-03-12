@@ -337,6 +337,12 @@ case "$NODE_MODE" in
     sound-bridge) NEW_HOSTNAME="nightwatch-sb-${NODE_NUM}" ;;
     *)            NEW_HOSTNAME="nightwatch-${NODE_NUM}" ;;
 esac
+# Validate hostname (only alphanumeric and hyphens allowed)
+if ! [[ "$NEW_HOSTNAME" =~ ^[a-zA-Z0-9-]+$ ]]; then
+    log "Warning: invalid hostname chars in '$NEW_HOSTNAME', falling back to nightwatch-${NODE_NUM}"
+    NEW_HOSTNAME="nightwatch-${NODE_NUM}"
+fi
+
 if [ "$CURRENT_HOSTNAME" != "$NEW_HOSTNAME" ]; then
     hostnamectl set-hostname "$NEW_HOSTNAME" 2>/dev/null || echo "$NEW_HOSTNAME" > /etc/hostname
     sed -i "s/^127\.0\.1\.1[[:space:]]\+[^#]*/127.0.1.1\t$NEW_HOSTNAME /" /etc/hosts 2>/dev/null || true

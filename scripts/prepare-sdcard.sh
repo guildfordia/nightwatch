@@ -201,7 +201,7 @@ prepare_via_boot_partition() {
     # Step 1: Create project tarball on boot partition
     echo "[1/4] Creating project tarball on boot partition..."
     local staging_dir
-    staging_dir=$(mktemp -d)
+    staging_dir=$(umask 077 && mktemp -d)
     rsync -a "${RSYNC_EXCLUDES[@]}" "$PROJECT_DIR/" "$staging_dir/"
 
     # Remove any stale .env or .secrets from staging

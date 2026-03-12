@@ -40,11 +40,17 @@ LOCAL_IP="${MESH_IP%/*}"
 NODE_NUM="${PI_NUMBER:-1}"
 SERVER_NAME="node${NODE_NUM}.nightwatch.irc"
 IRC_LINK_PASSWORD="${IRC_LINK_PASSWORD:-nightwatch-mesh-link}"
-BROADCAST_IP="${LOCAL_IP%.*}.255"
 
 CONFLICT_FILE="/tmp/nightwatch-conflict"
 
 log() { echo "[discovery] $(date '+%H:%M:%S') $1"; }
+
+# Validate MESH_IP format before deriving broadcast address
+if ! [[ "$LOCAL_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    log "ERROR: Invalid MESH_IP format: $MESH_IP (expected IPv4 address)"
+    exit 1
+fi
+BROADCAST_IP="${LOCAL_IP%.*}.255"
 
 # Note: IP conflict detection is done via beacon monitoring, not ARP.
 # When a beacon arrives with our own node number from a different IP,
@@ -76,9 +82,19 @@ receive_beacons() {
             PEER_NAME=$(echo "$line" | cut -d'|' -f4)
             NOW=$(date +%s)
 
-            # Validate beacon fields to prevent injection
-            if ! [[ "$PEER_NUM" =~ ^[0-9]+$ ]] || ! [[ "$PEER_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || ! [[ "$PEER_NAME" =~ ^[a-zA-Z0-9._-]+$ ]]; then
-                log "WARNING: Invalid beacon ignored: $line"
+            # Validate beacon fields: format, range, and length
+            if ! [[ "$PEER_NUM" =~ ^[0-9]+$ ]] || [ "$PEER_NUM" -lt 1 ] || [ "$PEER_NUM" -gt "$MAX_NODES" ]; then
+                log "WARNING: Invalid node number in beacon: $PEER_NUM"
+                continue
+            fi
+            if ! [[ "$PEER_IP" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || \
+               [ "${BASH_REMATCH[1]}" -gt 255 ] || [ "${BASH_REMATCH[2]}" -gt 255 ] || \
+               [ "${BASH_REMATCH[3]}" -gt 255 ] || [ "${BASH_REMATCH[4]}" -gt 255 ]; then
+                log "WARNING: Invalid IP in beacon: $PEER_IP"
+                continue
+            fi
+            if ! [[ "$PEER_NAME" =~ ^[a-zA-Z0-9._-]+$ ]] || [ "${#PEER_NAME}" -gt 64 ]; then
+                log "WARNING: Invalid server name in beacon: $PEER_NAME"
                 continue
             fi
 
@@ -186,14 +202,21 @@ EOF
 LAST_PEER_HASH=""
 LAST_PEER_COUNT=0
 update_irc_config() {
-    # Hash current peer file to detect changes (exclude timestamp field
-    # so that beacon refreshes don't trigger unnecessary restarts)
-    CURRENT_HASH=$(sort "$PEER_FILE" 2>/dev/null | cut -d'|' -f1-3 | cksum || echo "")
+    # Read peer file under shared lock to prevent races with write operations
+    local CURRENT_HASH PEER_COUNT
+    CURRENT_HASH=$(
+        flock -s 200
+        sort "$PEER_FILE" 2>/dev/null | cut -d'|' -f1-3 | cksum || echo ""
+    ) 200>"${PEER_FILE}.lock"
+
     if [ "$CURRENT_HASH" = "$LAST_PEER_HASH" ]; then
         return
     fi
 
-    PEER_COUNT=$(wc -l < "$PEER_FILE" 2>/dev/null || echo "0")
+    PEER_COUNT=$(
+        flock -s 200
+        wc -l < "$PEER_FILE" 2>/dev/null || echo "0"
+    ) 200>"${PEER_FILE}.lock"
     PEER_COUNT=$((PEER_COUNT + 0))
     local PREV_COUNT=$LAST_PEER_COUNT
 

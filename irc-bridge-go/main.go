@@ -389,8 +389,9 @@ func (c *Client) ircPump() {
 		// Handle IRC PING server-side (don't round-trip through browser)
 		if strings.HasPrefix(line, "PING ") {
 			token := strings.TrimPrefix(line, "PING ")
-			// Validate: token should be non-empty and not contain CR/LF
-			if token != "" && !strings.ContainsAny(token, "\r\n") {
+			// Scanner reads line-by-line so CR/LF can't appear in token,
+			// but guard against it defensively + cap length to prevent abuse
+			if token != "" && len(token) < 512 && !strings.ContainsAny(token, "\r\n") {
 				c.irc.Write([]byte("PONG " + token + "\r\n"))
 			}
 			continue
