@@ -723,11 +723,11 @@ else
     fail "iptables HTTP redirect missing (port 80 on $BR_IFACE)"
 fi
 
-# NO port 443 DNAT rule on br0 (causes "requires secure connection" error)
+# Port 443 DNAT rule on br0 (redirects HTTPS → nginx self-signed cert → 302 to HTTP)
 if echo "$IPTABLES_NAT" | grep -q "\-i $BR_IFACE.*--dport 443.*DNAT"; then
-    fail "iptables HTTPS redirect present on port 443 (should be removed)"
+    pass "iptables HTTPS redirect active (port 443 on $BR_IFACE)"
 else
-    pass "No port 443 DNAT rule on $BR_IFACE (correct)"
+    fail "iptables HTTPS redirect missing (port 443 on $BR_IFACE)"
 fi
 
 # DNS resolution — all domains should resolve to local IP

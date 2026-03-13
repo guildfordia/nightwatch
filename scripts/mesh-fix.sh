@@ -405,11 +405,15 @@ start_dnsmasq() {
     iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80 2>/dev/null || \
         iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80
 
-    # NOTE: No port 443 redirect — browsers reject the self-signed cert and
-    # show "this site requires a secure connection" instead of the chat page.
-    # DNS + HTTP redirects are sufficient for captive portal detection.
+    # HTTPS redirect: catch HTTPS traffic → nginx self-signed cert → 302 to HTTP.
+    # Modern browsers (Firefox, Chrome) default to HTTPS-first. Without this rule,
+    # HTTPS to non-Pi IPs goes nowhere. With it, nginx serves a 302 redirect to
+    # HTTP, where the chat page loads. The captive portal popup browser handles
+    # self-signed certs automatically.
+    iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 443 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":443 2>/dev/null || \
+        iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 443 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":443
 
-    echo "[+] Captive portal iptables rules active (DNS + HTTP redirect)"
+    echo "[+] Captive portal iptables rules active (DNS + HTTP + HTTPS redirect)"
 }
 
 setup_gateway() {
@@ -591,6 +595,7 @@ case "$1" in
         iptables -t nat -D PREROUTING -i "$BR_IFACE" -p udp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || true
         iptables -t nat -D PREROUTING -i "$BR_IFACE" -p tcp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || true
         iptables -t nat -D PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80 2>/dev/null || true
+        iptables -t nat -D PREROUTING -i "$BR_IFACE" -p tcp --dport 443 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":443 2>/dev/null || true
 
         # Remove only the Nightwatch MASQUERADE rule (preserve Tailscale NAT)
         INET_IFACE="${INET_IFACE:-wlan0}"
