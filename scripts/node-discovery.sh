@@ -34,14 +34,14 @@ BAT_IFACE="${BAT_IFACE:-bat0}"
 DISCOVERY_PORT="${DISCOVERY_PORT:-4919}"
 BEACON_INTERVAL="${BEACON_INTERVAL:-30}"
 PEER_TIMEOUT="${PEER_TIMEOUT:-90}"
-PEER_FILE="/tmp/nightwatch-peers"
-PID_FILE="/tmp/nightwatch-discovery.pid"
+PEER_FILE="/run/nightwatch-peers"
+PID_FILE="/run/nightwatch-discovery.pid"
 LOCAL_IP="${MESH_IP%/*}"
 NODE_NUM="${PI_NUMBER:-1}"
 SERVER_NAME="node${NODE_NUM}.nightwatch.irc"
 IRC_LINK_PASSWORD="${IRC_LINK_PASSWORD:-nightwatch-mesh-link}"
 
-CONFLICT_FILE="/tmp/nightwatch-conflict"
+CONFLICT_FILE="/run/nightwatch-conflict"
 
 log() { echo "[discovery] $(date '+%H:%M:%S') $1"; }
 

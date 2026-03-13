@@ -7,11 +7,9 @@ PartOf=nightwatch-mesh.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'systemctl start ngircd && systemctl start nightwatch-bridge && systemctl start nginx'
+ExecStart=/bin/bash -c 'systemctl start ngircd; systemctl start nightwatch-bridge; systemctl start nginx'
 ExecStop=/bin/bash -c 'systemctl stop nginx; systemctl stop nightwatch-bridge; systemctl stop ngircd'
 TimeoutStartSec=60
-Restart=on-failure
-RestartSec=15
 StandardOutput=journal+console
 StandardError=journal+console
 

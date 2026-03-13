@@ -110,6 +110,9 @@ generate_dnsmasq_conf() {
 
     local dhcp_start=$((200 + (node_num - 1) * 5 + 1))
     local dhcp_end=$((200 + (node_num - 1) * 5 + 5))
+    # Cap at .254 to stay within /24 subnet
+    [ "$dhcp_start" -gt 254 ] && dhcp_start=254
+    [ "$dhcp_end" -gt 254 ] && dhcp_end=254
 
     mkdir -p "$(dirname "$conf_path")"
 

@@ -175,17 +175,33 @@ fi
 # ---- Step 1: Wait for network ----
 
 echo "[1/12] Waiting for network..."
+# Check if key packages are already installed — if so, internet is optional
+PKGS_INSTALLED=true
+for pkg in ngircd nginx batctl dnsmasq socat; do
+    if ! command -v "$pkg" >/dev/null 2>&1 && ! dpkg -s "$pkg" >/dev/null 2>&1; then
+        PKGS_INSTALLED=false
+        break
+    fi
+done
+
 TRIES=0
 MAX_TRIES=30
 while ! ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; do
     TRIES=$((TRIES + 1))
     if [ "$TRIES" -ge "$MAX_TRIES" ]; then
-        firstboot_fail "No internet after ${MAX_TRIES} attempts (150s). Connect Ethernet or fix WiFi, then: sudo systemctl start nightwatch-firstboot"
+        if $PKGS_INSTALLED; then
+            echo "[!] No internet after ${MAX_TRIES} attempts — but packages already installed, continuing"
+            break
+        else
+            firstboot_fail "No internet after ${MAX_TRIES} attempts (150s). Connect Ethernet or fix WiFi, then: sudo systemctl start nightwatch-firstboot"
+        fi
     fi
     echo "  Waiting... ($TRIES/$MAX_TRIES)"
     sleep 5
 done
-echo "[+] Network is up"
+if [ "$TRIES" -lt "$MAX_TRIES" ]; then
+    echo "[+] Network is up"
+fi
 
 # ---- Step 1b: Sync clock (Pi has no hardware RTC) ----
 
@@ -382,6 +398,8 @@ NODE_NUM="${PI_NUMBER:-1}"
 generate_dnsmasq_conf "$NIGHTWATCH_DIR/dnsmasq/dnsmasq.conf" "$NODE_NUM" "$MESH_IP"
 DHCP_START=$((200 + (NODE_NUM - 1) * 5 + 1))
 DHCP_END=$((200 + (NODE_NUM - 1) * 5 + 5))
+[ "$DHCP_START" -gt 254 ] && DHCP_START=254
+[ "$DHCP_END" -gt 254 ] && DHCP_END=254
 echo "[+] dnsmasq.conf generated (DHCP: .${DHCP_START}-.${DHCP_END})"
 
 # ---- Step 9: Install systemd services ----
