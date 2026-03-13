@@ -155,7 +155,7 @@ collect_debug_info() {
     # ---- Systemd services ----
     local SYSTEMD_JSON="["
     local FIRST=true
-    for svc in nightwatch-mesh nightwatch-docker nightwatch-discovery nightwatch-nodeconfig nightwatch-led nightwatch-bridge nightwatch-debug; do
+    for svc in nightwatch-mesh nightwatch-app nightwatch-discovery nightwatch-nodeconfig nightwatch-led nightwatch-bridge nightwatch-debug; do
         local STATE
         STATE=$(systemctl show -p ActiveState --value "$svc" 2>/dev/null || echo "unknown")
         local SUB

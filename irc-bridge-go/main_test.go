@@ -352,13 +352,13 @@ func TestHealthEndpointWithIRC(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	// Since handleHealth dials the hard-coded ircServer, we test it as
-	// an integration-style test (it will fail to connect to ngircd:6667
-	// since we're not in Docker). We verify the response code logic.
+	// an integration-style test (it will fail to connect to 127.0.0.1:6667
+	// since ngircd isn't running in test). We verify the response code logic.
 	handleHealth(rec, req)
 
 	// Without a real IRC server on ngircd:6667, health should return 503
 	if rec.Code != http.StatusServiceUnavailable {
-		// If somehow we're running inside docker, 200 is also OK
+		// If ngircd happens to be running locally, 200 is also OK
 		if rec.Code != http.StatusOK {
 			t.Fatalf("health returned %d, want 503 or 200", rec.Code)
 		}

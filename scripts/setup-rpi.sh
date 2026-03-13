@@ -22,7 +22,7 @@
 # After reboot, the boot sequence is:
 #   nodeconfig → generates .env from hostname
 #   mesh       → starts 802.11s + batman-adv + hostapd AP
-#   nightwatch-docker → starts IRC + bridge + nginx
+#   nightwatch-app → starts IRC + bridge + nginx
 
 set -euo pipefail
 
@@ -313,7 +313,7 @@ echo "[+] Services installed and enabled:"
 echo "    • nightwatch-nodeconfig (generates config from hostname)"
 echo "    • nightwatch-mesh (802.11s + batman-adv + AP)"
 echo "    • nightwatch-discovery (UDP broadcast node discovery)"
-echo "    • nightwatch-docker (IRC + bridge + nginx orchestrator)"
+echo "    • nightwatch-app (IRC + bridge + nginx orchestrator)"
 echo "    • nightwatch-led (green LED readiness indicator)"
 echo "    • nightwatch-debug (debug info collector)"
 
@@ -403,7 +403,7 @@ for f in .env scripts/mesh-fix.sh scripts/nodeconfig.sh scripts/node-discovery.s
     fi
 done
 
-for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch-docker nightwatch-led nightwatch-debug; do
+for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch-app nightwatch-led nightwatch-debug; do
     if systemctl is-enabled "$svc" >/dev/null 2>&1; then
         echo -e "  ${GREEN}[OK]${NC} $svc.service enabled"
     else

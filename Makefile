@@ -48,7 +48,7 @@ run:
 	@scripts/setup-distributed-irc.sh
 	@echo ""
 	@echo "[+] Starting app services..."
-	@sudo systemctl start nightwatch-docker.service
+	@sudo systemctl start nightwatch-app.service
 	@echo "[+] Waiting for services to be ready..."
 	@for attempt in $$(seq 1 24); do \
 		ALL_READY=true; \
@@ -82,7 +82,7 @@ run:
 
 stop:
 	@echo "[+] Stopping Nightwatch..."
-	@sudo systemctl stop nightwatch-docker.service 2>/dev/null || true
+	@sudo systemctl stop nightwatch-app.service 2>/dev/null || true
 	@sudo systemctl stop nightwatch-discovery.service 2>/dev/null || true
 	@sudo systemctl stop nightwatch-mesh.service 2>/dev/null || true
 	@echo "[+] Nightwatch stopped"
@@ -107,7 +107,7 @@ update:
 	fi
 	@chmod +x scripts/*.sh 2>/dev/null || true
 	@echo "[2/3] Stopping services..."
-	@sudo systemctl stop nightwatch-docker.service 2>/dev/null || true
+	@sudo systemctl stop nightwatch-app.service 2>/dev/null || true
 	@echo "[3/3] Restarting..."
 	@$(MAKE) run
 	@echo "[+] Update complete."
@@ -125,7 +125,7 @@ logs:
 	@sudo journalctl -u ngircd -u nightwatch-bridge -u nginx -f
 
 clean:
-	@sudo systemctl stop nightwatch-docker.service 2>/dev/null || true
+	@sudo systemctl stop nightwatch-app.service 2>/dev/null || true
 	@sudo systemctl stop nightwatch-discovery.service 2>/dev/null || true
 	@sudo systemctl stop nightwatch-mesh.service 2>/dev/null || true
 	@echo "[+] All services stopped"

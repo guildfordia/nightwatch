@@ -54,7 +54,7 @@ fi
 # ---- Sync service files to systemd ----
 # Ensures golden image clones and updates always have the latest service files
 SERVICES_UPDATED=false
-for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch-docker nightwatch-bridge nightwatch-led nightwatch-debug; do
+for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch-app nightwatch-bridge nightwatch-led nightwatch-debug; do
     SRC="$NIGHTWATCH_DIR/scripts/${svc}.service"
     DST="/etc/systemd/system/${svc}.service"
     if [ -f "$SRC" ]; then
@@ -499,7 +499,7 @@ if [ "$RESTART_SERVICES" = true ]; then
     log "Node number changed — restarting mesh and app services..."
     systemctl restart nightwatch-mesh.service 2>/dev/null || true
     sleep 5
-    systemctl restart nightwatch-docker.service 2>/dev/null || true
+    systemctl restart nightwatch-app.service 2>/dev/null || true
     log "Services restarted with new config"
 fi
 

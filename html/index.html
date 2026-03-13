@@ -933,17 +933,6 @@
           }
         }
 
-        // ---- Docker services ----
-        if (debug && debug.docker && debug.docker.length > 0) {
-          this.appendSystemLine('');
-          this.appendSystemLine('  DOCKER CONTAINERS');
-          debug.docker.forEach(c => {
-            const health = c.health !== 'no healthcheck' ? ` [${c.health}]` : '';
-            const restarts = c.restarts > 0 ? ` (${c.restarts} restarts)` : '';
-            this.appendSystemLine(`    ${c.name.padEnd(15)} ${c.status}${health}${restarts}`);
-          });
-        }
-
         // ---- Systemd services ----
         if (debug && debug.systemd) {
           this.appendSystemLine('');

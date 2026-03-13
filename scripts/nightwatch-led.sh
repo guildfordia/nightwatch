@@ -97,7 +97,7 @@ check_ready() {
     }
 
     check_svc nightwatch-mesh
-    check_svc nightwatch-docker
+    check_svc nightwatch-app
 
     # Check if bat0 interface exists (mesh is actually functional)
     if [ ! -d /sys/class/net/bat0 ]; then
@@ -135,7 +135,7 @@ print_status() {
 
     echo ""
     echo "Services:"
-    for svc in nightwatch-mesh nightwatch-docker nightwatch-discovery; do
+    for svc in nightwatch-mesh nightwatch-app nightwatch-discovery; do
         local state
         state=$(systemctl show -p ActiveState --value "$svc" 2>/dev/null || echo "unknown")
         printf "  %-30s %s\n" "$svc" "$state"

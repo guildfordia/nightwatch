@@ -72,7 +72,7 @@ fi
 # ---- Step 1: Stop services ----
 
 echo "[1/7] Stopping services..."
-systemctl stop nightwatch-docker.service 2>/dev/null || true
+systemctl stop nightwatch-app.service 2>/dev/null || true
 systemctl stop nightwatch-discovery.service 2>/dev/null || true
 systemctl stop nightwatch-mesh.service 2>/dev/null || true
 echo "[+] Services stopped"

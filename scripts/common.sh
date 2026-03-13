@@ -333,7 +333,7 @@ install_systemd_services() {
 
     chmod +x "$project_dir"/scripts/*.sh 2>/dev/null || true
 
-    for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch-docker nightwatch-bridge nightwatch-led nightwatch-debug; do
+    for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch-app nightwatch-bridge nightwatch-led nightwatch-debug; do
         local src="$project_dir/scripts/${svc}.service"
         if [ -f "$src" ]; then
             sed "s|/opt/nightwatch|$project_dir|g" "$src" > "/etc/systemd/system/${svc}.service"
@@ -349,7 +349,12 @@ install_systemd_services() {
     systemctl enable nightwatch-nodeconfig.service
     systemctl enable nightwatch-mesh.service
     systemctl enable nightwatch-discovery.service
-    systemctl enable nightwatch-docker.service
+    systemctl enable nightwatch-app.service
+    # Remove legacy nightwatch-docker.service if present (renamed to nightwatch-app)
+    if systemctl is-enabled nightwatch-docker.service 2>/dev/null; then
+        systemctl disable nightwatch-docker.service 2>/dev/null || true
+        rm -f /etc/systemd/system/nightwatch-docker.service
+    fi
     systemctl enable nightwatch-bridge.service
     systemctl enable nightwatch-led.service
     systemctl enable nightwatch-debug.service

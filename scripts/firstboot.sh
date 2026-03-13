@@ -395,7 +395,7 @@ echo "[+] Services installed and enabled:"
 echo "    - nightwatch-nodeconfig (generates config from hostname)"
 echo "    - nightwatch-mesh (802.11s + batman-adv + bridge)"
 echo "    - nightwatch-discovery (UDP broadcast node discovery)"
-echo "    - nightwatch-docker (IRC + bridge + nginx orchestrator)"
+echo "    - nightwatch-app (IRC + bridge + nginx orchestrator)"
 echo "    - nightwatch-led (green LED readiness indicator)"
 echo "    - nightwatch-debug (debug info collector)"
 

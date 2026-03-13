@@ -21,10 +21,9 @@ build/
 .secrets
 .node-number
 
-# Docker
+# Archives
 *.tar
 *.tar.gz
-docker-compose.override.yml
 
 # Generated configs (contain secrets or node-specific settings)
 ngircd/ngircd.conf

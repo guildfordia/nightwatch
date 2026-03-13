@@ -450,7 +450,7 @@ func isValidIRCNick(nick string) bool {
 
 func handleWebSocket(hub *Hub, limiter *RateLimiter, cleanupWg *sync.WaitGroup, w http.ResponseWriter, r *http.Request) {
 	// Extract client IP — prefer X-Real-IP set by nginx reverse proxy,
-	// since r.RemoteAddr is always the Docker gateway IP (172.x.x.x)
+	// since r.RemoteAddr is always the loopback IP when behind nginx
 	clientIP := r.Header.Get("X-Real-IP")
 	if clientIP == "" {
 		clientIP = r.RemoteAddr

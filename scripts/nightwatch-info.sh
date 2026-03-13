@@ -115,7 +115,7 @@ done
 
 # ---- Systemd services ----
 section "Systemd Services"
-for svc in nightwatch-mesh nightwatch-docker nightwatch-discovery nightwatch-nodeconfig nightwatch-led nightwatch-bridge nightwatch-debug; do
+for svc in nightwatch-mesh nightwatch-app nightwatch-discovery nightwatch-nodeconfig nightwatch-led nightwatch-bridge nightwatch-debug; do
     STATE=$(systemctl is-active "$svc" 2>/dev/null || echo "unknown")
     case "$STATE" in
         active)   COLOR="$GREEN" ;;
