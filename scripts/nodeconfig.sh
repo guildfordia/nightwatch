@@ -67,6 +67,15 @@ for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch
         fi
     fi
 done
+# Migrate legacy nightwatch-docker.service → nightwatch-app.service
+if [ -f /etc/systemd/system/nightwatch-docker.service ]; then
+    systemctl stop nightwatch-docker.service 2>/dev/null || true
+    systemctl disable nightwatch-docker.service 2>/dev/null || true
+    rm -f /etc/systemd/system/nightwatch-docker.service
+    SERVICES_UPDATED=true
+    log "Migrated nightwatch-docker → nightwatch-app"
+fi
+
 if [ "$SERVICES_UPDATED" = true ]; then
     systemctl daemon-reload
     log "systemd reloaded"
@@ -301,6 +310,26 @@ if [ -f "$NODE_NUM_FILE" ]; then
     if [[ "$SAVED_NUM" =~ ^[0-9]+$ ]] && [ "$SAVED_NUM" -ge 1 ] && [ "$SAVED_NUM" -le "$MAX_NODES" ]; then
         NODE_NUM="$SAVED_NUM"
         log "Using saved node number: $NODE_NUM (from $NODE_NUM_FILE)"
+
+        # Lightweight conflict check: if bat0 is already up (mesh service running),
+        # verify our saved number matches our MAC position. This catches the case
+        # where firstboot assigned #1 while solo, but now other nodes are on the mesh.
+        if [ -d /sys/class/net/bat0 ]; then
+            OUR_MAC=$(cat "/sys/class/net/$MESH_IFACE/address" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
+            NEIGHBOR_MACS=$(batctl meshif bat0 n 2>/dev/null | tail -n +3 | awk '{print $2}' | tr '[:upper:]' '[:lower:]' | sort || true)
+            if [ -n "$OUR_MAC" ] && [ -n "$NEIGHBOR_MACS" ]; then
+                ALL_MACS=$(printf '%s\n%s' "$OUR_MAC" "$NEIGHBOR_MACS" | sort)
+                CORRECT_POS=1
+                while IFS= read -r mac; do
+                    [ "$mac" = "$OUR_MAC" ] && break
+                    CORRECT_POS=$((CORRECT_POS + 1))
+                done <<< "$ALL_MACS"
+                if [ "$CORRECT_POS" != "$NODE_NUM" ]; then
+                    log "Conflict: saved #$NODE_NUM but MAC sort says #$CORRECT_POS — reassigning"
+                    NODE_NUM="$CORRECT_POS"
+                fi
+            fi
+        fi
     fi
 fi
 
