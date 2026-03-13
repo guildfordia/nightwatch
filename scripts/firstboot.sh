@@ -411,94 +411,18 @@ else
     echo "[!] The binary needs to be cross-compiled for ARM before deployment"
 fi
 
-# ---- Step 11: Start everything ----
+# ---- Step 11: Services will start after firstboot completes ----
+# NOTE: Do NOT use 'systemctl start' here. Firstboot runs as a oneshot
+# service during boot. Starting other services synchronously creates a
+# deadlock: those services wait for multi-user.target, which waits for
+# firstboot to finish. All services are already enabled (step 9) and
+# will start automatically when firstboot completes and systemd reaches
+# multi-user.target.
 
 echo ""
-echo "[11/12] Starting mesh network..."
-systemctl start nightwatch-mesh.service
-sleep 5
-
-echo "[+] Starting node discovery..."
-systemctl start nightwatch-discovery.service 2>/dev/null || true
-
-echo "[+] Starting native services..."
-systemctl start ngircd
-systemctl start nightwatch-bridge
-systemctl start nginx
-sleep 3
-echo "[+] Services started"
-
-echo "[+] Starting LED readiness indicator..."
-systemctl start nightwatch-led.service 2>/dev/null || true
-
-echo "[+] Starting debug info collector..."
-systemctl start nightwatch-debug.service 2>/dev/null || true
-
-# ---- Step 11b: Resolve node number conflicts ----
-# On first boot, nodeconfig runs before other nodes have their mesh up,
-# so every node picks #1. Now that mesh is live, use deterministic
-# MAC-based sorting to assign unique numbers (same algorithm as
-# nodeconfig.sh scan_mesh).
-
-echo ""
-echo "[11b/12] Checking for node number conflicts..."
-
-PEER_WAIT=0
-PEER_COUNT=0
-# Skip peer wait entirely if bat0 isn't up (solo deployment, no mesh dongle, etc.)
-if [ -d /sys/class/net/bat0 ]; then
-    while [ "$PEER_WAIT" -lt 120 ]; do
-        PEER_COUNT=$(batctl meshif bat0 n 2>/dev/null | tail -n +3 | grep -c . || true)
-        PEER_COUNT=${PEER_COUNT:-0}
-        if [ "$PEER_COUNT" -gt 0 ]; then
-            break
-        fi
-        sleep 10
-        PEER_WAIT=$((PEER_WAIT + 10))
-    done
-else
-    echo "[+] bat0 not found — skipping peer discovery wait"
-fi
-
-if [ "$PEER_COUNT" -gt 0 ]; then
-    echo "[+] Mesh has $PEER_COUNT neighbor(s) — verifying node assignment..."
-
-    # Determine correct node number using MAC-based sorting
-    OUR_MAC=$(cat "/sys/class/net/${MESH_IFACE:-wlan1}/address" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
-    NEIGHBOR_MACS=$(batctl meshif bat0 n 2>/dev/null | tail -n +3 | awk '{print $2}' | tr '[:upper:]' '[:lower:]' | sort || true)
-
-    if [ -n "$OUR_MAC" ] && [ -n "$NEIGHBOR_MACS" ]; then
-        ALL_MACS=$(printf '%s\n%s' "$OUR_MAC" "$NEIGHBOR_MACS" | sort)
-        OUR_POSITION=1
-        while IFS= read -r mac; do
-            if [ "$mac" = "$OUR_MAC" ]; then
-                break
-            fi
-            OUR_POSITION=$((OUR_POSITION + 1))
-        done <<< "$ALL_MACS"
-
-        CURRENT_NUM="${PI_NUMBER:-1}"
-        if [ "$OUR_POSITION" != "$CURRENT_NUM" ]; then
-            echo "[!] Conflict: currently #$CURRENT_NUM, should be #$OUR_POSITION (MAC sort)"
-            echo "[+] Reassigning to node #$OUR_POSITION..."
-            # Write correct number — nodeconfig detects the change and
-            # regenerates .env, ngircd.conf, dnsmasq.conf, hostname, restarts services
-            echo "$OUR_POSITION" > "$NIGHTWATCH_DIR/.node-number"
-            "$NIGHTWATCH_DIR/scripts/nodeconfig.sh"
-            # Reload .env so stamp file and summary use updated values
-            load_env "$NIGHTWATCH_DIR/.env"
-            echo "[+] Reassigned to Pi #${PI_NUMBER} (${MESH_IP})"
-        else
-            echo "[+] Node #$CURRENT_NUM confirmed — no conflict"
-        fi
-    fi
-else
-    echo "[+] Solo node (no mesh peers yet) — keeping node #${PI_NUMBER:-1}"
-fi
-
-# Regenerate dnsmasq config with final node number (may have changed in 11b)
-NODE_NUM="${PI_NUMBER:-1}"
-generate_dnsmasq_conf "$NIGHTWATCH_DIR/dnsmasq/dnsmasq.conf" "$NODE_NUM" "$MESH_IP"
+echo "[11/12] Services are enabled — they will start after firstboot completes"
+echo "    Enabled: nightwatch-mesh, nightwatch-app, nightwatch-discovery,"
+echo "             nightwatch-bridge, nightwatch-led, nightwatch-debug"
 
 # ---- Step 12: Mark complete & disable firstboot ----
 
