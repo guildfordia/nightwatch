@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -77,8 +78,8 @@ func (nr *NickRegistry) loadCounter() {
 }
 
 func (nr *NickRegistry) saveCounter() {
-	if err := os.MkdirAll("/data", 0755); err != nil {
-		log.Printf("Failed to create /data dir: %v", err)
+	if err := os.MkdirAll(filepath.Dir(nr.counterFile), 0755); err != nil {
+		log.Printf("Failed to create data dir: %v", err)
 		return
 	}
 	if err := os.WriteFile(nr.counterFile, []byte(fmt.Sprintf("%d\n", nr.counter)), 0644); err != nil {
