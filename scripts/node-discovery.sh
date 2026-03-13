@@ -54,7 +54,7 @@ BROADCAST_IP="${LOCAL_IP%.*}.255"
 
 # Note: IP conflict detection is done via beacon monitoring, not ARP.
 # When a beacon arrives with our own node number from a different IP,
-# we log a conflict to /tmp/nightwatch-conflict.
+# we log a conflict to /run/nightwatch-conflict.
 
 # ---- Beacon sender (runs in background) ----
 send_beacons() {

@@ -111,8 +111,12 @@ generate_dnsmasq_conf() {
     local dhcp_start=$((200 + (node_num - 1) * 5 + 1))
     local dhcp_end=$((200 + (node_num - 1) * 5 + 5))
     # Cap at .254 to stay within /24 subnet
-    [ "$dhcp_start" -gt 254 ] && dhcp_start=254
     [ "$dhcp_end" -gt 254 ] && dhcp_end=254
+    if [ "$dhcp_start" -gt 254 ]; then
+        echo "generate_dnsmasq_conf: node $node_num has no DHCP range (start .${dhcp_start} > .254)" >&2
+        echo "  Reduce MAX_NODES or use fewer nodes. Max 11 nodes fit in .201-.254." >&2
+        return 1
+    fi
 
     mkdir -p "$(dirname "$conf_path")"
 

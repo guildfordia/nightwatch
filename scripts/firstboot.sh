@@ -219,7 +219,9 @@ if command -v timedatectl >/dev/null 2>&1; then
 fi
 # Fallback: fetch time from HTTP header if NTP didn't work
 # Check if clock is behind the build date of this script (Pi has no RTC)
-SCRIPT_YEAR=$(date -r "$NIGHTWATCH_DIR/scripts/firstboot.sh" +%Y 2>/dev/null || echo "2025")
+SCRIPT_YEAR=$(date -r "$NIGHTWATCH_DIR/scripts/firstboot.sh" +%Y 2>/dev/null \
+    || stat -c %Y "$NIGHTWATCH_DIR/scripts/firstboot.sh" 2>/dev/null | xargs -I{} date -d @{} +%Y 2>/dev/null \
+    || echo "2099")
 if [ "$(date +%Y)" -lt "$SCRIPT_YEAR" ]; then
     HTTP_DATE=$(curl -sI --max-time 10 http://deb.debian.org 2>/dev/null | grep -i "^date:" | sed 's/^[Dd]ate: //')
     if [ -n "$HTTP_DATE" ] && date -d "$HTTP_DATE" >/dev/null 2>&1; then

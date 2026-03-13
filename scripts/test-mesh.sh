@@ -215,7 +215,7 @@ fi
 section "2. Node Discovery"
 
 # Check for node/IP conflicts
-CONFLICT_FILE="/tmp/nightwatch-conflict"
+CONFLICT_FILE="/run/nightwatch-conflict"
 if [ -f "$CONFLICT_FILE" ]; then
     fail "NODE CONFLICT: $(cat "$CONFLICT_FILE")"
 else
@@ -225,7 +225,7 @@ fi
 # Check if discovery daemon is running
 if systemctl is-active nightwatch-discovery.service >/dev/null 2>&1; then
     pass "Discovery daemon running"
-    PEER_FILE="/tmp/nightwatch-peers"
+    PEER_FILE="/run/nightwatch-peers"
     if [ -f "$PEER_FILE" ] && [ -s "$PEER_FILE" ]; then
         peer_count=$(wc -l < "$PEER_FILE")
         pass "Discovery daemon knows $peer_count peer(s)"

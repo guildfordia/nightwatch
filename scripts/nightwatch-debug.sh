@@ -198,8 +198,8 @@ collect_debug_info() {
 
     # ---- Conflict check ----
     local CONFLICT=""
-    if [ -f /tmp/nightwatch-conflict ]; then
-        CONFLICT=$(cat /tmp/nightwatch-conflict 2>/dev/null || echo "")
+    if [ -f /run/nightwatch-conflict ]; then
+        CONFLICT=$(cat /run/nightwatch-conflict 2>/dev/null || echo "")
     fi
 
     # ---- System resources ----

@@ -68,6 +68,12 @@ if [ "$IFACE_TYPE" != "mesh" ]; then
     exit 0
 fi
 
+# Check if batctl is available
+if ! command -v batctl >/dev/null 2>&1; then
+    log "batctl not found — cannot monitor mesh"
+    exit 1
+fi
+
 # Check if wlan1 is registered in batman-adv (try new syntax, fall back to old)
 if ! batctl meshif bat0 if 2>/dev/null | grep -q "$MESH_IFACE" && \
    ! batctl if 2>/dev/null | grep -q "$MESH_IFACE"; then
