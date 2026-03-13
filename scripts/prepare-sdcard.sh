@@ -376,15 +376,16 @@ STAGEEOF
             echo "[+] Staging command added to cloud-init user-data"
         fi
 
-        # Fix broken cmdline.txt → firstrun.sh reference (Pi Imager bug on cloud-init images).
-        # Pi Imager sets systemd.run=/boot/firmware/firstrun.sh but doesn't create the file,
-        # which causes the boot to HANG. Remove the directives — cloud-init handles first boot.
-        if [ -f "$cmdline" ] && grep -q 'systemd.run=' "$cmdline"; then
+        # Replace any existing systemd.run (e.g. Pi Imager's broken firstrun.sh reference)
+        # with our staging script. This ensures staging runs even if cloud-init runcmd
+        # fails (which happens on some Bookworm images).
+        if [ -f "$cmdline" ]; then
             local clean_cmdline
             clean_cmdline=$(cat "$cmdline" | sed 's| systemd\.run=[^ ]*||g' | sed 's| systemd\.run_success_action=[^ ]*||g' | sed 's| systemd\.unit=kernel-command-line\.target||g')
-            echo "$clean_cmdline" > "$cmdline"
+            printf '%s systemd.run=/boot/firmware/nightwatch-stage.sh systemd.run_success_action=reboot systemd.unit=kernel-command-line.target\n' \
+                "$clean_cmdline" > "$cmdline"
             rm -f "$firstrun" 2>/dev/null
-            echo "[+] Removed broken firstrun.sh references from cmdline.txt"
+            echo "[+] cmdline.txt: systemd.run set to nightwatch-stage.sh (belt-and-suspenders with cloud-init)"
         fi
 
     elif [ -f "$firstrun" ]; then
