@@ -328,12 +328,18 @@ fi
 # Clean up staged files from boot partition
 rm -f "$BOOT/nightwatch.tar.gz" "$BOOT/nightwatch-secrets" "$BOOT/nightwatch-stage.sh"
 
-# If running from cloud-init runcmd (not firstrun.sh), firstrun.sh won't reboot
-# for us. Schedule a reboot so the firstboot service starts.
-if [ ! -f "$BOOT/firstrun.sh" ]; then
-    echo "[+] nightwatch-stage: scheduling reboot for firstboot service"
-    shutdown -r +1 "Nightwatch: rebooting to start firstboot setup" &
+# Remove systemd.run from cmdline.txt so the next boot uses normal multi-user.target.
+# Without this, systemd.unit=kernel-command-line.target stays in cmdline.txt and
+# the Pi boots into a minimal target with no networking or services.
+CMDLINE="$BOOT/cmdline.txt"
+if [ -f "$CMDLINE" ] && grep -q 'systemd\.run=' "$CMDLINE"; then
+    sed -i 's| systemd\.run=[^ ]*||g; s| systemd\.run_success_action=[^ ]*||g; s| systemd\.unit=kernel-command-line\.target||g' "$CMDLINE"
+    echo "[+] nightwatch-stage: cleaned systemd.run from cmdline.txt"
 fi
+
+# Schedule a reboot so the firstboot service starts.
+echo "[+] nightwatch-stage: scheduling reboot for firstboot service"
+shutdown -r +1 "Nightwatch: rebooting to start firstboot setup" &
 
 echo "[+] nightwatch-stage: done — firstboot service will run after reboot"
 STAGEEOF
