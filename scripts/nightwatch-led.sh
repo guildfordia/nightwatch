@@ -4,8 +4,14 @@
 # Uses the Raspberry Pi's onboard green ACT LED to show node status:
 #   - Heartbeat (slow blink) = booting / services starting
 #   - Fast blink             = error / critical service down
+#   - Triple blink (SOS)     = undervoltage detected (power too low)
 #   - Solid green            = all services up and ready
 #   - Default (mmc0)         = restored on stop (normal disk activity LED)
+#
+# Undervoltage takes priority over all other states — if the Pi reports
+# low voltage via vcgencmd, the LED will triple-blink regardless of
+# service health. This warns that the power source (battery/USB) is
+# insufficient and the Pi may crash or corrupt the SD card.
 #
 # The script runs as a long-lived service, periodically checking health
 # and updating the LED pattern accordingly.
@@ -63,6 +69,109 @@ led_solid_on() {
 led_restore_default() {
     # Restore the default trigger (disk activity)
     led_set_trigger "mmc0"
+}
+
+# Triple blink: 3 quick flashes then a pause (manual, runs in foreground).
+# Used as undervoltage warning — visually distinct from heartbeat or fast blink.
+# This is called in the main loop instead of setting a trigger, because the
+# "timer" trigger can't do grouped blinks.
+led_triple_blink() {
+    led_set_trigger "none"
+    for _ in 1 2 3; do
+        echo 1 > "$LED_PATH/brightness" 2>/dev/null || true
+        sleep 0.1
+        echo 0 > "$LED_PATH/brightness" 2>/dev/null || true
+        sleep 0.1
+    done
+    # Pause between bursts (caller sleeps too, so total off-time ≈ 1s)
+    sleep 0.7
+}
+
+# ---- PWR LED (red, Pi 5 / some Pi 4) ----
+
+PWR_LED_PATH=""
+for candidate in /sys/class/leds/PWR /sys/class/leds/led1; do
+    if [ -d "$candidate" ]; then
+        PWR_LED_PATH="$candidate"
+        break
+    fi
+done
+
+pwr_led_set() {
+    # Set PWR LED: "on" = solid, "off" = off, "blink" = timer
+    [ -z "$PWR_LED_PATH" ] && return
+    case "$1" in
+        on)
+            echo "none" > "$PWR_LED_PATH/trigger" 2>/dev/null || true
+            echo 1 > "$PWR_LED_PATH/brightness" 2>/dev/null || true
+            ;;
+        off)
+            echo "none" > "$PWR_LED_PATH/trigger" 2>/dev/null || true
+            echo 0 > "$PWR_LED_PATH/brightness" 2>/dev/null || true
+            ;;
+        blink)
+            echo "timer" > "$PWR_LED_PATH/trigger" 2>/dev/null || true
+            echo 500 > "$PWR_LED_PATH/delay_on" 2>/dev/null || true
+            echo 500 > "$PWR_LED_PATH/delay_off" 2>/dev/null || true
+            ;;
+        default)
+            echo "default-on" > "$PWR_LED_PATH/trigger" 2>/dev/null || true
+            ;;
+    esac
+}
+
+# ---- Undervoltage detection ----
+
+# vcgencmd get_throttled returns a hex bitmask:
+#   Bit 0  (0x1)     = currently under-voltage (<4.63V)
+#   Bit 1  (0x2)     = ARM frequency currently capped
+#   Bit 2  (0x4)     = currently throttled
+#   Bit 16 (0x10000) = under-voltage has occurred since boot
+#   Bit 17 (0x20000) = ARM frequency capping has occurred
+#   Bit 18 (0x40000) = throttling has occurred
+#
+# We check bit 0 (active under-voltage) for the urgent warning,
+# and bit 16 (historical) for informational logging.
+
+UNDERVOLTAGE_LOGGED=false
+
+check_undervoltage() {
+    # Returns 0 = under-voltage NOW, 1 = no under-voltage, 2 = vcgencmd unavailable
+    if ! command -v vcgencmd >/dev/null 2>&1; then
+        return 2
+    fi
+
+    local throttled
+    throttled=$(vcgencmd get_throttled 2>/dev/null | grep -oP '0x[0-9a-fA-F]+' || echo "")
+    if [ -z "$throttled" ]; then
+        return 2
+    fi
+
+    # Convert hex to decimal for bitwise test
+    local val=$((throttled))
+
+    # Bit 0: currently under-voltage
+    if (( val & 0x1 )); then
+        if [ "$UNDERVOLTAGE_LOGGED" = false ]; then
+            echo "[!] UNDERVOLTAGE DETECTED (vcgencmd: $throttled) — power source too weak!"
+            echo "[!] Pi may become unstable. Check USB power supply / battery."
+            UNDERVOLTAGE_LOGGED=true
+        fi
+        return 0
+    fi
+
+    # Bit 16: under-voltage occurred since boot (not active now)
+    if (( val & 0x10000 )); then
+        if [ "$UNDERVOLTAGE_LOGGED" = false ]; then
+            echo "[!] Under-voltage occurred since boot (vcgencmd: $throttled) — monitor power source"
+            UNDERVOLTAGE_LOGGED=true
+        fi
+    else
+        # Voltage is fine now, reset logging flag so we log again if it recurs
+        UNDERVOLTAGE_LOGGED=false
+    fi
+
+    return 1
 }
 
 # ---- Health checks ----
@@ -124,6 +233,13 @@ check_ready() {
 }
 
 print_status() {
+    # Check undervoltage first
+    local uv=0
+    check_undervoltage || uv=$?
+    if [ "$uv" -eq 0 ]; then
+        echo "*** UNDER-VOLTAGE — power source too low! ***"
+    fi
+
     local rc=0
     check_ready || rc=$?
 
@@ -154,7 +270,31 @@ print_status() {
     done
 
     echo ""
+    echo "Power:"
+    if command -v vcgencmd >/dev/null 2>&1; then
+        local throttled
+        throttled=$(vcgencmd get_throttled 2>/dev/null | grep -oP '0x[0-9a-fA-F]+' || echo "unavailable")
+        local val=$((throttled))
+        printf "  vcgencmd throttled: %s" "$throttled"
+        if (( val & 0x1 )); then
+            printf "  *** UNDER-VOLTAGE NOW ***"
+        elif (( val & 0x10000 )); then
+            printf "  (under-voltage occurred since boot)"
+        fi
+        echo ""
+        # Show CPU temperature too — useful for power/thermal debugging
+        local temp
+        temp=$(vcgencmd measure_temp 2>/dev/null | grep -oP '[0-9.]+' || echo "?")
+        printf "  CPU temperature: %s°C\n" "$temp"
+    else
+        echo "  vcgencmd not available"
+    fi
+
+    echo ""
     echo "LED: $LED_PATH (trigger: $(cat "$LED_PATH/trigger" 2>/dev/null | grep -oP '\[\K[^\]]+' || echo 'unknown'))"
+    if [ -n "$PWR_LED_PATH" ]; then
+        echo "PWR: $PWR_LED_PATH (trigger: $(cat "$PWR_LED_PATH/trigger" 2>/dev/null | grep -oP '\[\K[^\]]+' || echo 'unknown'))"
+    fi
 }
 
 # ---- Main ----
@@ -162,25 +302,57 @@ print_status() {
 case "${1:-}" in
     start)
         echo "[+] Nightwatch LED status indicator starting"
-        echo "[+] LED: $LED_PATH"
+        echo "[+] ACT LED: $LED_PATH"
+        [ -n "$PWR_LED_PATH" ] && echo "[+] PWR LED: $PWR_LED_PATH"
 
         # Start with heartbeat (booting)
         led_heartbeat
+        CURRENT_STATE=""
 
         # Loop forever, checking health every 10 seconds
         while true; do
+            # Undervoltage takes priority over everything
+            uv_rc=0
+            check_undervoltage || uv_rc=$?
+
+            if [ "$uv_rc" -eq 0 ]; then
+                # Active under-voltage — triple blink ACT LED + blink PWR LED
+                if [ "$CURRENT_STATE" != "undervoltage" ]; then
+                    CURRENT_STATE="undervoltage"
+                    pwr_led_set blink
+                fi
+                # Triple-blink is manual (not a trigger), so we call it each iteration
+                # It takes ~1.3s, and we skip the normal sleep to keep the pattern tight
+                led_triple_blink
+                continue
+            fi
+
+            # Restore PWR LED if we were in undervoltage state
+            if [ "$CURRENT_STATE" = "undervoltage" ]; then
+                pwr_led_set default
+            fi
+
             rc=0
             check_ready || rc=$?
 
             case "$rc" in
                 0)
-                    led_solid_on
+                    if [ "$CURRENT_STATE" != "ready" ]; then
+                        led_solid_on
+                        CURRENT_STATE="ready"
+                    fi
                     ;;
                 1)
-                    led_fast_blink
+                    if [ "$CURRENT_STATE" != "error" ]; then
+                        led_fast_blink
+                        CURRENT_STATE="error"
+                    fi
                     ;;
                 2)
-                    led_heartbeat
+                    if [ "$CURRENT_STATE" != "starting" ]; then
+                        led_heartbeat
+                        CURRENT_STATE="starting"
+                    fi
                     ;;
             esac
 
@@ -191,6 +363,7 @@ case "${1:-}" in
     stop)
         echo "[+] Restoring default LED behavior"
         led_restore_default
+        pwr_led_set default
         ;;
 
     status)
