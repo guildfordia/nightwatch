@@ -405,15 +405,12 @@ start_dnsmasq() {
     iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80 2>/dev/null || \
         iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80
 
-    # HTTPS redirect: catch HTTPS traffic → nginx self-signed cert → 302 to HTTP.
-    # Modern browsers (Firefox, Chrome) default to HTTPS-first. Without this rule,
-    # HTTPS to non-Pi IPs goes nowhere. With it, nginx serves a 302 redirect to
-    # HTTP, where the chat page loads. The captive portal popup browser handles
-    # self-signed certs automatically.
-    iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 443 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":443 2>/dev/null || \
-        iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 443 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":443
+    # NOTE: No port 443 DNAT rule. Nginx intentionally does NOT listen on 443.
+    # When browsers try HTTPS, they get "connection refused" and automatically
+    # fall back to HTTP — where the chat page loads. A self-signed cert on 443
+    # would cause a cert error page with NO automatic fallback.
 
-    echo "[+] Captive portal iptables rules active (DNS + HTTP + HTTPS redirect)"
+    echo "[+] Captive portal iptables rules active (DNS + HTTP redirect)"
 }
 
 setup_gateway() {
