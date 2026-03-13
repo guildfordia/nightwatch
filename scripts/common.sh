@@ -137,9 +137,14 @@ dhcp-range=192.168.199.${dhcp_start},192.168.199.${dhcp_end},255.255.255.0,1h
 dhcp-option=3,${mesh_ip}
 dhcp-option=6,${mesh_ip}
 
+# Captive portal via DHCP option 114 (RFC 8910)
+# Tells Android 11+, iOS 14+, and modern OSes "this is a captive portal"
+# directly in the DHCP response — triggers "Sign in to network" popup
+# even when the phone has mobile data active.
+dhcp-option=114,http://${mesh_ip}/
+
 # Redirect ALL DNS to this node (captive portal)
-# Every domain resolves to the local Pi — phone detects "no internet" and
-# opens captive portal popup, which shows the Nightwatch chat page.
+# Every domain resolves to the local Pi so any URL loads the chat page.
 address=/#/${mesh_ip}
 
 # Don't read /etc/resolv.conf (we handle all DNS ourselves)
