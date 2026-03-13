@@ -137,11 +137,11 @@ dhcp-range=192.168.199.${dhcp_start},192.168.199.${dhcp_end},255.255.255.0,1h
 dhcp-option=3,${mesh_ip}
 dhcp-option=6,${mesh_ip}
 
-# Captive portal via DHCP option 114 (RFC 8910)
+# Captive portal via DHCP option 114 (RFC 8910) + RFC 8908 Captive Portal API
 # Tells Android 11+, iOS 14+, and modern OSes "this is a captive portal"
-# directly in the DHCP response — triggers "Sign in to network" popup
-# even when the phone has mobile data active.
-dhcp-option=114,http://${mesh_ip}/
+# directly in the DHCP response. The URL points to an RFC 8908 JSON endpoint
+# so the OS uses its built-in mini-browser (not Firefox/Chrome) for the popup.
+dhcp-option=114,http://${mesh_ip}/api/captive
 
 # Redirect ALL DNS to this node (captive portal)
 # Every domain resolves to the local Pi so any URL loads the chat page.
