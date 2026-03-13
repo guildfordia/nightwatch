@@ -371,12 +371,20 @@ start_dnsmasq() {
     # Also stop the system dnsmasq to avoid port conflicts
     systemctl stop dnsmasq 2>/dev/null || true
 
+    if [ ! -f "$DNSMASQ_CONF" ]; then
+        echo "[+] dnsmasq config not found — generating..."
+        local node_num="${PI_NUMBER:-1}"
+        local mesh_ip="${MESH_IP%/*}"
+        generate_dnsmasq_conf "$DNSMASQ_CONF" "$node_num" "$mesh_ip"
+        echo "[+] dnsmasq.conf generated for node $node_num"
+    fi
+
     if [ -f "$DNSMASQ_CONF" ]; then
         echo "[+] Starting dnsmasq (DHCP + captive portal DNS on $BR_IFACE)..."
         dnsmasq --conf-file="$DNSMASQ_CONF"
         echo "[+] dnsmasq running — WiFi clients will get IPs and captive portal"
     else
-        echo "[!] dnsmasq config not found at $DNSMASQ_CONF — run 'make install' to generate"
+        echo "[!] dnsmasq config generation failed — captive portal will not work"
     fi
 
     # ---- Captive portal iptables rules ----
