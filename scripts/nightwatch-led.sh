@@ -44,13 +44,6 @@ led_set_trigger() {
     echo "$trigger" > "$LED_PATH/trigger" 2>/dev/null || true
 }
 
-led_set_brightness() {
-    local val="$1"
-    # Must set trigger to "none" first for manual control
-    led_set_trigger "none"
-    echo "$val" > "$LED_PATH/brightness" 2>/dev/null || true
-}
-
 led_heartbeat() {
     led_set_trigger "heartbeat"
 }
