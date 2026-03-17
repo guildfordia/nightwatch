@@ -62,8 +62,9 @@ led_fast_blink() {
 }
 
 led_solid_on() {
-    led_set_trigger "none"
-    echo 1 > "$LED_PATH/brightness" 2>/dev/null || true
+    # Use "default-on" trigger instead of "none" + brightness — Pi 5's RP1
+    # LED controller ignores brightness writes when trigger is "none".
+    led_set_trigger "default-on"
 }
 
 led_restore_default() {
