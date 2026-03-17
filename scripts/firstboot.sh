@@ -495,3 +495,9 @@ echo ""
 echo "  Web UI:     http://${MESH_IP%/*}"
 echo "  Log:        $LOG_FILE"
 echo "======================================"
+
+# Reboot so all enabled services start cleanly.
+# Without this the Pi sits idle after firstboot with no visual feedback.
+echo ""
+echo "[+] Rebooting to start Nightwatch services..."
+shutdown -r +1 "Nightwatch: firstboot complete — rebooting to start services" &
