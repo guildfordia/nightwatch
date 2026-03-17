@@ -366,7 +366,12 @@ start_dnsmasq() {
     if [ -f "$DNSMASQ_PID" ]; then
         OLD_PID=$(cat "$DNSMASQ_PID")
         if kill -0 "$OLD_PID" 2>/dev/null; then
-            kill "$OLD_PID" 2>/dev/null || true
+            # Verify it's actually dnsmasq before killing (PID could be recycled)
+            if ps -p "$OLD_PID" -o comm= 2>/dev/null | grep -q '^dnsmasq'; then
+                kill "$OLD_PID" 2>/dev/null || true
+            else
+                echo "[!] PID $OLD_PID is not dnsmasq — removing stale PID file"
+            fi
         fi
         rm -f "$DNSMASQ_PID"
     fi
@@ -398,15 +403,44 @@ start_dnsmasq() {
     local LOCAL_IP="${MESH_IP%/*}"
     echo "[+] Setting up captive portal iptables rules..."
 
-    # DNS redirect: any DNS query not already destined for us → redirect to us
-    iptables -t nat -C PREROUTING -i "$BR_IFACE" -p udp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || \
-        iptables -t nat -A PREROUTING -i "$BR_IFACE" -p udp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53
-    iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || \
-        iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53
-
-    # HTTP redirect: catch any HTTP traffic to external IPs → redirect to nginx
-    iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80 2>/dev/null || \
-        iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80
+    # Use iptables-restore for atomic rule application (all-or-nothing).
+    # This avoids the window where some rules are active and others aren't,
+    # which can cause brief DNS leaks during service restarts.
+    if command -v iptables-restore >/dev/null 2>&1; then
+        # Save existing nat table, strip old nightwatch rules, append ours
+        RULES_FILE=$(mktemp /tmp/nightwatch-iptables.XXXXXX)
+        iptables-save -t nat 2>/dev/null | grep -v "nightwatch-captive" > "$RULES_FILE" || true
+        # Remove trailing COMMIT if present (we'll add it back)
+        sed -i '/^COMMIT$/d' "$RULES_FILE"
+        cat >> "$RULES_FILE" << IPTEOF
+-A PREROUTING -i $BR_IFACE -p udp --dport 53 ! -d $LOCAL_IP -j DNAT --to-destination $LOCAL_IP:53 -m comment --comment "nightwatch-captive"
+-A PREROUTING -i $BR_IFACE -p tcp --dport 53 ! -d $LOCAL_IP -j DNAT --to-destination $LOCAL_IP:53 -m comment --comment "nightwatch-captive"
+-A PREROUTING -i $BR_IFACE -p tcp --dport 80 ! -d $LOCAL_IP -j DNAT --to-destination $LOCAL_IP:80 -m comment --comment "nightwatch-captive"
+COMMIT
+IPTEOF
+        if iptables-restore -T nat < "$RULES_FILE" 2>/dev/null; then
+            echo "[+] iptables rules applied atomically (DNS + HTTP redirect)"
+            rm -f "$RULES_FILE"
+        else
+            echo "[!] iptables-restore failed — falling back to individual rules"
+            rm -f "$RULES_FILE"
+            # Fallback to individual iptables commands
+            iptables -t nat -C PREROUTING -i "$BR_IFACE" -p udp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || \
+                iptables -t nat -A PREROUTING -i "$BR_IFACE" -p udp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53
+            iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || \
+                iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53
+            iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80 2>/dev/null || \
+                iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80
+        fi
+    else
+        # Fallback: individual iptables commands (check-then-add to avoid duplicates)
+        iptables -t nat -C PREROUTING -i "$BR_IFACE" -p udp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || \
+            iptables -t nat -A PREROUTING -i "$BR_IFACE" -p udp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53
+        iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || \
+            iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53
+        iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80 2>/dev/null || \
+            iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80
+    fi
 
     echo "[+] iptables rules active (DNS + HTTP redirect)"
 }
@@ -455,6 +489,10 @@ case "$1" in
                 echo "[+] $MESH_IFACE is available"
                 IFACE_FOUND=true
                 break
+            fi
+            # Progress every 5 seconds so users know the system isn't frozen
+            if [ $((_wait % 5)) -eq 0 ]; then
+                echo "[.] Still waiting for $MESH_IFACE... (${_wait}s/30s)"
             fi
             sleep 1
         done
@@ -554,7 +592,11 @@ case "$1" in
         if [ -f "$DNSMASQ_PID" ]; then
             OLD_PID=$(cat "$DNSMASQ_PID")
             if kill -0 "$OLD_PID" 2>/dev/null; then
-                kill "$OLD_PID" 2>/dev/null || true
+                if ps -p "$OLD_PID" -o comm= 2>/dev/null | grep -q '^dnsmasq'; then
+                    kill "$OLD_PID" 2>/dev/null || true
+                else
+                    echo "[!] PID $OLD_PID is not dnsmasq — removing stale PID file"
+                fi
             fi
             rm -f "$DNSMASQ_PID"
         fi

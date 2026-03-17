@@ -158,9 +158,9 @@ fi
 
 if [ "$SSH_PASSWORD" != "$ROUTER_PASSWORD" ]; then
     echo "[+] Setting admin password..."
-    # Use chpasswd for safer password setting (no shell expansion of password chars)
+    # Use chpasswd via stdin to avoid exposing the password in ps output
     SSHPASS="$SSH_PASSWORD" sshpass -e ssh $SSH_OPTS root@"$FOUND_IP" \
-        "echo 'root:${ROUTER_PASSWORD}' | chpasswd" 2>/dev/null
+        "chpasswd" <<< "root:${ROUTER_PASSWORD}" 2>/dev/null
     SSH_PASSWORD="$ROUTER_PASSWORD"
     echo -e "  ${GREEN}Password set${NC}"
 fi

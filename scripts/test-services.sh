@@ -8,7 +8,7 @@
 #   4. Nginx serving frontend
 #   5. Nginx proxying WebSocket path
 #   6. No fatal errors in logs
-#   7. Captive portal probes
+#   7. Bridge /status endpoint
 #   8. Nick format
 #
 # Usage: ./scripts/test-services.sh
@@ -167,41 +167,30 @@ for svc in ngircd nightwatch-bridge nginx; do
 done
 
 # ============================================================
-# 6. Captive Portal Probes
+# 6. Bridge /status Endpoint
 # ============================================================
 
-section "6. Captive Portal Probes"
+section "6. Bridge /status"
 
-# iOS captive portal probe — must return "Success" (follow redirects with -L)
-IOS_RESP=$(curl -sL --max-time 3 "http://localhost:${NGINX_PORT}/hotspot-detect.html" 2>/dev/null || echo "")
-if echo "$IOS_RESP" | grep -q "Success"; then
-    pass "iOS probe /hotspot-detect.html returns 'Success'"
+BRIDGE_STATUS=$(curl -sf --max-time 3 http://localhost:3000/status 2>/dev/null | tr -d '[:space:]' || echo "")
+if [ -n "$BRIDGE_STATUS" ]; then
+    pass "Bridge /status returns JSON"
+    # Check uptime
+    uptime_h=$(echo "$BRIDGE_STATUS" | grep -o '"uptime_human":"[^"]*"' | cut -d'"' -f4)
+    if [ -n "$uptime_h" ]; then
+        pass "Bridge uptime: $uptime_h"
+    else
+        fail "Bridge /status missing uptime"
+    fi
+    # Check IRC connection status
+    irc_status=$(echo "$BRIDGE_STATUS" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+    if [ "$irc_status" = "ok" ]; then
+        pass "Bridge IRC connection: ok"
+    else
+        fail "Bridge IRC connection: $irc_status"
+    fi
 else
-    fail "iOS probe /hotspot-detect.html missing 'Success' response"
-fi
-
-# Android captive portal probe — must return HTTP 204 (follow redirects)
-ANDROID_CODE=$(curl -sL --max-time 3 -o /dev/null -w "%{http_code}" "http://localhost:${NGINX_PORT}/generate_204" 2>/dev/null || echo "000")
-if [ "$ANDROID_CODE" = "204" ]; then
-    pass "Android probe /generate_204 returns HTTP 204"
-else
-    fail "Android probe /generate_204 returned HTTP $ANDROID_CODE (expected 204)"
-fi
-
-# Firefox captive portal probe — must return "success" (follow redirects)
-FF_RESP=$(curl -sL --max-time 3 "http://localhost:${NGINX_PORT}/canonical.html" 2>/dev/null || echo "")
-if echo "$FF_RESP" | grep -q "success"; then
-    pass "Firefox probe /canonical.html returns 'success'"
-else
-    fail "Firefox probe /canonical.html missing 'success' response"
-fi
-
-# Windows captive portal probe — must return "Microsoft Connect Test"
-WIN_RESP=$(curl -sL --max-time 3 "http://localhost:${NGINX_PORT}/connecttest.txt" 2>/dev/null || echo "")
-if echo "$WIN_RESP" | grep -q "Microsoft Connect Test"; then
-    pass "Windows probe /connecttest.txt returns correct text"
-else
-    fail "Windows probe /connecttest.txt missing expected response"
+    fail "Bridge /status not reachable"
 fi
 
 # ============================================================
@@ -211,7 +200,8 @@ fi
 section "7. Nick Format"
 
 # Connect to IRC via bridge and check that assigned nick is guestN
-NICK_OUTPUT=$( { printf "NICK nicktest%s\r\n" "$$"; sleep 1; printf "USER nicktest%s 0 * :test\r\n" "$$"; sleep 3; printf "QUIT\r\n"; } | nc -w 6 localhost 6667 2>/dev/null || echo "")
+TEST_NICK="nt$(( $$ % 10000 ))"
+NICK_OUTPUT=$( { printf "NICK %s\r\n" "$TEST_NICK"; sleep 1; printf "USER %s 0 * :test\r\n" "$TEST_NICK"; sleep 3; printf "QUIT\r\n"; } | nc -w 6 localhost 6667 2>/dev/null || echo "")
 # The 001 (RPL_WELCOME) line contains the assigned nick
 ASSIGNED_NICK=$(echo "$NICK_OUTPUT" | grep " 001 " | awk '{print $3}' || echo "")
 if echo "$ASSIGNED_NICK" | grep -qE "^guest[0-9]+$"; then

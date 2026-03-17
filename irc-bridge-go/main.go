@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 )
@@ -34,13 +35,15 @@ func envOrDefault(key, fallback string) string {
 var clientCounter atomic.Uint64
 
 // nickRegistry tracks all ever-assigned guestN nicks so they're never reused.
-// The counter persists across restarts via a file.
+// The counter persists across restarts via a file. Writes are batched to reduce
+// SD card wear: flushed every 10 assignments or 60 seconds, whichever is first.
 type NickRegistry struct {
 	mu          sync.Mutex
 	assigned    map[string]bool // all nicks ever assigned (guestN nicks)
 	activeNicks map[string]bool // nicks currently in use by connected clients
 	counter     uint64          // high-water mark for guestN generation
 	counterFile string          // path to persist counter
+	dirty       uint64          // assignments since last disk flush
 }
 
 func nickCounterPath() string {
@@ -77,13 +80,42 @@ func (nr *NickRegistry) loadCounter() {
 	}
 }
 
+const nickFlushThreshold = 10
+
 func (nr *NickRegistry) saveCounter() {
 	if err := os.MkdirAll(filepath.Dir(nr.counterFile), 0755); err != nil {
 		log.Printf("Failed to create data dir: %v", err)
-		return
+		return // don't reset dirty — retry on next flush
 	}
 	if err := os.WriteFile(nr.counterFile, []byte(fmt.Sprintf("%d\n", nr.counter)), 0644); err != nil {
 		log.Printf("Failed to save nick counter: %v", err)
+		return // don't reset dirty — retry on next flush
+	}
+	nr.dirty = 0
+}
+
+// flushLoop periodically writes the nick counter to disk if dirty.
+// This ensures durability even if the batch threshold is never reached.
+func (nr *NickRegistry) flushLoop(ctx context.Context) {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			nr.mu.Lock()
+			if nr.dirty > 0 {
+				nr.saveCounter()
+			}
+			nr.mu.Unlock()
+			return
+		case <-ticker.C:
+			nr.mu.Lock()
+			if nr.dirty > 0 {
+				nr.saveCounter()
+				log.Printf("Nick counter flushed to disk (periodic): %d", nr.counter)
+			}
+			nr.mu.Unlock()
+		}
 	}
 }
 
@@ -92,22 +124,28 @@ func (nr *NickRegistry) NextNick() string {
 	nr.mu.Lock()
 	defer nr.mu.Unlock()
 	nr.counter++
+	nr.dirty++
 	nick := fmt.Sprintf("guest%d", nr.counter)
 	nr.assigned[nick] = true
 	nr.activeNicks[nick] = true
-	nr.saveCounter()
+	// Flush to disk every N assignments to reduce SD card writes
+	if nr.dirty >= nickFlushThreshold {
+		nr.saveCounter()
+	}
 	return nick
 }
 
 // ClaimNick tries to reclaim a previously assigned nick (reconnecting client).
-// Returns true if the nick is recognized and not currently active.
+// Returns true if the nick was previously assigned and not currently active.
 func (nr *NickRegistry) ClaimNick(nick string) bool {
 	nr.mu.Lock()
 	defer nr.mu.Unlock()
+	if !nr.assigned[nick] {
+		return false // unknown nick — don't let arbitrary nicks pollute the registry
+	}
 	if nr.activeNicks[nick] {
 		return false // someone else is using it right now
 	}
-	nr.assigned[nick] = true
 	nr.activeNicks[nick] = true
 	return true
 }
@@ -127,15 +165,16 @@ var nickRegistry *NickRegistry
 var ircServer = envOrDefault("IRC_SERVER", "127.0.0.1:6667")
 
 const (
-	ircChannel      = "#nightwatch"
-	listenAddr      = ":3000"
-	maxConnsPerIP   = 5
-	wsReadLimit     = 4096
-	wsPongWait      = 5 * time.Minute   // mobile browsers may background for minutes
-	wsPingPeriod    = 4 * time.Minute   // must be < pongWait
-	wsWriteWait     = 10 * time.Second
-	shutdownTimeout = 10 * time.Second
-	maxIRCMsgLen    = 400 // IRC limit minus protocol overhead
+	ircChannel       = "#nightwatch"
+	listenAddr       = ":3000"
+	maxConnsPerIP    = 5
+	wsReadLimit      = 4096
+	clientSendBuffer = 256 // buffered channel size for WebSocket messages
+	wsPongWait       = 5 * time.Minute   // mobile browsers may background for minutes
+	wsPingPeriod     = 4 * time.Minute   // must be < pongWait
+	wsWriteWait      = 10 * time.Second
+	shutdownTimeout  = 10 * time.Second
+	maxIRCMsgLen     = 400 // IRC limit minus protocol overhead
 )
 
 // ircDialTimeout is configurable via IRC_DIAL_TIMEOUT env var (default 10s).
@@ -254,13 +293,19 @@ func newHub() *Hub {
 }
 
 func (h *Hub) run() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("CRITICAL: hub.run() panic: %v — all future connections will fail", r)
+		}
+	}()
 	for {
 		select {
 		case client := <-h.register:
 			h.mu.Lock()
 			h.clients[client] = true
+			count := len(h.clients)
 			h.mu.Unlock()
-			log.Printf("[%s] Client registered. Total: %d", client.id, len(h.clients))
+			log.Printf("[%s] Client registered. Total: %d", client.id, count)
 
 		case client := <-h.unregister:
 			h.mu.Lock()
@@ -274,18 +319,28 @@ func (h *Hub) run() {
 				// Don't close(client.send) — ircPump may still be mid-send.
 				// writePump exits via <-c.done instead.
 			}
+			count := len(h.clients)
 			h.mu.Unlock()
-			log.Printf("[%s] Client unregistered (nick=%s). Total: %d", client.id, client.nick, len(h.clients))
+			log.Printf("[%s] Client unregistered (nick=%s). Total: %d", client.id, client.nick, count)
 
 		case <-h.done:
 			h.mu.Lock()
 			for client := range h.clients {
-				// Best-effort QUIT and close frame before tearing down
-				if client.irc != nil {
-					client.irc.Write([]byte("QUIT :Server shutting down\r\n"))
+				// Best-effort QUIT and close frame before tearing down.
+				// Use WriteControl (thread-safe) instead of WriteMessage to
+				// avoid panicking on concurrent writes with writePump.
+				select {
+				case <-client.done:
+					// Already closing — skip graceful shutdown messages
+				default:
+					if client.irc != nil {
+						client.irc.SetWriteDeadline(time.Now().Add(1 * time.Second))
+						client.irc.Write([]byte("QUIT :Server shutting down\r\n"))
+					}
+					client.ws.WriteControl(websocket.CloseMessage,
+						websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down"),
+						time.Now().Add(1*time.Second))
 				}
-				client.ws.WriteMessage(websocket.CloseMessage,
-					websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down"))
 				client.close()
 				delete(h.clients, client)
 			}
@@ -325,9 +380,11 @@ func (c *Client) readPump(hub *Hub) {
 			continue
 		}
 
-		// Truncate to IRC maximum message length
-		if len(msg) > maxIRCMsgLen {
-			msg = msg[:maxIRCMsgLen]
+		// Truncate to IRC maximum message length (by rune count to avoid
+		// splitting multi-byte UTF-8 characters like emoji)
+		if utf8.RuneCountInString(msg) > maxIRCMsgLen {
+			runes := []rune(msg)
+			msg = string(runes[:maxIRCMsgLen])
 		}
 
 		log.Printf("[%s] WS->IRC: %s", c.id, msg)
@@ -362,8 +419,9 @@ func (c *Client) writePump() {
 			}
 
 		case <-ticker.C:
-			c.ws.SetWriteDeadline(time.Now().Add(wsWriteWait))
-			if err := c.ws.WriteMessage(websocket.PingMessage, nil); err != nil {
+			// WriteControl is safe for concurrent use (unlike WriteMessage),
+			// so shutdown code can send a CloseMessage at the same time.
+			if err := c.ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteWait)); err != nil {
 				return
 			}
 		}
@@ -390,9 +448,10 @@ func (c *Client) ircPump() {
 		// Handle IRC PING server-side (don't round-trip through browser)
 		if strings.HasPrefix(line, "PING ") {
 			token := strings.TrimPrefix(line, "PING ")
-			// Scanner reads line-by-line so CR/LF can't appear in token,
-			// but guard against it defensively + cap length to prevent abuse
-			if token != "" && len(token) < 512 && !strings.ContainsAny(token, "\r\n") {
+			// Guard against: oversized tokens, CR/LF injection, and space-based
+			// command injection (e.g., "PING :foo PRIVMSG #ch :spam")
+			if token != "" && len(token) < 64 && !strings.ContainsAny(token, "\r\n ") {
+				c.irc.SetWriteDeadline(time.Now().Add(wsWriteWait))
 				c.irc.Write([]byte("PONG " + token + "\r\n"))
 			}
 			continue
@@ -405,21 +464,23 @@ func (c *Client) ircPump() {
 			log.Printf("[%s] IRC->WS: %s", c.id, line)
 		}
 
-		// Check if client is already closed before attempting send
-		select {
-		case <-c.done:
-			return
-		default:
-		}
-		// Try to send; if channel is full, close rather than drop messages
+		// Try to send; if channel is full, wait briefly before giving up.
+		// This prevents unnecessary disconnects during IRC floods (mass join/part).
 		select {
 		case c.send <- []byte(line + "\n"):
 		case <-c.done:
 			return
 		default:
-			log.Printf("[%s] Send channel full, closing connection", c.id)
-			c.close()
-			return
+			// Buffer full — give writePump a moment to drain before disconnecting
+			select {
+			case c.send <- []byte(line + "\n"):
+			case <-c.done:
+				return
+			case <-time.After(100 * time.Millisecond):
+				log.Printf("[%s] Send channel full for 100ms, closing connection", c.id)
+				c.close()
+				return
+			}
 		}
 	}
 
@@ -430,7 +491,7 @@ func (c *Client) ircPump() {
 
 // isValidIRCNick checks that a nick contains only safe IRC characters
 func isValidIRCNick(nick string) bool {
-	if len(nick) == 0 {
+	if len(nick) == 0 || len(nick) > 16 {
 		return false
 	}
 	for _, c := range nick {
@@ -449,14 +510,17 @@ func isValidIRCNick(nick string) bool {
 
 // --- WebSocket handler ---
 
-func handleWebSocket(hub *Hub, limiter *RateLimiter, cleanupWg *sync.WaitGroup, w http.ResponseWriter, r *http.Request) {
-	// Extract client IP — prefer X-Real-IP set by nginx reverse proxy,
-	// since r.RemoteAddr is always the loopback IP when behind nginx
-	clientIP := r.Header.Get("X-Real-IP")
-	if clientIP == "" {
-		clientIP = r.RemoteAddr
-		if host, _, err := net.SplitHostPort(clientIP); err == nil {
-			clientIP = host
+func handleWebSocket(hub *Hub, limiter *RateLimiter, cleanupWg *sync.WaitGroup, cleanupCtx context.Context, w http.ResponseWriter, r *http.Request) {
+	// Extract client IP. Only trust X-Real-IP when the request comes from
+	// localhost (i.e., via nginx reverse proxy). If the bridge is exposed
+	// directly, this prevents rate-limit bypass via header spoofing.
+	clientIP := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(clientIP); err == nil {
+		clientIP = host
+	}
+	if clientIP == "127.0.0.1" || clientIP == "::1" {
+		if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
+			clientIP = realIP
 		}
 	}
 
@@ -479,9 +543,14 @@ func handleWebSocket(hub *Hub, limiter *RateLimiter, cleanupWg *sync.WaitGroup, 
 		return
 	}
 
-	// Connect to IRC server
+	// Connect to IRC server. Use a standalone context (not r.Context()) because
+	// the HTTP request context is cancelled if the client disconnects before the
+	// upgrade completes, which would leak the IRC connection.
 	log.Printf("[%s] Connecting to IRC server %s", clientID, ircServer)
-	ircConn, err := net.DialTimeout("tcp", ircServer, ircDialTimeout)
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), ircDialTimeout)
+	defer dialCancel()
+	dialer := net.Dialer{}
+	ircConn, err := dialer.DialContext(dialCtx, "tcp", ircServer)
 	if err != nil {
 		log.Printf("[%s] IRC connection error: %v", clientID, err)
 		ws.WriteMessage(websocket.CloseMessage,
@@ -494,7 +563,7 @@ func handleWebSocket(hub *Hub, limiter *RateLimiter, cleanupWg *sync.WaitGroup, 
 	// Use nick from query param if provided (reconnecting client),
 	// otherwise generate a new one. Sanitize to prevent IRC injection.
 	nick := r.URL.Query().Get("nick")
-	if nick != "" && len(nick) <= 16 && isValidIRCNick(nick) {
+	if nick != "" && isValidIRCNick(nick) {
 		// Reconnecting client — try to reclaim their saved nick
 		if nickRegistry.ClaimNick(nick) {
 			log.Printf("[%s] Reclaimed nick: %s", clientID, nick)
@@ -510,6 +579,7 @@ func handleWebSocket(hub *Hub, limiter *RateLimiter, cleanupWg *sync.WaitGroup, 
 
 	if _, err = ircConn.Write([]byte(fmt.Sprintf("NICK %s\r\n", nick))); err != nil {
 		log.Printf("[%s] IRC NICK write error: %v", clientID, err)
+		nickRegistry.ReleaseNick(nick)
 		ircConn.Close()
 		ws.Close()
 		limiter.Release(clientIP)
@@ -517,6 +587,7 @@ func handleWebSocket(hub *Hub, limiter *RateLimiter, cleanupWg *sync.WaitGroup, 
 	}
 	if _, err = ircConn.Write([]byte(fmt.Sprintf("USER %s 0 * :Web User\r\n", nick))); err != nil {
 		log.Printf("[%s] IRC USER write error: %v", clientID, err)
+		nickRegistry.ReleaseNick(nick)
 		ircConn.Close()
 		ws.Close()
 		limiter.Release(clientIP)
@@ -526,7 +597,7 @@ func handleWebSocket(hub *Hub, limiter *RateLimiter, cleanupWg *sync.WaitGroup, 
 	client := &Client{
 		ws:   ws,
 		irc:  ircConn,
-		send: make(chan []byte, 256),
+		send: make(chan []byte, clientSendBuffer),
 		done: make(chan struct{}),
 		id:   clientID,
 		ip:   clientIP,
@@ -535,11 +606,16 @@ func handleWebSocket(hub *Hub, limiter *RateLimiter, cleanupWg *sync.WaitGroup, 
 
 	hub.register <- client
 
-	// Release rate limiter slot when client disconnects
+	// Release rate limiter slot when client disconnects.
+	// cleanupCtx is cancelled on shutdown so cleanupWg.Wait() won't hang.
 	cleanupWg.Add(1)
 	go func() {
 		defer cleanupWg.Done()
-		<-client.done
+		select {
+		case <-client.done:
+		case <-cleanupCtx.Done():
+			log.Printf("[%s] Cleanup: server shutting down — releasing rate limiter", clientID)
+		}
 		limiter.Release(clientIP)
 	}()
 
@@ -561,6 +637,8 @@ const healthCacheTTL = 5 * time.Second
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	healthMu.Lock()
+
+	// Return cached result if still fresh
 	if time.Now().Before(healthExpiry) {
 		ok, errMsg := healthOK, healthErr
 		healthMu.Unlock()
@@ -573,28 +651,37 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+
+	// Mark cache as refreshing so concurrent requests return the stale-but-
+	// usable cached result while we dial. Use a short expiry (dial timeout)
+	// so the cache is updated with the real result once the dial completes.
+	healthExpiry = time.Now().Add(2 * time.Second)
 	healthMu.Unlock()
 
 	conn, err := net.DialTimeout("tcp", ircServer, 2*time.Second)
 
 	healthMu.Lock()
-	healthExpiry = time.Now().Add(healthCacheTTL)
 	if err != nil {
 		healthOK = false
 		healthErr = "IRC unavailable"
 		log.Printf("Health check failed: %v", err)
-		healthMu.Unlock()
-		w.WriteHeader(http.StatusServiceUnavailable)
-		fmt.Fprint(w, "IRC unavailable")
-		return
+	} else {
+		conn.Close()
+		healthOK = true
+		healthErr = ""
 	}
-	healthOK = true
-	healthErr = ""
+	// Set the real expiry now that we have fresh data
+	healthExpiry = time.Now().Add(healthCacheTTL)
+	ok, errMsg := healthOK, healthErr
 	healthMu.Unlock()
 
-	conn.Close()
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, "OK")
+	if ok {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "OK")
+	} else {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, errMsg)
+	}
 }
 
 // --- Status endpoint (debug diagnostics) ---
@@ -621,17 +708,14 @@ func handleStatus(hub *Hub, limiter *RateLimiter) http.HandlerFunc {
 		}
 		limiter.mu.Unlock()
 
-		// Check IRC connectivity
+		// Reuse health cache instead of dialing IRC on every /status request
+		healthMu.Lock()
 		ircStatus := "ok"
 		ircLatencyMs := int64(-1)
-		ircStart := time.Now()
-		conn, err := net.DialTimeout("tcp", ircServer, 2*time.Second)
-		if err != nil {
-			ircStatus = fmt.Sprintf("error: %v", err)
-		} else {
-			ircLatencyMs = time.Since(ircStart).Milliseconds()
-			conn.Close()
+		if !healthOK && healthErr != "" {
+			ircStatus = healthErr
 		}
+		healthMu.Unlock()
 
 		var memStats runtime.MemStats
 		runtime.ReadMemStats(&memStats)
@@ -671,7 +755,9 @@ func handleStatus(hub *Hub, limiter *RateLimiter) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
-		enc.Encode(status)
+		if err := enc.Encode(status); err != nil {
+			log.Printf("Status JSON encode error: %v", err)
+		}
 	}
 }
 
@@ -680,15 +766,25 @@ func handleStatus(hub *Hub, limiter *RateLimiter) http.HandlerFunc {
 func main() {
 	nickRegistry = newNickRegistry()
 
+	// Background context for nick counter flush loop (cancelled on shutdown)
+	flushCtx, flushCancel := context.WithCancel(context.Background())
+	flushWg := &sync.WaitGroup{}
+	flushWg.Add(1)
+	go func() {
+		defer flushWg.Done()
+		nickRegistry.flushLoop(flushCtx)
+	}()
+
 	hub := newHub()
 	go hub.run()
 
 	limiter := newRateLimiter()
 	cleanupWg := &sync.WaitGroup{}
+	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		handleWebSocket(hub, limiter, cleanupWg, w, r)
+		handleWebSocket(hub, limiter, cleanupWg, cleanupCtx, w, r)
 	})
 	mux.HandleFunc("/health", handleHealth)
 	mux.HandleFunc("/status", handleStatus(hub, limiter))
@@ -712,18 +808,38 @@ func main() {
 	<-quit
 	log.Println("Shutting down...")
 
-	// Stop accepting new connections
+	// Stop the periodic flush loop and wait for it to finish its current
+	// iteration before we do the final flush below (avoids concurrent saveCounter).
+	flushCancel()
+	flushWg.Wait()
+
+	// Stop accepting new WebSocket connections first, so no new clients
+	// try to send on hub.register after hub.run() exits (which would deadlock).
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-
-	// Close all client connections gracefully
-	close(hub.done)
-
-	// Shut down HTTP server
 	if err := server.Shutdown(ctx); err != nil {
 		log.Printf("HTTP server shutdown error: %v", err)
 	}
 
+	// Now close all existing client connections gracefully
+	close(hub.done)
+
+	// Final nick counter flush — clients may have assigned nicks during
+	// the slow shutdown window between flushCancel() and server.Shutdown().
+	nickRegistry.mu.Lock()
+	if nickRegistry.dirty > 0 {
+		pending := nickRegistry.dirty
+		nickRegistry.saveCounter()
+		if nickRegistry.dirty > 0 {
+			log.Printf("CRITICAL: Final nick counter flush FAILED — %d assignments may be lost (counter=%d)", pending, nickRegistry.counter)
+		} else {
+			log.Printf("Final nick counter flush: %d", nickRegistry.counter)
+		}
+	}
+	nickRegistry.mu.Unlock()
+
+	// Cancel cleanup context so goroutines waiting on client.done unblock
+	cleanupCancel()
 	// Wait for all cleanup goroutines (rate limiter releases) to finish
 	cleanupWg.Wait()
 

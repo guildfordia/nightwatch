@@ -2,7 +2,7 @@
 
 ENV_FILE := .env
 
-.PHONY: install run stop test update status logs clean monitor blink image sdcard info router build-bridge help
+.PHONY: install run stop test scan update status logs clean monitor blink image sdcard info router build-bridge help
 .DEFAULT_GOAL := help
 
 help:
@@ -19,10 +19,11 @@ help:
 	@echo "  make monitor   Live dashboard (refreshes every 5s)"
 	@echo "  make blink     Blink onboard LED to identify this Pi"
 	@echo "  make info      Show detailed node info"
+	@echo "  make scan      Advanced mesh network scan (all nodes)"
 	@echo ""
 	@echo "  make router       Configure GL.iNet router"
 	@echo "  make image        Prepare Pi for SD card cloning"
-	@echo "  make sdcard SD=X  Prepare a flashed SD card"
+	@echo "  make sdcard SD=X [NODE=N]  Prepare SD card (auto-picks node if omitted)"
 	@echo "  make build-bridge Cross-compile irc-bridge (laptop)"
 	@echo ""
 	@echo "First time:  make install && make run && make test"
@@ -101,7 +102,15 @@ test:
 update:
 	@echo "[1/3] Pulling latest code..."
 	@if git ls-remote --exit-code origin HEAD >/dev/null 2>&1; then \
+		if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then \
+			echo "  [*] Stashing uncommitted changes..."; \
+			git stash --include-untracked; \
+		fi; \
 		git pull; \
+		if git stash list 2>/dev/null | grep -q .; then \
+			echo "  [*] Restoring stashed changes..."; \
+			git stash pop || echo "  [!] Stash pop had conflicts — resolve manually with 'git stash show -p'"; \
+		fi; \
 	else \
 		echo "  [!] Remote unreachable — using code on disk"; \
 	fi
@@ -169,12 +178,15 @@ build-bridge:
 
 sdcard:
 	@if [ -z "$(SD)" ]; then \
-		echo "Usage: make sdcard SD=/dev/sdX [MODE=mesh|gateway|sound-bridge]"; exit 1; fi
+		echo "Usage: make sdcard SD=/dev/sdX [NODE=N] [MODE=mesh|gateway|sound-bridge]"; exit 1; fi
 	@if command -v go >/dev/null 2>&1; then \
 		echo "[+] Cross-compiling irc-bridge..."; \
 		cd irc-bridge-go && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o irc-bridge .; \
 	fi
-	@scripts/prepare-sdcard.sh $(SD) $(if $(MODE),--mode $(MODE),) $(if $(filter true,$(GATEWAY)),--gateway,)
+	@NODE=$(NODE) scripts/prepare-sdcard.sh $(SD) $(if $(NODE),--node $(NODE),) $(if $(MODE),--mode $(MODE),) $(if $(filter true,$(GATEWAY)),--gateway,)
 
 info:
 	@scripts/nightwatch-info.sh
+
+scan:
+	@sudo scripts/test-scan.sh $(ARGS)

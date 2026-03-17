@@ -183,13 +183,13 @@ JOINED_N1=0
 JOINED_N2=0
 for f in "$TMPDIR"/sender-n1-*.log; do
     [ -f "$f" ] || continue
-    if grep -q "JOIN" "$f" 2>/dev/null; then
+    if grep -qE " (JOIN |353 )" "$f" 2>/dev/null; then
         JOINED_N1=$((JOINED_N1 + 1))
     fi
 done
 for f in "$TMPDIR"/sender-n2-*.log; do
     [ -f "$f" ] || continue
-    if grep -q "JOIN" "$f" 2>/dev/null; then
+    if grep -qE " (JOIN |353 )" "$f" 2>/dev/null; then
         JOINED_N2=$((JOINED_N2 + 1))
     fi
 done

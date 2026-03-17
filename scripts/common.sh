@@ -201,6 +201,9 @@ set_env_value() {
         # Append new key
         printf '%s=%s\n' "$key" "$quoted_value" >> "$file"
     fi
+
+    # Flush to disk so a power loss doesn't leave a truncated/empty config
+    sync 2>/dev/null || true
 }
 
 # resolve_node_mode — sets NODE_MODE from env, with backward compat for MESH_GATEWAY

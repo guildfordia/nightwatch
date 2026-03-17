@@ -69,12 +69,19 @@ for led in /sys/class/leds/ACT /sys/class/leds/led0; do
     fi
 done
 
-# On any error: set LED to fast blink and log the failure
+# On any error: set LED to fast blink and log the failure.
+# IMPORTANT: always mark firstboot as done (even on failure) so the service
+# is disabled and never blocks boot again. The node can be fixed manually.
 firstboot_fail() {
     echo ""
     echo "[-] FIRSTBOOT FAILED: $1"
     echo "[-] Check log: $LOG_FILE"
     [ -n "$BOOT_LOG" ] && echo "[-] Boot partition log: $BOOT_LOG"
+    # Mark as done to prevent boot loops — a failed firstboot that blocks
+    # every boot is worse than a failed firstboot you can fix via SSH.
+    date > "$STAMP_FILE" 2>/dev/null || true
+    echo "FAILED: $1" >> "$STAMP_FILE" 2>/dev/null || true
+    systemctl disable nightwatch-firstboot.service 2>/dev/null || true
     if [ -n "$LED_PATH" ]; then
         echo "timer" > "$LED_PATH/trigger" 2>/dev/null || true
         echo 100 > "$LED_PATH/delay_on" 2>/dev/null || true
@@ -83,6 +90,15 @@ firstboot_fail() {
     exit 1
 }
 trap 'firstboot_fail "unexpected error at line $LINENO"' ERR
+
+# Global timeout: if firstboot takes more than 15 minutes, something is
+# seriously wrong. Kill it so the system can finish booting. The failure
+# handler will mark it as done to prevent infinite boot loops.
+FIRSTBOOT_TIMEOUT=900
+( sleep "$FIRSTBOOT_TIMEOUT"; echo "[-] TIMEOUT: firstboot exceeded ${FIRSTBOOT_TIMEOUT}s"; kill -TERM $$ 2>/dev/null ) &
+TIMEOUT_PID=$!
+trap 'kill "$TIMEOUT_PID" 2>/dev/null || true; firstboot_fail "unexpected error at line $LINENO"' ERR
+trap 'kill "$TIMEOUT_PID" 2>/dev/null || true' EXIT
 
 # Skip if already completed
 if [ -f "$STAMP_FILE" ]; then
@@ -223,8 +239,12 @@ SCRIPT_YEAR=$(date -r "$NIGHTWATCH_DIR/scripts/firstboot.sh" +%Y 2>/dev/null \
     || stat -c %Y "$NIGHTWATCH_DIR/scripts/firstboot.sh" 2>/dev/null | xargs -I{} date -d @{} +%Y 2>/dev/null \
     || echo "2099")
 if [ "$(date +%Y)" -lt "$SCRIPT_YEAR" ]; then
-    HTTP_DATE=$(curl -sI --max-time 10 http://deb.debian.org 2>/dev/null | grep -i "^date:" | sed 's/^[Dd]ate: //')
-    if [ -n "$HTTP_DATE" ] && date -d "$HTTP_DATE" >/dev/null 2>&1; then
+    HTTP_DATE=$(curl -sI --max-time 10 http://deb.debian.org 2>/dev/null | grep -i "^date:" | sed 's/^[Dd]ate: //' | tr -d '\r')
+    # Validate: must look like an HTTP-date (e.g. "Mon, 17 Mar 2025 12:00:00 GMT")
+    # Reject empty, overly long, or non-date strings to prevent injection
+    if [ -n "$HTTP_DATE" ] && [ "${#HTTP_DATE}" -lt 80 ] && \
+       [[ "$HTTP_DATE" =~ ^[A-Za-z]{3},\ [0-9]{2}\ [A-Za-z]{3}\ [0-9]{4}\ [0-9]{2}:[0-9]{2}:[0-9]{2}\ GMT$ ]] && \
+       date -d "$HTTP_DATE" >/dev/null 2>&1; then
         date -s "$HTTP_DATE" 2>/dev/null || true
         echo "[+] Clock set from HTTP: $(date)"
     else

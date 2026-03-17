@@ -147,6 +147,12 @@ check_undervoltage() {
         return 2
     fi
 
+    # Validate hex format before arithmetic expansion (malformed output
+    # from vcgencmd on older kernels could cause a shell error)
+    if [[ ! "$throttled" =~ ^0x[0-9a-fA-F]{1,8}$ ]]; then
+        return 2
+    fi
+
     # Convert hex to decimal for bitwise test
     local val=$((throttled))
 
@@ -274,7 +280,10 @@ print_status() {
     if command -v vcgencmd >/dev/null 2>&1; then
         local throttled
         throttled=$(vcgencmd get_throttled 2>/dev/null | grep -oP '0x[0-9a-fA-F]+' || echo "unavailable")
-        local val=$((throttled))
+        local val=0
+        if [[ "$throttled" =~ ^0x[0-9a-fA-F]{1,8}$ ]]; then
+            val=$((throttled))
+        fi
         printf "  vcgencmd throttled: %s" "$throttled"
         if (( val & 0x1 )); then
             printf "  *** UNDER-VOLTAGE NOW ***"

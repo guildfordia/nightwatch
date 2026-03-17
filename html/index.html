@@ -41,23 +41,7 @@
       --border-color: #cccccc;
       --user-list-bg: #f8f8f8;
     }
-    [data-theme="dark"] {
-      --bg-primary: #000000;
-      --bg-secondary: #000088;
-      --bg-secondary-hover: #0000aa;
-      --text-primary: #cccccc;
-      --text-secondary: #ffffff;
-      --text-system: #0088ff;
-      --text-error: #ff0000;
-      --text-join: #00ff00;
-      --text-highlight: #ffff00;
-      --text-time: #888888;
-      --text-nick-self: #ffb3d9;
-      --text-nick-other: #b3e5d1;
-      --text-own: #ffffff;
-      --border-color: #333333;
-      --user-list-bg: #000000;
-    }
+    /* dark theme is the :root default — no separate [data-theme="dark"] needed */
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -165,6 +149,12 @@
     }
     .toggle-button { padding: 0 1ch; margin-left: auto; }
     .toggle-button:hover { background: var(--bg-secondary-hover); }
+    .toggle-button:focus-visible,
+    .about-link:focus-visible,
+    .theme-selector:focus-visible { outline: 2px solid var(--text-system); outline-offset: 1px; }
+    .toggle-button:focus:not(:focus-visible),
+    .about-link:focus:not(:focus-visible),
+    .theme-selector:focus:not(:focus-visible) { outline: none; }
     .about-link { background: transparent; text-decoration: underline; padding: 0; }
     .about-link:hover { color: var(--text-primary); }
     .theme-selector { padding: 0 0.5ch; margin-left: 0.5ch; }
@@ -280,7 +270,7 @@
 
     <div class="input-bar">
       <span class="input-prompt" id="inputPrompt">[connecting...] </span>
-      <input type="text" class="input-field" id="inputField" disabled />
+      <input type="text" class="input-field" id="inputField" aria-labelledby="inputPrompt" disabled />
     </div>
   </div>
 
@@ -324,8 +314,8 @@
         this.selector.value = this.currentTheme;
         this.selector.addEventListener('change', (e) => this.setTheme(e.target.value));
       }
-      getSavedTheme() { return localStorage.getItem('nightwatch-theme') || 'auto'; }
-      saveTheme(theme) { localStorage.setItem('nightwatch-theme', theme); }
+      getSavedTheme() { try { return localStorage.getItem('nightwatch-theme') || 'auto'; } catch(e) { return 'auto'; } }
+      saveTheme(theme) { try { localStorage.setItem('nightwatch-theme', theme); } catch(e) {} }
       setTheme(theme) {
         if (!this.themes.includes(theme)) return;
         this.currentTheme = theme;
@@ -346,7 +336,7 @@
         this.ws = null;
         this.connected = false;
         this.nickname = 'connecting...';
-        this.savedNick = localStorage.getItem('nightwatch-nick') || null;
+        this.savedNick = (() => { try { return localStorage.getItem('nightwatch-nick'); } catch(e) { return null; } })();
         this.channel = '#nightwatch';
         this.registered = false;
         this.userCount = 0;
@@ -357,6 +347,8 @@
         this.bannerRendered = false; // prevent re-render on resize
         this.reconnectDelay = 1000; // start at 1s, exponential backoff
         this.maxReconnectDelay = 30000; // cap at 30s
+        this.reconnectTimer = null;
+        this.wsBuffer = ''; // buffer for partial WebSocket frames
 
         this.themeManager = new ThemeManager();
         // Debug state for live status bar
@@ -443,6 +435,22 @@
       }
 
       connect() {
+        // Cancel any pending reconnect timer to prevent duplicate connection attempts
+        if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+
+        // Clean up old WebSocket before creating a new one to prevent the old
+        // onclose handler from firing and triggering a duplicate reconnect cascade.
+        if (this.ws) {
+          this.ws.onclose = null;
+          this.ws.onerror = null;
+          this.ws.onmessage = null;
+          this.ws.onopen = null;
+          if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
+            this.ws.close();
+          }
+          this.ws = null;
+        }
+
         const wsHost = window.location.port ? `${window.location.hostname}:${window.location.port}` : window.location.hostname;
         // Pass saved nick so the bridge registers with it directly (avoids zombie nick conflicts)
         const nickParam = this.savedNick ? `?nick=${encodeURIComponent(this.savedNick)}` : '';
@@ -452,6 +460,7 @@
 
         this.ws.onopen = () => {
           this.connected = true;
+          this.wsBuffer = ''; // reset partial-frame buffer on new connection
           this.reconnectDelay = 1000; // reset backoff on successful connect
           this.updateStatus('connected');
         };
@@ -459,24 +468,48 @@
         this.ws.onclose = (event) => {
           this.connected = false;
           this.registered = false;
+          // Clear stale state so reconnect starts with a clean slate
+          this.users = [];
+          this.nickMap = {};
+          this.pendingNickChange = null;
+          this.userCount = 0;
+          this.updateUserList();
           this.updateStatus('disconnected');
           this.inputField.disabled = true;
           const delaySec = (this.reconnectDelay / 1000).toFixed(0);
           this.addSystemMessage(`Connection lost (${event.code}). Reconnecting in ${delaySec}s...`);
-          setTimeout(() => this.connect(), this.reconnectDelay);
+          // Cancel any pending reconnect to prevent pile-up (e.g., browser
+          // backgrounded then foregrounded queuing multiple timers at once)
+          if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+          this.reconnectTimer = setTimeout(() => { this.reconnectTimer = null; this.connect(); }, this.reconnectDelay);
           this.reconnectDelay = Math.min(this.reconnectDelay * 2, this.maxReconnectDelay);
         };
         this.ws.onerror = () => { this.addSystemMessage('Connection error'); };
       }
 
-      send(line) { if (this.ws && this.connected) this.ws.send(line + '\r\n'); }
+      send(line) { if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(line + '\r\n'); }
 
       sendMessage() {
         const input = this.inputField.value.trim();
         if (!input || !this.connected) return;
 
+        // Enforce max message length client-side to avoid wasting bandwidth
+        // on the low-bandwidth mesh (backend truncates at 400 chars anyway)
+        const MAX_MSG_LEN = 400;
+        if (!input.startsWith('/') && input.length > MAX_MSG_LEN) {
+          this.addSystemMessage(`Message too long (${input.length}/${MAX_MSG_LEN} chars)`);
+          return;
+        }
+
         if (input.startsWith('/nick ')) {
           const newNick = input.slice(6).trim();
+          // Validate nick client-side (matches server-side isValidIRCNick rules)
+          const nickRe = /^[A-Za-z_\-\[\]\\`\^{}][A-Za-z0-9_\-\[\]\\`\^{}]{0,15}$/;
+          if (newNick && !nickRe.test(newNick)) {
+            this.addSystemMessage('Invalid nickname. Use letters, digits, - _ [ ] \\ ` ^ { } (max 16 chars, must start with a letter or special char)');
+            this.inputField.value = '';
+            return;
+          }
           if (newNick && newNick !== this.nickname) {
             this.pendingNickChange = newNick;
             this.send(`NICK ${newNick}`);
@@ -524,7 +557,21 @@
       }
 
       handleMessage(data) {
-        const lines = data.split(/\r?\n/).filter(line => line.trim());
+        // Buffer partial frames: IRC lines are \r\n-terminated, but a WebSocket
+        // message may split mid-line. Accumulate in wsBuffer and only process
+        // complete lines (those followed by \r\n or \n).
+        this.wsBuffer += data;
+        // Prevent unbounded buffer growth from a misbehaving server
+        if (this.wsBuffer.length > 10000) {
+          this.addSystemMessage('Buffer overflow — resetting connection');
+          this.wsBuffer = '';
+          this.ws.close();
+          return;
+        }
+        const parts = this.wsBuffer.split(/\r?\n/);
+        // Last element is either '' (data ended with \n) or an incomplete line
+        this.wsBuffer = parts.pop();
+        const lines = parts.filter(line => line.trim());
         lines.forEach(line => {
           // RPL_WELCOME — extract real nick from ":server 001 <nick> :Welcome..."
           if (line.includes(' 001 ')) {
@@ -534,7 +581,7 @@
               this.nickname = parts[idx001 + 1];
               // Always persist nick so reconnections reuse it
               this.savedNick = this.nickname;
-              localStorage.setItem('nightwatch-nick', this.nickname);
+              try { localStorage.setItem('nightwatch-nick', this.nickname); } catch(e) {}
               this.updatePrompt();
             }
             this.registered = true;
@@ -550,13 +597,17 @@
             this.nickname = this.nickname + '_';
             this.send(`NICK ${this.nickname}`);
             this.savedNick = this.nickname;
-            localStorage.setItem('nightwatch-nick', this.nickname);
+            try { localStorage.setItem('nightwatch-nick', this.nickname); } catch(e) {}
             this.addSystemMessage(`Nickname in use, trying ${this.nickname}`);
             this.updatePrompt();
           }
           // Names list
           else if (line.includes(' 353 ')) {
-            const names = line.split(':').pop().trim().split(' ')
+            // RPL_NAMREPLY: ":server 353 nick = #channel :name1 name2 ..."
+            // Use regex to extract the name list after the channel name,
+            // avoiding fragile split(':') which breaks if channel contains ':'
+            const namesMatch = line.match(/ 353 [^ ]+ [=*@] [^ ]+ :(.+)/);
+            const names = (namesMatch ? namesMatch[1] : line.split(':').pop()).trim().split(' ')
               .map(name => name.replace(/^[@+~&%]/, '')) // strip IRC prefix chars
               .filter(name => name.trim() && !name.includes('.irc'));
             this.users = names;
@@ -584,7 +635,7 @@
                 this.nickMap[newIrcNick] = this.nickname;
                 delete this.nickMap[oldIrcNick];
                 // Persist custom nick for reconnections
-                localStorage.setItem('nightwatch-nick', this.nickname);
+                try { localStorage.setItem('nightwatch-nick', this.nickname); } catch(e) {}
                 this.updatePrompt();
                 this.updateUserList();
                 // Re-request NAMES to get a clean user list from server
@@ -640,13 +691,14 @@
               delete this.nickMap[nick];
               this.userCount = this.users.length;
               this.updateUserList();
-              const reason = line.includes(':') ? line.split('QUIT :')[1] || '' : '';
+              const reasonMatch = line.match(/ QUIT :(.*)$/);
+              const reason = reasonMatch ? reasonMatch[1] : '';
               this.addJoinPart(`${nick} has quit${reason ? ` (${reason})` : ''}`);
             }
           }
           // PRIVMSG & CTCP ACTION
           else if (line.includes(' PRIVMSG ')) {
-            const match = line.match(/:([^!]+)![^:]+PRIVMSG [^:]+:(.+)/);
+            const match = line.match(/:([^!]+)![^:]+PRIVMSG [^:]+:(.*)/);
             // Filter own messages: check both IRC nick and display nick
             // (after /nick, the IRC server may echo back our message with
             // the new IRC nick before the NICK confirmation arrives)
@@ -743,8 +795,11 @@
 
       updateUserList() {
         const header = this.userList.querySelector('.user-list-header');
-        this.userList.innerHTML = '';
-        this.userList.appendChild(header);
+        if (!header) return;
+        // Remove all children except header (innerHTML='' would detach the header ref)
+        while (this.userList.lastChild && this.userList.lastChild !== header) {
+          this.userList.removeChild(this.userList.lastChild);
+        }
 
         const displayUsers = new Set();
 
@@ -1011,10 +1066,15 @@
       }
 
       async fetchDebugData() {
+        // Cancel any in-flight fetch from a previous poll cycle (prevents pile-up
+        // on slow networks where a 15s fetch outlasts the 15s interval)
+        if (this.debugAbort) this.debugAbort.abort();
+        this.debugAbort = new AbortController();
+        const signal = this.debugAbort.signal;
         try {
           const [debugRes, bridgeRes] = await Promise.allSettled([
-            fetch('/api/debug').then(r => r.ok ? r.json() : null).catch(() => null),
-            fetch('/api/bridge-status').then(r => r.ok ? r.json() : null).catch(() => null)
+            fetch('/api/debug', { signal }).then(r => r.ok ? r.json() : null).catch(() => null),
+            fetch('/api/bridge-status', { signal }).then(r => r.ok ? r.json() : null).catch(() => null)
           ]);
           const newDebug = debugRes.status === 'fulfilled' ? debugRes.value : null;
           const newBridge = bridgeRes.status === 'fulfilled' ? bridgeRes.value : null;
@@ -1073,8 +1133,10 @@
           parts.push(`Nodes:${totalNodes}`);
         }
         if (d.mesh && d.mesh.stations && d.mesh.stations.length > 0) {
-          const bestSignal = d.mesh.stations.reduce((best, s) =>
-            s.signal && parseInt(s.signal) > best ? parseInt(s.signal) : best, -999);
+          const bestSignal = d.mesh.stations.reduce((best, s) => {
+            const sig = s.signal ? parseInt(s.signal, 10) : NaN;
+            return !isNaN(sig) && sig > best ? sig : best;
+          }, -999);
           if (bestSignal > -999) parts.push(`Sig:${bestSignal}dBm`);
         }
         this.meshInfo.textContent = parts.length > 0 ? parts.join(' | ') : '';
@@ -1165,18 +1227,27 @@
       }
 
       scrollToBottom() {
-        // If user is near bottom, auto-scroll; otherwise, respect their position
+        // Trim first (may adjust scrollTop), then check if user is near bottom
+        this.trimMessages();
         const threshold = 60; // px
         const atBottom = (this.chatArea.scrollHeight - this.chatArea.scrollTop - this.chatArea.clientHeight) < threshold;
-        this.trimMessages();
         if (atBottom) this.chatArea.scrollTop = this.chatArea.scrollHeight;
       }
 
       trimMessages() {
+        // Only trim when 10% over the cap to avoid running the loop on every message
         const MAX_MESSAGES = 1000;
+        const TRIM_THRESHOLD = 1100;
+        if (this.chatArea.children.length <= TRIM_THRESHOLD) return;
+        // Track removed height so we can adjust scrollTop and prevent
+        // the visible content from jumping when top elements are removed.
+        const scrollBefore = this.chatArea.scrollTop;
+        let removedHeight = 0;
         while (this.chatArea.children.length > MAX_MESSAGES) {
+          removedHeight += this.chatArea.firstChild.offsetHeight;
           this.chatArea.removeChild(this.chatArea.firstChild);
         }
+        this.chatArea.scrollTop = scrollBefore - removedHeight;
       }
 
       escapeHtml(text) {
@@ -1186,7 +1257,22 @@
       }
     }
 
-    window.addEventListener('DOMContentLoaded', () => { new IrssiTerminal(); });
+    window.addEventListener('DOMContentLoaded', () => {
+      const terminal = new IrssiTerminal();
+      window.addEventListener('beforeunload', () => {
+        if (terminal.debugInterval) { clearInterval(terminal.debugInterval); terminal.debugInterval = null; }
+        if (terminal.debugAbort) { terminal.debugAbort.abort(); terminal.debugAbort = null; }
+        if (terminal.reconnectTimer) { clearTimeout(terminal.reconnectTimer); terminal.reconnectTimer = null; }
+        if (terminal.ws) {
+          terminal.ws.onclose = null;
+          terminal.ws.onerror = null;
+          terminal.ws.onmessage = null;
+          terminal.ws.onopen = null;
+          terminal.ws.close();
+          terminal.ws = null;
+        }
+      });
+    });
   </script>
 </body>
 </html>

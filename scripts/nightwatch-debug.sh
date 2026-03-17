@@ -31,8 +31,16 @@ fi
 
 json_escape() {
     # Escape string for JSON (backslash, quotes, control chars)
-    printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()), end="")' 2>/dev/null || \
-        printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr '\n' '|' | sed 's/|/\\n/g')"
+    printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()), end="")' 2>/dev/null || {
+        # Fallback: bash-only JSON escaping (no pipe corruption of literal | chars)
+        local s="$1"
+        s="${s//\\/\\\\}"   # backslashes first
+        s="${s//\"/\\\"}"   # double quotes
+        s="${s//$'\t'/\\t}" # tabs
+        s="${s//$'\n'/\\n}" # newlines
+        s="${s//$'\r'/\\r}" # carriage returns
+        printf '"%s"' "$s"
+    }
 }
 
 collect_debug_info() {

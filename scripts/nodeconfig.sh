@@ -3,17 +3,13 @@
 #
 # Runs on every boot BEFORE the mesh service.
 # Determines this node's number by:
-#   1. Scanning the mesh for existing nodes
-#   2. If we have a saved number and it's not taken, keep it
-#   3. Otherwise, pick the lowest available number
+#   1. If .node-number has FIXED marker (set at SD card prep), use it as-is
+#   2. Otherwise, scan the mesh for existing nodes
+#   3. If we have a saved number and it's not taken, keep it
+#   4. Otherwise, pick the lowest available number
 #
-# This ensures no conflicts even when multiple clones boot from the
-# same golden image. Each node always verifies its number is unique.
-#
+# Fixed IDs (from prepare-sdcard.sh --node N) are never reassigned.
 # Generates .env and ngircd.conf based on the node number.
-#
-# This enables the "flash and forget" workflow:
-#   Flash golden image → boot → auto-picks unique node number → joins mesh
 
 set -euo pipefail
 
@@ -129,6 +125,22 @@ NMEOF
         sleep 1
     fi
 
+    # Wait for the dongle to appear (it may not be ready immediately after boot).
+    # Give it up to 30s — if still missing, abort the scan rather than hanging.
+    DONGLE_TIMEOUT=30
+    DONGLE_WAIT=0
+    while [ ! -d "/sys/class/net/$MESH_IFACE" ] && [ "$DONGLE_WAIT" -lt "$DONGLE_TIMEOUT" ]; do
+        if [ "$DONGLE_WAIT" -eq 0 ]; then
+            log "Waiting for $MESH_IFACE to appear (up to ${DONGLE_TIMEOUT}s)..."
+        fi
+        sleep 2
+        DONGLE_WAIT=$((DONGLE_WAIT + 2))
+    done
+    if [ ! -d "/sys/class/net/$MESH_IFACE" ]; then
+        log "Error: $MESH_IFACE not found after ${DONGLE_TIMEOUT}s — skipping mesh scan"
+        return
+    fi
+
     # Check if the dongle is responsive; if not, try a USB reset
     if ! iw dev "$MESH_IFACE" info >/dev/null 2>&1; then
         log "Warning: $MESH_IFACE not responding — attempting USB reset..."
@@ -153,14 +165,19 @@ NMEOF
                 log "Warning: could not reset USB device for $MESH_IFACE"
             fi
         fi
+        # Final check after reset — abort if still not working
+        if ! iw dev "$MESH_IFACE" info >/dev/null 2>&1; then
+            log "Error: $MESH_IFACE still not responding after USB reset — skipping mesh scan"
+            return
+        fi
     fi
 
     # Load batman-adv
     modprobe batman-adv 2>/dev/null || true
 
-    # Set up mesh interface
+    # Set up mesh interface (timeout protects against driver hangs)
     ip link set "$MESH_IFACE" down 2>/dev/null || true
-    if iw dev "$MESH_IFACE" set type mesh 2>/dev/null; then
+    if timeout 10 iw dev "$MESH_IFACE" set type mesh 2>/dev/null; then
         ip link set "$MESH_IFACE" up
         sleep 1
         iw dev "$MESH_IFACE" mesh join "$MESH_ID" freq "$FREQ" 2>/dev/null || true
@@ -174,16 +191,24 @@ NMEOF
 
         # Wait for batman-adv to converge and neighbor count to stabilize.
         # All nodes must see the same set of neighbors for MAC-based assignment
-        # to be consistent. Pi Zeros take ~45-60s to boot, so we wait 60s
-        # minimum, then check that the neighbor count is stable.
+        # to be consistent. Uses adaptive detection: check every 5s, consider
+        # converged after 3 consecutive stable checks (15s of stability).
+        # Initial 15s grace period lets other nodes boot. Max 90s timeout.
         # This only runs on first boot (no .node-number file) — subsequent
         # boots use the saved number and skip the scan.
-        log "Temporary mesh is up, waiting 60s for all nodes to boot..."
-        sleep 60
-        log "Checking neighbor convergence..."
+        CONVERGE_INTERVAL=5
+        CONVERGE_STABLE_NEEDED=3
+        CONVERGE_MAX=90
+        CONVERGE_GRACE=15
+
+        log "Temporary mesh is up, waiting ${CONVERGE_GRACE}s grace period..."
+        sleep "$CONVERGE_GRACE"
+
+        log "Checking neighbor convergence (every ${CONVERGE_INTERVAL}s, need ${CONVERGE_STABLE_NEEDED} stable, max ${CONVERGE_MAX}s)..."
         PREV_COUNT=-1
         STABLE_FOR=0
-        for attempt in $(seq 1 20); do
+        ELAPSED=$CONVERGE_GRACE
+        while [ "$ELAPSED" -lt "$CONVERGE_MAX" ]; do
             # Count neighbors — skip header lines (first 2 lines of batctl output)
             CUR_COUNT=$(batctl meshif bat0 n 2>/dev/null | tail -n +3 | grep -c "$MESH_IFACE" || true)
             CUR_COUNT=${CUR_COUNT:-0}
@@ -193,13 +218,17 @@ NMEOF
                 STABLE_FOR=0
                 PREV_COUNT=$CUR_COUNT
             fi
-            log "  convergence check $attempt: $CUR_COUNT neighbor(s) (stable for ${STABLE_FOR})"
-            # Consider stable after 5 consecutive identical counts (15s)
-            if [ "$STABLE_FOR" -ge 5 ]; then
+            log "  convergence ${ELAPSED}s/${CONVERGE_MAX}s: $CUR_COUNT neighbor(s) (stable for ${STABLE_FOR}/${CONVERGE_STABLE_NEEDED})"
+            if [ "$STABLE_FOR" -ge "$CONVERGE_STABLE_NEEDED" ]; then
+                log "Mesh converged after ${ELAPSED}s"
                 break
             fi
-            sleep 3
+            sleep "$CONVERGE_INTERVAL"
+            ELAPSED=$((ELAPSED + CONVERGE_INTERVAL))
         done
+        if [ "$ELAPSED" -ge "$CONVERGE_MAX" ]; then
+            log "Warning: convergence timeout after ${CONVERGE_MAX}s — proceeding with $CUR_COUNT neighbor(s)"
+        fi
         log "Scanning with $CUR_COUNT neighbor(s)..."
     else
         log "Warning: could not set $MESH_IFACE to mesh mode"
@@ -227,7 +256,7 @@ NMEOF
 
         if [ -n "$NEIGHBOR_MACS" ] && [ "$MESH_PEER_COUNT" -gt 0 ]; then
             # Build sorted list of all MACs (ours + neighbors)
-            ALL_MACS=$(printf '%s\n%s' "$OUR_MAC" "$NEIGHBOR_MACS" | sort)
+            ALL_MACS=$(printf '%s\n%s\n' "$OUR_MAC" "$NEIGHBOR_MACS" | sort -u)
             # Our position in the sorted list is our node number
             OUR_POSITION=1
             while IFS= read -r mac; do
@@ -305,20 +334,31 @@ trap 'teardown_mesh' EXIT
 # can crash the dongle, leaving wlan1 missing when the mesh service starts.
 # Only scan on first boot (no saved number) to avoid this.
 NODE_NUM=""
+IS_FIXED=false
 if [ -f "$NODE_NUM_FILE" ]; then
-    SAVED_NUM=$(cat "$NODE_NUM_FILE")
+    SAVED_NUM=$(head -1 "$NODE_NUM_FILE")
+    # Check for FIXED marker (second line) — set at SD card prep time
+    if sed -n '2p' "$NODE_NUM_FILE" 2>/dev/null | grep -q '^FIXED$'; then
+        IS_FIXED=true
+    fi
     if [[ "$SAVED_NUM" =~ ^[0-9]+$ ]] && [ "$SAVED_NUM" -ge 1 ] && [ "$SAVED_NUM" -le "$MAX_NODES" ]; then
         NODE_NUM="$SAVED_NUM"
-        log "Using saved node number: $NODE_NUM (from $NODE_NUM_FILE)"
+        if [ "$IS_FIXED" = true ]; then
+            log "Using FIXED node number: $NODE_NUM (assigned at SD card prep)"
+        else
+            log "Using saved node number: $NODE_NUM (from $NODE_NUM_FILE)"
+        fi
 
         # Lightweight conflict check: if bat0 is already up (mesh service running),
         # verify our saved number matches our MAC position. This catches the case
         # where firstboot assigned #1 while solo, but now other nodes are on the mesh.
-        if [ -d /sys/class/net/bat0 ]; then
+        # Skip this check for FIXED nodes — their number was assigned at SD card
+        # prep time and tracked in the registry, so conflicts shouldn't happen.
+        if [ "$IS_FIXED" = false ] && [ -d /sys/class/net/bat0 ]; then
             OUR_MAC=$(cat "/sys/class/net/$MESH_IFACE/address" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
             NEIGHBOR_MACS=$(batctl meshif bat0 n 2>/dev/null | tail -n +3 | awk '{print $2}' | tr '[:upper:]' '[:lower:]' | sort || true)
             if [ -n "$OUR_MAC" ] && [ -n "$NEIGHBOR_MACS" ]; then
-                ALL_MACS=$(printf '%s\n%s' "$OUR_MAC" "$NEIGHBOR_MACS" | sort)
+                ALL_MACS=$(printf '%s\n%s\n' "$OUR_MAC" "$NEIGHBOR_MACS" | sort -u)
                 CORRECT_POS=1
                 while IFS= read -r mac; do
                     [ "$mac" = "$OUR_MAC" ] && break
@@ -358,6 +398,7 @@ teardown_mesh
 
 # Save node number for next boot
 echo "$NODE_NUM" > "$NODE_NUM_FILE"
+sync
 log "Node number: $NODE_NUM (saved to $NODE_NUM_FILE)"
 
 # Set hostname to match the assigned number and mode
@@ -438,6 +479,7 @@ fi
 log "Generating .env for node $NODE_NUM..."
 
 cp "$ENV_TEMPLATE" "$ENV_FILE"
+chmod 600 "$ENV_FILE"
 
 # Calculate mesh IP: 192.168.199.(100 + node_number)
 if ! MESH_IP="$(mesh_ip_for_node "$NODE_NUM")"; then
@@ -459,6 +501,9 @@ log "Node mode: $NODE_MODE"
 # Inject secrets from .secrets file (preserved by build-image.sh)
 if [ -f "$SECRETS_FILE" ]; then
     log "Injecting secrets from .secrets..."
+    # Whitelist of allowed secret keys — prevents .secrets from injecting
+    # arbitrary env vars into the node config (defense in depth)
+    ALLOWED_KEYS="ROUTER_PASSWORD IRC_LINK_PASSWORD TAILSCALE_AUTH_KEY HF_TOKEN WIFI_SSID WIFI_PASSWORD"
     while IFS= read -r line; do
         # Skip comments and empty lines
         [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
@@ -468,10 +513,19 @@ if [ -f "$SECRETS_FILE" ]; then
         key="${line%%=*}"
         value="${line#*=}"
         [[ -z "$key" ]] && continue
-        [[ "$key" = "MESH_GATEWAY" ]] && continue
-        [[ "$key" = "NODE_MODE" ]] && continue
+        # Only inject whitelisted keys
+        allowed=false
+        for k in $ALLOWED_KEYS; do
+            [[ "$key" = "$k" ]] && { allowed=true; break; }
+        done
+        if [ "$allowed" = false ]; then
+            log "Skipping unknown secret key: $key"
+            continue
+        fi
         # Use set_env_value — no escaping needed
-        set_env_value "$ENV_FILE" "$key" "$value"
+        if ! set_env_value "$ENV_FILE" "$key" "$value"; then
+            log "ERROR: Failed to inject secret key $key"
+        fi
     done < "$SECRETS_FILE"
     log "Secrets injected"
 fi

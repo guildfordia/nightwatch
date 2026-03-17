@@ -129,12 +129,14 @@ done
 # ---- Connectivity ----
 section "Connectivity"
 echo -n "  Mesh peers: "
+LOCAL="${MESH_IP%%/*}"
 for i in $(seq 1 20); do
     ip="192.168.199.$((100 + i))"
-    LOCAL="${MESH_IP%%/*}"
     [ "$ip" = "$LOCAL" ] && continue
-    if ping -c 1 -W 1 "$ip" >/dev/null 2>&1; then
-        RTT=$(ping -c 1 -W 1 "$ip" 2>/dev/null | grep 'time=' | sed 's/.*time=//' || echo "?")
+    # Single ping with short timeout (0.5s) — avoids 20s+ stall with no peers
+    RTT_LINE=$(ping -c 1 -W 1 "$ip" 2>/dev/null | grep 'time=' || true)
+    if [ -n "$RTT_LINE" ]; then
+        RTT=$(echo "$RTT_LINE" | sed 's/.*time=//')
         echo -n "$ip($RTT) "
     fi
 done

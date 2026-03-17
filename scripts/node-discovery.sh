@@ -58,6 +58,8 @@ BROADCAST_IP="${LOCAL_IP%.*}.255"
 
 # ---- Beacon sender (runs in background) ----
 send_beacons() {
+    # Ignore SIGPIPE so a socat exit mid-write doesn't kill the sender loop
+    trap '' PIPE
     while true; do
         PAYLOAD="NIGHTWATCH|${NODE_NUM}|${LOCAL_IP}|${SERVER_NAME}|$(date +%s)"
         # Send on br0 (where MESH_IP lives) — bat0 is a virtual L2 interface with
@@ -93,7 +95,7 @@ receive_beacons() {
                 log "WARNING: Invalid IP in beacon: $PEER_IP"
                 continue
             fi
-            if ! [[ "$PEER_NAME" =~ ^[a-zA-Z0-9._-]+$ ]] || [ "${#PEER_NAME}" -gt 64 ]; then
+            if ! [[ "$PEER_NAME" =~ ^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$ ]] || [[ "$PEER_NAME" =~ \.\. ]] || [ "${#PEER_NAME}" -gt 64 ]; then
                 log "WARNING: Invalid server name in beacon: $PEER_NAME"
                 continue
             fi
@@ -128,7 +130,7 @@ receive_beacons() {
             # Check if ngircd config needs updating
             update_irc_config
         fi
-    done < <(socat -u UDP4-RECV:${DISCOVERY_PORT},reuseaddr STDOUT 2>/dev/null)
+    done < <(socat -u -T 60 UDP4-RECV:${DISCOVERY_PORT},reuseaddr STDOUT 2>/dev/null)
 }
 
 # ---- Expire stale peers ----
@@ -179,11 +181,14 @@ generate_irc_config() {
 
     generate_ngircd_base_conf "$CONF" "$SERVER_NAME" "$NODE_NUM"
 
-    # Add server links for each known peer
+    # Add server links for each known peer (read under shared lock to
+    # avoid races with beacon receiver writing to the peer file)
     if [ -f "$PEER_FILE" ]; then
-        while IFS='|' read -r num ip name ts; do
-            [ -z "$num" ] && continue
-            cat >> "$CONF" << EOF
+        (
+            flock -s 200
+            while IFS='|' read -r num ip name ts; do
+                [ -z "$num" ] && continue
+                cat >> "$CONF" << EOF
 
 [Server]
 Name = $name
@@ -194,7 +199,8 @@ PeerPassword = $IRC_LINK_PASSWORD
 Group = 1
 Passive = no
 EOF
-        done < "$PEER_FILE"
+            done < "$PEER_FILE"
+        ) 200>"${PEER_FILE}.lock"
     fi
 }
 
@@ -205,18 +211,20 @@ update_irc_config() {
     # Read peer file under shared lock to prevent races with write operations
     local CURRENT_HASH PEER_COUNT
     CURRENT_HASH=$(
+        exec 200>"${PEER_FILE}.lock"
         flock -s 200
         sort "$PEER_FILE" 2>/dev/null | cut -d'|' -f1-3 | cksum || echo ""
-    ) 200>"${PEER_FILE}.lock"
+    )
 
     if [ "$CURRENT_HASH" = "$LAST_PEER_HASH" ]; then
         return
     fi
 
     PEER_COUNT=$(
+        exec 200>"${PEER_FILE}.lock"
         flock -s 200
         wc -l < "$PEER_FILE" 2>/dev/null || echo "0"
-    ) 200>"${PEER_FILE}.lock"
+    )
     PEER_COUNT=$((PEER_COUNT + 0))
     local PREV_COUNT=$LAST_PEER_COUNT
 
@@ -290,17 +298,24 @@ case "${1:-start}" in
         # Receive beacons (blocking — this is the main loop)
         # Retry if socat dies (e.g., interface goes down temporarily)
         RETRY_DELAY=5
-        while true; do
+        RETRY_COUNT=0
+        MAX_RETRIES=100
+        while [ "$RETRY_COUNT" -lt "$MAX_RETRIES" ]; do
             receive_beacons
             # If receive_beacons ran for >60s, it was working — reset backoff
             if [ -f "$PEER_FILE" ] && [ "$(wc -l < "$PEER_FILE" 2>/dev/null || echo 0)" -gt 0 ]; then
                 RETRY_DELAY=5
+                RETRY_COUNT=0  # reset counter on success
+            else
+                RETRY_COUNT=$((RETRY_COUNT + 1))
             fi
-            log "WARNING: socat exited — retrying in ${RETRY_DELAY}s..."
+            log "WARNING: socat exited — retry $RETRY_COUNT/$MAX_RETRIES in ${RETRY_DELAY}s..."
             sleep "$RETRY_DELAY"
             # Cap backoff at 30s
             RETRY_DELAY=$((RETRY_DELAY < 30 ? RETRY_DELAY * 2 : 30))
         done
+        log "ERROR: Max retries ($MAX_RETRIES) exceeded — check mesh interface"
+        exit 1
         ;;
 
     stop)
@@ -336,10 +351,13 @@ case "${1:-start}" in
         fi
         NOW=$(date +%s)
         echo "Discovered peers:"
-        while IFS='|' read -r num ip name ts; do
-            AGE=$((NOW - ts))
-            echo "  Node $num: $name @ $ip (${AGE}s ago)"
-        done < "$PEER_FILE"
+        (
+            flock -s 200
+            while IFS='|' read -r num ip name ts; do
+                AGE=$((NOW - ts))
+                echo "  Node $num: $name @ $ip (${AGE}s ago)"
+            done < "$PEER_FILE"
+        ) 200>"${PEER_FILE}.lock"
         ;;
 
     *)

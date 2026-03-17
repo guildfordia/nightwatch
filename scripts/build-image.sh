@@ -21,6 +21,14 @@
 
 set -euo pipefail
 
+# Safety check: refuse to run on non-Pi hardware (clears history + removes node config)
+if ! grep -qi "raspberry pi\|BCM2" /proc/cpuinfo 2>/dev/null; then
+    echo -e "\033[0;31mERROR: This doesn't look like a Raspberry Pi!\033[0m"
+    echo "This script clears history and removes node config — don't run on your laptop."
+    read -rp "Continue anyway? [y/N] " confirm
+    [[ ! "${confirm:-}" =~ ^[Yy]$ ]] && { echo "Aborted."; exit 1; }
+fi
+
 # Read project path from /etc/nightwatch.conf (written by setup-rpi.sh)
 if [ -f /etc/nightwatch.conf ]; then
     # shellcheck source=/dev/null

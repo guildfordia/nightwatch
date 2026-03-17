@@ -164,13 +164,19 @@ if [ ! -d "/sys/class/net/$BR_IFACE" ]; then
     # Fallback: maybe IP is still on bat0 (no bridge yet)
     mesh_ip_iface="$BAT_IFACE"
 fi
-mesh_ip_actual=$(ip -4 addr show dev "$mesh_ip_iface" 2>/dev/null | grep -oP 'inet \K[0-9.]+' || echo "")
-if [ -n "$mesh_ip_actual" ]; then
-    pass "$mesh_ip_iface has IP: $mesh_ip_actual"
-    if [ "$mesh_ip_actual" = "$LOCAL_IP" ]; then
-        pass "$mesh_ip_iface IP matches MESH_IP ($LOCAL_IP)"
+mesh_ips=$(ip -4 addr show dev "$mesh_ip_iface" 2>/dev/null | grep -oP 'inet \K[0-9.]+' || echo "")
+if [ -n "$mesh_ips" ]; then
+    pass "$mesh_ip_iface has IP(s): $(echo $mesh_ips | tr '\n' ' ')"
+    if echo "$mesh_ips" | grep -qx "$LOCAL_IP"; then
+        pass "$mesh_ip_iface has node IP $LOCAL_IP"
     else
-        fail "$mesh_ip_iface IP ($mesh_ip_actual) does not match MESH_IP ($LOCAL_IP)"
+        fail "$mesh_ip_iface missing node IP $LOCAL_IP"
+    fi
+    # Shared IP — all nodes should have 192.168.199.1
+    if echo "$mesh_ips" | grep -qx "192.168.199.1"; then
+        pass "$mesh_ip_iface has shared IP 192.168.199.1"
+    else
+        fail "$mesh_ip_iface missing shared IP 192.168.199.1"
     fi
 else
     fail "No mesh IP found on $BR_IFACE or $BAT_IFACE"
@@ -248,7 +254,7 @@ echo "  Scanning 192.168.199.101-120 via $SCAN_IFACE..."
 if command -v fping >/dev/null 2>&1; then
     # Fast parallel scan with fping bound to mesh interface
     ALL_IPS=$(for i in $(seq 1 "$MAX_NODES"); do mesh_ip_for_node "$i"; done)
-    FPING_OUT=$(echo "$ALL_IPS" | fping -a -e -r 1 -t 500 -I "$SCAN_IFACE" 2>/dev/null || true)
+    FPING_OUT=$(echo "$ALL_IPS" | timeout 30 fping -a -e -r 1 -t 500 -I "$SCAN_IFACE" 2>/dev/null || true)
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         ip=$(echo "$line" | awk '{print $1}')
@@ -696,7 +702,7 @@ fi
 # 10. Captive Portal & DNS
 # ============================================================
 
-section "10. Captive Portal & DNS"
+section "10. DNS & DHCP"
 
 # dnsmasq running
 DNSMASQ_PID="/var/run/dnsmasq-nightwatch.pid"
@@ -723,24 +729,24 @@ else
     fail "iptables HTTP redirect missing (port 80 on $BR_IFACE)"
 fi
 
-# Port 443 DNAT rule (HTTPS → nginx self-signed cert for HSTS-preloaded sites)
+# Port 443 should NOT have a DNAT rule (HTTPS redirect was removed)
 if echo "$IPTABLES_NAT" | grep -q "\-i $BR_IFACE.*--dport 443.*DNAT"; then
-    pass "iptables HTTPS redirect active (port 443 on $BR_IFACE)"
+    warn "iptables HTTPS redirect still active (port 443) — should be removed"
 else
-    fail "iptables HTTPS redirect missing (port 443 on $BR_IFACE)"
+    pass "No stale HTTPS redirect (port 443 removed as expected)"
 fi
 
 # DNS resolution — all domains should resolve to local IP
 DNS_RESULT=$(dig +short @"$LOCAL_IP" google.com A 2>/dev/null || nslookup google.com "$LOCAL_IP" 2>/dev/null | grep -oP 'Address: \K[0-9.]+' | tail -1 || echo "")
 if [ "$DNS_RESULT" = "$LOCAL_IP" ]; then
-    pass "DNS captive portal: google.com resolves to $LOCAL_IP"
+    pass "DNS redirect: google.com resolves to $LOCAL_IP"
 elif [ -n "$DNS_RESULT" ]; then
-    fail "DNS captive portal: google.com resolves to $DNS_RESULT (expected $LOCAL_IP)"
+    fail "DNS redirect: google.com resolves to $DNS_RESULT (expected $LOCAL_IP)"
 else
     # Try with host command as fallback
     DNS_RESULT2=$(host google.com "$LOCAL_IP" 2>/dev/null | grep -oP 'address \K[0-9.]+' | head -1 || echo "")
     if [ "$DNS_RESULT2" = "$LOCAL_IP" ]; then
-        pass "DNS captive portal: google.com resolves to $LOCAL_IP"
+        pass "DNS redirect: google.com resolves to $LOCAL_IP"
     else
         warn "DNS resolution test inconclusive (dig/nslookup/host not available or failed)"
     fi
