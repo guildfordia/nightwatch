@@ -5,7 +5,7 @@
 #   - Heartbeat (slow blink) = booting / services starting
 #   - Fast blink             = error / critical service down
 #   - Triple blink (SOS)     = undervoltage detected (power too low)
-#   - Solid green            = all services up and ready
+#   - Slow blink (2s on/off) = all services up and ready
 #   - Default (mmc0)         = restored on stop (normal disk activity LED)
 #
 # Undervoltage takes priority over all other states — if the Pi reports
@@ -61,10 +61,12 @@ led_fast_blink() {
     echo 100 > "$LED_PATH/delay_off" 2>/dev/null || true
 }
 
-led_solid_on() {
-    # Use "default-on" trigger instead of "none" + brightness — Pi 5's RP1
-    # LED controller ignores brightness writes when trigger is "none".
-    led_set_trigger "default-on"
+led_ready() {
+    # Slow blink (2s on / 2s off) — visually distinct from heartbeat and fast blink.
+    # Solid LED was too easy to miss on Pi 5 (looked "off").
+    led_set_trigger "timer"
+    echo 2000 > "$LED_PATH/delay_on" 2>/dev/null || true
+    echo 2000 > "$LED_PATH/delay_off" 2>/dev/null || true
 }
 
 led_restore_default() {
@@ -349,7 +351,7 @@ case "${1:-}" in
             case "$rc" in
                 0)
                     if [ "$CURRENT_STATE" != "ready" ]; then
-                        led_solid_on
+                        led_ready
                         CURRENT_STATE="ready"
                         STARTING_SINCE=0
                     fi
