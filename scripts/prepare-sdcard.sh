@@ -299,11 +299,12 @@ done
 
 stage_fail() {
     echo "[-] nightwatch-stage FAILED: $1"
-    # Fast blink = error (same pattern as firstboot_fail in firstboot.sh)
+    # Slow blink (500ms) = staging error
+    # Distinct from firstboot errors (100ms fast blink) so you can tell which stage failed
     if [ -n "$LED_PATH" ]; then
         echo "timer" > "$LED_PATH/trigger" 2>/dev/null || true
-        echo 100  > "$LED_PATH/delay_on"  2>/dev/null || true
-        echo 100  > "$LED_PATH/delay_off" 2>/dev/null || true
+        echo 500  > "$LED_PATH/delay_on"  2>/dev/null || true
+        echo 500  > "$LED_PATH/delay_off" 2>/dev/null || true
     fi
     exit 1
 }
@@ -322,6 +323,9 @@ fi
 # Log to boot partition (readable on macOS for debugging)
 STAGE_LOG="$BOOT/nightwatch-firstboot.log"
 exec > >(tee -a "$STAGE_LOG") 2>&1
+
+# Show heartbeat so the LED is active during staging (not silent/default)
+[ -n "$LED_PATH" ] && echo "heartbeat" > "$LED_PATH/trigger" 2>/dev/null || true
 
 echo ""
 echo "======================================"

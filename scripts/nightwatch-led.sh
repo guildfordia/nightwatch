@@ -317,6 +317,7 @@ case "${1:-}" in
         # Start with heartbeat (booting)
         led_heartbeat
         CURRENT_STATE=""
+        STARTING_SINCE=0  # timestamp when we first entered "starting" state
 
         # Loop forever, checking health every 10 seconds
         while true; do
@@ -349,18 +350,30 @@ case "${1:-}" in
                     if [ "$CURRENT_STATE" != "ready" ]; then
                         led_solid_on
                         CURRENT_STATE="ready"
+                        STARTING_SINCE=0
                     fi
                     ;;
                 1)
                     if [ "$CURRENT_STATE" != "error" ]; then
                         led_fast_blink
                         CURRENT_STATE="error"
+                        STARTING_SINCE=0
                     fi
                     ;;
                 2)
                     if [ "$CURRENT_STATE" != "starting" ]; then
                         led_heartbeat
                         CURRENT_STATE="starting"
+                        STARTING_SINCE=$(date +%s)
+                    else
+                        # Escalate to error if stuck in "starting" for more than 5 minutes
+                        now=$(date +%s)
+                        if [ "$STARTING_SINCE" -gt 0 ] && [ $(( now - STARTING_SINCE )) -ge 300 ]; then
+                            echo "[!] Services stuck in starting state for 5+ minutes — escalating LED to error"
+                            led_fast_blink
+                            CURRENT_STATE="error"
+                            STARTING_SINCE=0
+                        fi
                     fi
                     ;;
             esac
