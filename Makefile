@@ -2,7 +2,7 @@
 
 ENV_FILE := .env
 
-.PHONY: install run stop test scan update status logs clean monitor blink image sdcard info router build-bridge help
+.PHONY: install run stop test scan update status logs sdlogs clean monitor blink image sdcard info router build-bridge help
 .DEFAULT_GOAL := help
 
 help:
@@ -132,6 +132,17 @@ status:
 
 logs:
 	@sudo journalctl -u ngircd -u nightwatch-bridge -u nginx -f
+
+sdlogs:
+	@if [ -z "$(SD)" ]; then echo "Usage: make sdlogs SD=/dev/diskX"; exit 1; fi
+	@PART="$(SD)s2"; \
+	DEBUGFS=/opt/homebrew/opt/e2fsprogs/sbin/debugfs; \
+	if [ ! -x "$$DEBUGFS" ]; then echo "Run: brew install e2fsprogs"; exit 1; fi; \
+	echo "=== /var/log/nightwatch-firstboot.log ==="; \
+	sudo $$DEBUGFS -R "cat /var/log/nightwatch-firstboot.log" $$PART 2>/dev/null; \
+	echo ""; \
+	echo "=== /opt/nightwatch/.firstboot-done (stamp) ==="; \
+	sudo $$DEBUGFS -R "cat /opt/nightwatch/.firstboot-done" $$PART 2>/dev/null || true
 
 clean:
 	@sudo systemctl stop nightwatch-app.service 2>/dev/null || true
