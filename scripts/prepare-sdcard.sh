@@ -706,12 +706,16 @@ if [ -n "$NODE_NUM" ]; then
         exit 1
     fi
     if registry_has "$NODE_NUM"; then
-        echo -e "${RED}Error: node $NODE_NUM is already assigned in .node-registry${NC}"
-        echo "  Use a different number, or remove the entry from .node-registry"
+        echo -e "${YELLOW}Warning: node $NODE_NUM is already assigned in .node-registry${NC}"
         echo ""
         echo "Current assignments:"
         cat "$REGISTRY_FILE"
-        exit 1
+        echo ""
+        read -r -p "Re-use node $NODE_NUM anyway? [y/N] " _confirm
+        if [[ ! "$_confirm" =~ ^[Yy]$ ]]; then
+            echo "Aborted."
+            exit 1
+        fi
     fi
 else
     # Auto-pick next free number
