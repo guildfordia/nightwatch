@@ -63,6 +63,11 @@ SCAN_TMP=$(mktemp -d /tmp/nightwatch-scan.XXXXX)
 SCAN_START=$(date +%s)
 trap 'rm -rf "$SCAN_TMP"' EXIT
 
+# ── Portable millisecond clock ───────────────────────────────────────────────
+# date +%s%3N is GNU-only; macOS date doesn't support %N.
+_now_ms() { date +%s%3N 2>/dev/null | grep -qE '^[0-9]{13}$' \
+    && date +%s%3N || echo $(( $(date +%s) * 1000 )); }
+
 # ── dat helpers ─────────────────────────────────────────────────────────────
 # Safe key=value reader — avoids variable contamination between iterations
 dat_get() { grep "^${2}=" "$1" 2>/dev/null | cut -d= -f2-; }
@@ -71,10 +76,14 @@ dat_get() { grep "^${2}=" "$1" 2>/dev/null | cut -d= -f2-; }
 # probe_node <node_num> <ip>
 # Writes probe results to $SCAN_TMP/node<N>.dat as KEY=VALUE pairs.
 probe_node() {
+    # Prevent the background subshell from firing the parent's EXIT trap,
+    # which would delete SCAN_TMP before other probes finish writing.
+    trap '' EXIT
+
     local node_num="$1"
     local ip="$2"
     local dat="$SCAN_TMP/node${node_num}.dat"
-    local t0; t0=$(date +%s%3N)
+    local t0; t0=$(_now_ms)
 
     # ── Ping (5 packets, 2 s timeout) ──
     local reachable=0 rtt_min="" rtt_avg="" rtt_max="" rtt_mdev="" loss=100
@@ -147,7 +156,7 @@ probe_node() {
         irc_version=$(echo "$irc_raw" | grep " 351 " | awk '{print $4}' | head -1 || true)
     fi
 
-    local t1; t1=$(date +%s%3N)
+    local t1; t1=$(_now_ms)
 
     # ── Write results ──
     cat > "$dat" <<EOF
@@ -168,6 +177,7 @@ IRC_VERSION=$irc_version
 IRC_SERVER_LIST=$irc_server_list
 DURATION_MS=$(( t1 - t0 ))
 EOF
+    return 0
 }
 
 # ── Offline node stub ───────────────────────────────────────────────────────
@@ -219,12 +229,15 @@ declare -a LIVE_NODES=() LIVE_IPS=() OFFLINE_NODES=()
 declare -a ALL_IPS=()
 for i in $(seq 1 "$MAX_NODES"); do ALL_IPS+=("$(mesh_ip_for_node "$i")"); done
 
-t_sweep0=$(date +%s%3N)
+t_sweep0=$(_now_ms)
 
 # Determine which IPs respond to ping (excluding local node — always alive)
 declare -a FPING_LIVE=()
 if command -v fping >/dev/null 2>&1; then
-    mapfile -t FPING_LIVE < <(
+    FPING_LIVE=()
+    while IFS= read -r _fp_line; do
+        [ -n "$_fp_line" ] && FPING_LIVE+=("$_fp_line")
+    done < <(
         printf '%s\n' "${ALL_IPS[@]}" \
         | timeout 15 fping -a -r 1 -t 1000 -I "$SCAN_IFACE" 2>/dev/null || true
     )
@@ -235,14 +248,14 @@ else
     done
 fi
 
-t_sweep1=$(date +%s%3N)
+t_sweep1=$(_now_ms)
 
 # Build live / offline lists (always include local node in live)
 for i in $(seq 1 "$MAX_NODES"); do
     ip="$(mesh_ip_for_node "$i")"
     if [ "$ip" = "$LOCAL_IP" ]; then
         LIVE_NODES+=("$i"); LIVE_IPS+=("$ip")
-    elif printf '%s\n' "${FPING_LIVE[@]}" | grep -qx "$ip"; then
+    elif [ ${#FPING_LIVE[@]} -gt 0 ] && printf '%s\n' "${FPING_LIVE[@]}" | grep -qx "$ip"; then
         LIVE_NODES+=("$i"); LIVE_IPS+=("$ip")
     else
         OFFLINE_NODES+=("$i")
@@ -258,9 +271,9 @@ for i in "${!LIVE_NODES[@]}"; do
         && echo -e "  ${GREEN}●${NC}  node${n}   ${ip}   ${DIM}(this node)${NC}" \
         || echo -e "  ${GREEN}●${NC}  node${n}   ${ip}"
 done
-for n in "${OFFLINE_NODES[@]}"; do
+[ ${#OFFLINE_NODES[@]} -gt 0 ] && for n in "${OFFLINE_NODES[@]}"; do
     echo -e "  ${DIM}○  node${n}   $(mesh_ip_for_node "$n")   offline${NC}"
-done
+done || true
 
 # ════════════════════════════════════════════════════════════════════════════
 # Phase 2 — Parallel deep probes
@@ -283,7 +296,7 @@ else
     echo -e "  ${GREEN}Done.${NC}"
 fi
 
-for n in "${OFFLINE_NODES[@]}"; do write_offline_dat "$n"; done
+[ ${#OFFLINE_NODES[@]} -gt 0 ] && for n in "${OFFLINE_NODES[@]}"; do write_offline_dat "$n"; done || true
 
 # ════════════════════════════════════════════════════════════════════════════
 # Phase 3 — Local batman-adv topology  (requires root)
