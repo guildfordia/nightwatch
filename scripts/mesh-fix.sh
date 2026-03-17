@@ -298,7 +298,10 @@ setup_client_bridge() {
     ip link set "$BR_IFACE" up
     ip addr add "$MESH_IP" dev "$BR_IFACE"
 
-    echo "[+] Bridge $BR_IFACE is up with IP ${MESH_IP%/*}"
+    # Shared IP across all nodes — users can always type http://192.168.199.1
+    ip addr add 192.168.199.1/32 dev "$BR_IFACE" 2>/dev/null || true
+
+    echo "[+] Bridge $BR_IFACE is up with IP ${MESH_IP%/*} + 192.168.199.1 (shared)"
     echo "[+] Ports: $BAT_IFACE (mesh) + $AP_IFACE (router)"
 }
 
@@ -405,13 +408,7 @@ start_dnsmasq() {
     iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80 2>/dev/null || \
         iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80
 
-    # HTTPS redirect: catch HTTPS traffic → nginx self-signed cert → chat page.
-    # Many sites are HSTS-preloaded (browsers refuse HTTP entirely). Without this,
-    # HTTPS goes nowhere. With it, the user sees a cert warning they can accept.
-    iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 443 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":443 2>/dev/null || \
-        iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 443 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":443
-
-    echo "[+] Captive portal iptables rules active (DNS + HTTP + HTTPS redirect)"
+    echo "[+] iptables rules active (DNS + HTTP redirect)"
 }
 
 setup_gateway() {
@@ -593,7 +590,6 @@ case "$1" in
         iptables -t nat -D PREROUTING -i "$BR_IFACE" -p udp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || true
         iptables -t nat -D PREROUTING -i "$BR_IFACE" -p tcp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || true
         iptables -t nat -D PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80 2>/dev/null || true
-        iptables -t nat -D PREROUTING -i "$BR_IFACE" -p tcp --dport 443 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":443 2>/dev/null || true
 
         # Remove only the Nightwatch MASQUERADE rule (preserve Tailscale NAT)
         INET_IFACE="${INET_IFACE:-wlan0}"

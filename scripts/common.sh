@@ -137,14 +137,9 @@ dhcp-range=192.168.199.${dhcp_start},192.168.199.${dhcp_end},255.255.255.0,1h
 dhcp-option=3,${mesh_ip}
 dhcp-option=6,${mesh_ip}
 
-# Captive portal via DHCP option 114 (RFC 8910) + RFC 8908 Captive Portal API
-# Tells Android 11+, iOS 14+, and modern OSes "this is a captive portal"
-# directly in the DHCP response. The URL points to an RFC 8908 JSON endpoint
-# so the OS uses its built-in mini-browser (not Firefox/Chrome) for the popup.
-dhcp-option=114,http://${mesh_ip}/api/captive
-
-# Redirect ALL DNS to this node (captive portal)
+# Redirect ALL DNS to this node
 # Every domain resolves to the local Pi so any URL loads the chat page.
+# Users type http://chat.nightwatch or the node IP in their browser.
 address=/#/${mesh_ip}
 
 # Don't read /etc/resolv.conf (we handle all DNS ourselves)
