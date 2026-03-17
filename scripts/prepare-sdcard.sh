@@ -566,7 +566,7 @@ FIRSTEOF
     echo ""
 
     # Register this node
-    registry_add "$NODE_NUM" "$NODE_MODE"
+    registry_add "$NODE_NUM" "$NODE_MODE" || true
     echo -e "  ${GREEN}Node $NODE_NUM registered in .node-registry${NC}"
     echo ""
 }
@@ -659,6 +659,43 @@ load_env "$ENV_TEMPLATE"
 [ -n "$_SAVE_HF_TOKEN" ] && HF_TOKEN="$_SAVE_HF_TOKEN"
 
 
+# ---- Resolve node number ----
+
+registry_init
+
+if [ -n "$NODE_NUM" ]; then
+    # Explicit node number from --node or NODE env var
+    if ! [[ "$NODE_NUM" =~ ^[0-9]+$ ]] || [ "$NODE_NUM" -lt 1 ] || [ "$NODE_NUM" -gt "$MAX_NODES" ]; then
+        echo -e "${RED}Error: invalid node number '$NODE_NUM' (must be 1-$MAX_NODES)${NC}"
+        exit 1
+    fi
+    if registry_has "$NODE_NUM"; then
+        echo -e "${YELLOW}Warning: node $NODE_NUM is already assigned in .node-registry${NC}"
+        echo ""
+        echo "Current assignments:"
+        cat "$REGISTRY_FILE"
+        echo ""
+        read -r -p "Re-use node $NODE_NUM anyway? [y/N] " _confirm
+        if [[ ! "$_confirm" =~ ^[Yy]$ ]]; then
+            echo "Aborted."
+            exit 1
+        fi
+        _NODE_REUSE=true
+    fi
+else
+    # Auto-pick next free number
+    NODE_NUM=$(registry_next_free)
+    if [ -z "$NODE_NUM" ]; then
+        echo -e "${RED}Error: all node numbers (1-$MAX_NODES) are taken${NC}"
+        echo "Remove old entries from .node-registry to free up numbers."
+        exit 1
+    fi
+    echo "[+] Auto-assigned node number: $NODE_NUM"
+fi
+
+MESH_IP="192.168.199.$((100 + NODE_NUM))"
+echo "[+] Node $NODE_NUM — IP will be $MESH_IP"
+
 # ---- Prompt for secrets ----
 
 # Router password
@@ -694,42 +731,6 @@ if [ -z "${TAILSCALE_AUTH_KEY:-}" ] && [ "$AUTO_YES" != true ]; then
     read -rp "  Tailscale auth key (or press Enter to skip): " TAILSCALE_AUTH_KEY
 fi
 TAILSCALE_AUTH_KEY="${TAILSCALE_AUTH_KEY:-}"
-
-# ---- Resolve node number ----
-
-registry_init
-
-if [ -n "$NODE_NUM" ]; then
-    # Explicit node number from --node or NODE env var
-    if ! [[ "$NODE_NUM" =~ ^[0-9]+$ ]] || [ "$NODE_NUM" -lt 1 ] || [ "$NODE_NUM" -gt "$MAX_NODES" ]; then
-        echo -e "${RED}Error: invalid node number '$NODE_NUM' (must be 1-$MAX_NODES)${NC}"
-        exit 1
-    fi
-    if registry_has "$NODE_NUM"; then
-        echo -e "${YELLOW}Warning: node $NODE_NUM is already assigned in .node-registry${NC}"
-        echo ""
-        echo "Current assignments:"
-        cat "$REGISTRY_FILE"
-        echo ""
-        read -r -p "Re-use node $NODE_NUM anyway? [y/N] " _confirm
-        if [[ ! "$_confirm" =~ ^[Yy]$ ]]; then
-            echo "Aborted."
-            exit 1
-        fi
-    fi
-else
-    # Auto-pick next free number
-    NODE_NUM=$(registry_next_free)
-    if [ -z "$NODE_NUM" ]; then
-        echo -e "${RED}Error: all node numbers (1-$MAX_NODES) are taken${NC}"
-        echo "Remove old entries from .node-registry to free up numbers."
-        exit 1
-    fi
-    echo "[+] Auto-assigned node number: $NODE_NUM"
-fi
-
-MESH_IP="192.168.199.$((100 + NODE_NUM))"
-echo "[+] Node $NODE_NUM — IP will be $MESH_IP"
 
 # ---- macOS boot-partition staging: branch here ----
 if [ "$BOOT_STAGING" = true ]; then
@@ -890,6 +891,6 @@ fi
 echo ""
 
 # Register this node
-registry_add "$NODE_NUM" "$NODE_MODE"
+registry_add "$NODE_NUM" "$NODE_MODE" || true
 echo -e "  ${GREEN}Node $NODE_NUM registered in .node-registry${NC}"
 echo ""
