@@ -260,6 +260,16 @@ prepare_via_boot_partition() {
     rm -rf "$staging_dir"
     echo "[+] nightwatch.tar.gz written to boot partition"
 
+    # Step 1b: Set ACT LED to heartbeat from power-on (before any script runs)
+    # Without this the LED is dark during early boot, making the Pi look powered off.
+    local config_txt="$boot_mount/config.txt"
+    if [ -f "$config_txt" ]; then
+        if ! grep -q 'act_led_trigger' "$config_txt"; then
+            printf '\n# Nightwatch: heartbeat LED from power-on\ndtparam=act_led_trigger=heartbeat\n' >> "$config_txt"
+            echo "[+] config.txt: ACT LED set to heartbeat"
+        fi
+    fi
+
     # Step 2: Write secrets
     echo "[2/5] Writing secrets to boot partition..."
     local secrets_file="$boot_mount/nightwatch-secrets"
