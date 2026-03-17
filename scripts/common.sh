@@ -361,7 +361,7 @@ install_systemd_services() {
     systemctl enable nightwatch-discovery.service
     systemctl enable nightwatch-app.service
     # Remove legacy nightwatch-docker.service if present (renamed to nightwatch-app)
-    if systemctl is-enabled nightwatch-docker.service 2>/dev/null; then
+    if systemctl is-enabled nightwatch-docker.service >/dev/null 2>&1; then
         systemctl disable nightwatch-docker.service 2>/dev/null || true
         rm -f /etc/systemd/system/nightwatch-docker.service
     fi
