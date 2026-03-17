@@ -291,14 +291,32 @@ prepare_via_boot_partition() {
 # It may be called from firstrun.sh (traditional) or cloud-init runcmd.
 set -e
 
+# ---- LED error indicator ----
+LED_PATH=""
+for _led in /sys/class/leds/ACT /sys/class/leds/led0; do
+    [ -d "$_led" ] && LED_PATH="$_led" && break
+done
+
+stage_fail() {
+    echo "[-] nightwatch-stage FAILED: $1"
+    # Fast blink = error (same pattern as firstboot_fail in firstboot.sh)
+    if [ -n "$LED_PATH" ]; then
+        echo "timer" > "$LED_PATH/trigger" 2>/dev/null || true
+        echo 100  > "$LED_PATH/delay_on"  2>/dev/null || true
+        echo 100  > "$LED_PATH/delay_off" 2>/dev/null || true
+    fi
+    exit 1
+}
+
+trap 'stage_fail "unexpected error at line $LINENO"' ERR
+
 # Detect boot partition mount (Bookworm: /boot/firmware, older: /boot)
 if [ -f /boot/firmware/nightwatch.tar.gz ]; then
     BOOT=/boot/firmware
 elif [ -f /boot/nightwatch.tar.gz ]; then
     BOOT=/boot
 else
-    echo "[-] nightwatch-stage: nightwatch.tar.gz not found on boot partition"
-    exit 1
+    stage_fail "nightwatch.tar.gz not found on boot partition"
 fi
 
 # Log to boot partition (readable on macOS for debugging)
