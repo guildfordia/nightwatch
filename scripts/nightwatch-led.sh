@@ -358,6 +358,24 @@ case "${1:-}" in
                         led_fast_blink
                         CURRENT_STATE="error"
                         STARTING_SINCE=0
+                        # Write error summary to boot partition (FAT32 — readable from macOS without sudo)
+                        BOOT_ERR=""
+                        for b in /boot/firmware /boot; do [ -f "$b/cmdline.txt" ] && BOOT_ERR="$b/nightwatch-error.log" && break; done
+                        if [ -n "$BOOT_ERR" ]; then
+                            {
+                                echo "=== Nightwatch service error — $(date) ==="
+                                for svc in nightwatch-mesh nightwatch-app nightwatch-discovery nightwatch-bridge; do
+                                    state=$(systemctl show -p ActiveState --value "$svc" 2>/dev/null || echo "unknown")
+                                    printf "  %-35s %s\n" "$svc" "$state"
+                                    if [ "$state" != "active" ]; then
+                                        systemctl status "$svc" --no-pager -n 20 2>/dev/null | tail -20 || true
+                                    fi
+                                done
+                                echo ""
+                                echo "Interfaces:"
+                                ip link show 2>/dev/null | grep -E "^[0-9]+:|bat0|br0|wlan" || true
+                            } > "$BOOT_ERR" 2>/dev/null || true
+                        fi
                     fi
                     ;;
                 2)

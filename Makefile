@@ -142,7 +142,15 @@ sdlogs:
 	sudo $$DEBUGFS -R "cat /var/log/nightwatch-firstboot.log" $$PART 2>/dev/null; \
 	echo ""; \
 	echo "=== /opt/nightwatch/.firstboot-done (stamp) ==="; \
-	sudo $$DEBUGFS -R "cat /opt/nightwatch/.firstboot-done" $$PART 2>/dev/null || true
+	sudo $$DEBUGFS -R "cat /opt/nightwatch/.firstboot-done" $$PART 2>/dev/null || true; \
+	echo ""; \
+	BOOT_MOUNT=$$(diskutil info $(SD)s1 2>/dev/null | awk '/Mount Point/{print $$3}'); \
+	if [ -n "$$BOOT_MOUNT" ] && [ -f "$$BOOT_MOUNT/nightwatch-error.log" ]; then \
+		echo "=== nightwatch-error.log (service failures) ==="; \
+		cat "$$BOOT_MOUNT/nightwatch-error.log"; \
+	else \
+		echo "(no nightwatch-error.log on boot partition — services may not have failed yet)"; \
+	fi
 
 clean:
 	@sudo systemctl stop nightwatch-app.service 2>/dev/null || true
