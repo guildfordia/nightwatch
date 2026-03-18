@@ -33,7 +33,7 @@ load_env "$ENV_FILE"
 BAT_IFACE="${BAT_IFACE:-bat0}"
 DISCOVERY_PORT="${DISCOVERY_PORT:-4919}"
 BEACON_INTERVAL="${BEACON_INTERVAL:-30}"
-PEER_TIMEOUT="${PEER_TIMEOUT:-90}"
+PEER_TIMEOUT="${PEER_TIMEOUT:-300}"
 PEER_FILE="/run/nightwatch-peers"
 PID_FILE="/run/nightwatch-discovery.pid"
 LOCAL_IP="${MESH_IP%/*}"
@@ -235,14 +235,20 @@ update_irc_config() {
 
     generate_irc_config
 
-    # Only restart ngircd when peers are ADDED (new [Server] blocks need a
-    # full restart). When peers are removed, just regenerate the config —
-    # ngircd will stop retrying the dead peer on its own, and restarting
-    # would kill all active client connections for no benefit.
+    # Restart ngircd when peers are ADDED (new [Server] blocks need a
+    # full restart), or when ALL peers have expired (clean reset so
+    # federation reconnects immediately when beacons resume).
+    # When some peers are removed but others remain, just regenerate
+    # the config — ngircd will stop retrying the dead peer on its own.
     if [ "$PEER_COUNT" -gt "$PREV_COUNT" ]; then
         if systemctl is-active --quiet ngircd 2>/dev/null; then
             systemctl restart ngircd 2>/dev/null || true
             log "Restarted ngircd (new peer added)"
+        fi
+    elif [ "$PEER_COUNT" -eq 0 ] && [ "$PREV_COUNT" -gt 0 ]; then
+        if systemctl is-active --quiet ngircd 2>/dev/null; then
+            systemctl restart ngircd 2>/dev/null || true
+            log "Restarted ngircd (all peers expired — clean reset for reconnection)"
         fi
     else
         log "Peers removed — config updated, skipping ngircd restart (connections preserved)"
@@ -263,13 +269,19 @@ case "${1:-start}" in
             exit 1
         fi
 
-        # Clean conflict/peer files
+        # Clean conflict file; preserve peer file across restarts so
+        # federation survives daemon restarts without a gap.
         rm -f "$CONFLICT_FILE"
-        > "$PEER_FILE"
-
-        # Generate initial config (no peers yet)
-        generate_irc_config
-        log "Initial ngircd.conf generated (no peers yet)"
+        if [ -f "$PEER_FILE" ] && [ -s "$PEER_FILE" ]; then
+            EXISTING=$(wc -l < "$PEER_FILE" 2>/dev/null || echo 0)
+            log "Preserving $EXISTING existing peer(s) from previous run"
+            generate_irc_config
+            log "ngircd.conf regenerated with existing peers"
+        else
+            > "$PEER_FILE"
+            generate_irc_config
+            log "Initial ngircd.conf generated (no peers yet)"
+        fi
 
         # Save PID
         echo $$ > "$PID_FILE"

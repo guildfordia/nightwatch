@@ -4,6 +4,7 @@
 # Uses the Raspberry Pi's onboard green ACT LED to show node status:
 #   - Heartbeat (slow blink) = booting / services starting
 #   - Fast blink             = error / critical service down
+#   - Double blink           = WiFi dongle crashed (needs physical replug)
 #   - Triple blink (SOS)     = undervoltage detected (power too low)
 #   - Slow blink (2s on/off) = all services up and ready
 #   - Default (mmc0)         = restored on stop (normal disk activity LED)
@@ -65,6 +66,21 @@ led_ready() {
 led_restore_default() {
     # Restore the default trigger (disk activity)
     led_set_trigger "mmc0"
+}
+
+# Double blink: 2 quick flashes then a long pause (manual, runs in foreground).
+# Used as WiFi dongle crash warning — visually distinct from triple (undervoltage)
+# and fast blink (service error). Signals: "come unplug/replug the USB WiFi dongle."
+led_double_blink() {
+    led_set_trigger "none"
+    for _ in 1 2; do
+        echo 1 > "$LED_PATH/brightness" 2>/dev/null || true
+        sleep 0.15
+        echo 0 > "$LED_PATH/brightness" 2>/dev/null || true
+        sleep 0.15
+    done
+    # Long pause between bursts — makes it clearly "two blinks, pause, two blinks"
+    sleep 1.2
 }
 
 # Triple blink: 3 quick flashes then a pause (manual, runs in foreground).
@@ -173,6 +189,67 @@ check_undervoltage() {
         UNDERVOLTAGE_LOGGED=false
     fi
 
+    return 1
+}
+
+# ---- WiFi dongle watchdog ----
+
+WIFI_RECOVERY_ATTEMPTED=false
+WIFI_LOST_SINCE=0
+
+check_wifi_dongle() {
+    # Returns 0 = dongle OK, 1 = dongle crashed/missing
+    # Checks if wlan1 interface exists (mesh WiFi adapter)
+    if [ -d /sys/class/net/wlan1 ]; then
+        WIFI_LOST_SINCE=0
+        WIFI_RECOVERY_ATTEMPTED=false
+        return 0
+    fi
+    return 1
+}
+
+attempt_wifi_recovery() {
+    # Try to recover the WiFi dongle without physical replug:
+    # 1. Reload the ath9k_htc driver
+    # 2. If that works, restart the mesh service
+    # Returns 0 = recovered, 1 = still broken (needs physical replug)
+
+    if [ "$WIFI_RECOVERY_ATTEMPTED" = true ]; then
+        return 1  # already tried, needs physical replug
+    fi
+    WIFI_RECOVERY_ATTEMPTED=true
+
+    echo "[!] WiFi dongle lost — attempting USB reset recovery..."
+
+    # Try usbreset if available (resets USB device without physical replug)
+    if command -v usbreset >/dev/null 2>&1; then
+        # Find AR9271 USB device path
+        local usb_dev
+        usb_dev=$(lsusb 2>/dev/null | grep -i "0cf3:9271" | head -1 | sed 's/Bus \([0-9]*\) Device \([0-9]*\).*/\/dev\/bus\/usb\/\1\/\2/')
+        if [ -n "$usb_dev" ] && [ -e "$usb_dev" ]; then
+            echo "[+] Resetting USB device: $usb_dev"
+            usbreset "$usb_dev" 2>/dev/null || true
+            sleep 3
+        fi
+    fi
+
+    # Reload driver
+    echo "[+] Reloading ath9k_htc driver..."
+    modprobe -r ath9k_htc 2>/dev/null || true
+    sleep 2
+    modprobe ath9k_htc 2>/dev/null || true
+    sleep 5
+
+    # Check if wlan1 came back
+    if [ -d /sys/class/net/wlan1 ]; then
+        echo "[+] WiFi dongle recovered! Restarting mesh..."
+        systemctl restart nightwatch-mesh 2>/dev/null || true
+        sleep 5
+        systemctl restart nightwatch-discovery 2>/dev/null || true
+        return 0
+    fi
+
+    echo "[!] WiFi dongle recovery FAILED — needs physical USB replug"
     return 1
 }
 
@@ -336,6 +413,54 @@ case "${1:-}" in
             # Restore PWR LED if we were in undervoltage state
             if [ "$CURRENT_STATE" = "undervoltage" ]; then
                 pwr_led_set default
+            fi
+
+            # WiFi dongle crash detection (priority 2, after undervoltage)
+            wifi_ok=0
+            check_wifi_dongle || wifi_ok=$?
+
+            if [ "$wifi_ok" -ne 0 ]; then
+                if [ "$WIFI_LOST_SINCE" -eq 0 ]; then
+                    WIFI_LOST_SINCE=$(date +%s)
+                    echo "[!] WiFi dongle (wlan1) disappeared!"
+                fi
+
+                # Wait 30s before attempting recovery (dongle might be re-enumerating)
+                now=$(date +%s)
+                if [ $(( now - WIFI_LOST_SINCE )) -ge 30 ]; then
+                    if [ "$WIFI_RECOVERY_ATTEMPTED" = false ]; then
+                        attempt_wifi_recovery && { CURRENT_STATE=""; continue; }
+                    fi
+                    # Recovery failed — show double blink (needs physical replug)
+                    if [ "$CURRENT_STATE" != "wifi_crashed" ]; then
+                        CURRENT_STATE="wifi_crashed"
+                        pwr_led_set blink
+                        echo "[!] WiFi dongle needs physical replug — LED: double blink"
+                        # Write to boot partition for macOS diagnosis
+                        BOOT_ERR=""
+                        for b in /boot/firmware /boot; do [ -f "$b/cmdline.txt" ] && BOOT_ERR="$b/nightwatch-error.log" && break; done
+                        if [ -n "$BOOT_ERR" ]; then
+                            {
+                                echo "=== WiFi dongle crashed — $(date) ==="
+                                echo "wlan1 interface missing. USB WiFi dongle needs physical replug."
+                                echo ""
+                                echo "USB devices:"
+                                lsusb 2>/dev/null || true
+                                echo ""
+                                echo "dmesg (last WiFi errors):"
+                                dmesg 2>/dev/null | grep -iE "ath9k|wlan|usb.*error|firmware" | tail -15 || true
+                            } > "$BOOT_ERR" 2>/dev/null || true
+                        fi
+                    fi
+                    led_double_blink
+                    continue
+                fi
+            fi
+
+            # Restore PWR LED if we recovered from wifi_crashed
+            if [ "$CURRENT_STATE" = "wifi_crashed" ] && [ "$wifi_ok" -eq 0 ]; then
+                pwr_led_set default
+                CURRENT_STATE=""
             fi
 
             rc=0
