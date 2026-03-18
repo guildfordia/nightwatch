@@ -4,7 +4,7 @@
 # Uses the Raspberry Pi's onboard green ACT LED to show node status:
 #   - Heartbeat (slow blink) = booting / services starting
 #   - Fast blink             = error / critical service down
-#   - Double blink           = WiFi dongle crashed (needs physical replug)
+#   - Long-short (dash-dot)   = WiFi dongle crashed (needs physical replug)
 #   - Triple blink (SOS)     = undervoltage detected (power too low)
 #   - Slow blink (2s on/off) = all services up and ready
 #   - Default (mmc0)         = restored on stop (normal disk activity LED)
@@ -68,19 +68,24 @@ led_restore_default() {
     led_set_trigger "mmc0"
 }
 
-# Double blink: 2 quick flashes then a long pause (manual, runs in foreground).
-# Used as WiFi dongle crash warning — visually distinct from triple (undervoltage)
-# and fast blink (service error). Signals: "come unplug/replug the USB WiFi dongle."
-led_double_blink() {
+# Long-short blink: one long flash + one short flash, then pause.
+# Used as WiFi dongle crash warning — visually distinct from all other patterns:
+#   heartbeat = smooth fade (kernel), fast = rapid strobe, slow = 2s on/off,
+#   triple = 3 quick flashes (undervoltage), long-short = dash-dot (WiFi crash)
+# Signals: "come unplug/replug the USB WiFi dongle."
+led_wifi_crash_blink() {
     led_set_trigger "none"
-    for _ in 1 2; do
-        echo 1 > "$LED_PATH/brightness" 2>/dev/null || true
-        sleep 0.15
-        echo 0 > "$LED_PATH/brightness" 2>/dev/null || true
-        sleep 0.15
-    done
-    # Long pause between bursts — makes it clearly "two blinks, pause, two blinks"
-    sleep 1.2
+    # Long flash (dash)
+    echo 1 > "$LED_PATH/brightness" 2>/dev/null || true
+    sleep 0.5
+    echo 0 > "$LED_PATH/brightness" 2>/dev/null || true
+    sleep 0.2
+    # Short flash (dot)
+    echo 1 > "$LED_PATH/brightness" 2>/dev/null || true
+    sleep 0.1
+    echo 0 > "$LED_PATH/brightness" 2>/dev/null || true
+    # Pause between bursts
+    sleep 1.0
 }
 
 # Triple blink: 3 quick flashes then a pause (manual, runs in foreground).
@@ -452,7 +457,7 @@ case "${1:-}" in
                             } > "$BOOT_ERR" 2>/dev/null || true
                         fi
                     fi
-                    led_double_blink
+                    led_wifi_crash_blink
                     continue
                 fi
             fi
