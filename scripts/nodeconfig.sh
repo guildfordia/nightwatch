@@ -426,8 +426,20 @@ if [ "$CURRENT_HOSTNAME" != "$NEW_HOSTNAME" ]; then
         log "Warning: hostname change to $NEW_HOSTNAME may not have taken effect (got: $ACTUAL_HOSTNAME)"
     fi
     # Restart Avahi so the new hostname is advertised via mDNS (.local)
+    # A simple restart can leave stale hostname cached (e.g. after re-flash).
+    # Explicitly set host-name in avahi config to guarantee correctness.
+    if [ -f /etc/avahi/avahi-daemon.conf ]; then
+        if grep -q '^host-name=' /etc/avahi/avahi-daemon.conf 2>/dev/null; then
+            sed -i "s/^host-name=.*/host-name=$NEW_HOSTNAME/" /etc/avahi/avahi-daemon.conf
+        elif grep -q '^#host-name=' /etc/avahi/avahi-daemon.conf 2>/dev/null; then
+            sed -i "s/^#host-name=.*/host-name=$NEW_HOSTNAME/" /etc/avahi/avahi-daemon.conf
+        else
+            sed -i "/^\[server\]/a host-name=$NEW_HOSTNAME" /etc/avahi/avahi-daemon.conf
+        fi
+    fi
     if systemctl is-active --quiet avahi-daemon 2>/dev/null; then
-        systemctl restart avahi-daemon
+        systemctl stop avahi-daemon 2>/dev/null || true
+        systemctl start avahi-daemon
         log "Restarted avahi-daemon to advertise $NEW_HOSTNAME.local"
     fi
 fi
