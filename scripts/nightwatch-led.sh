@@ -462,16 +462,21 @@ case "${1:-}" in
                 fi
             fi
 
-            # WiFi dongle came back — restart mesh and discovery to rejoin
-            if [ "$CURRENT_STATE" = "wifi_crashed" ] && [ "$wifi_ok" -eq 0 ]; then
+            # WiFi dongle came back after being gone — restart mesh so wlan1
+            # is reconfigured in mesh point mode (it comes back as "managed").
+            # Triggers whether dongle was gone for 5s or 5min.
+            if [ "$WIFI_LOST_SINCE" -gt 0 ] && [ "$wifi_ok" -eq 0 ]; then
                 echo "[+] WiFi dongle recovered! Restarting mesh and discovery..."
+                led_heartbeat
+                CURRENT_STATE="starting"
+                STARTING_SINCE=$(date +%s)
                 systemctl restart nightwatch-mesh 2>/dev/null || true
                 sleep 10
                 systemctl restart nightwatch-discovery 2>/dev/null || true
                 pwr_led_set default
-                CURRENT_STATE=""
                 WIFI_RECOVERY_ATTEMPTED=false
                 WIFI_LOST_SINCE=0
+                continue
             fi
 
             rc=0
