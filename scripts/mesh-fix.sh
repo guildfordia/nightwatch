@@ -233,6 +233,11 @@ setup_batman() {
     batctl meshif "$BAT_IFACE" bla 1 2>/dev/null || \
         batctl bla 1 2>/dev/null || true
 
+    # Faster mesh reconvergence: reduce OGM interval from 1000ms to 500ms
+    # so nodes detect topology changes twice as fast after a link drop
+    batctl meshif "$BAT_IFACE" orig_interval 500 2>/dev/null || \
+        batctl orig_interval 500 2>/dev/null || true
+
     echo "[+] batman-adv $BAT_IFACE is up"
 }
 
