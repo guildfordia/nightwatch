@@ -203,14 +203,21 @@ WIFI_RECOVERY_ATTEMPTED=false
 WIFI_LOST_SINCE=0
 
 check_wifi_dongle() {
-    # Returns 0 = dongle OK, 1 = dongle crashed/missing
-    # Checks if wlan1 interface exists (mesh WiFi adapter)
-    if [ -d /sys/class/net/wlan1 ]; then
-        WIFI_LOST_SINCE=0
-        WIFI_RECOVERY_ATTEMPTED=false
-        return 0
+    # Returns 0 = dongle OK and in mesh, 1 = dongle missing, 2 = dongle present but not in mesh
+    if [ ! -d /sys/class/net/wlan1 ]; then
+        return 1  # interface gone
     fi
-    return 1
+    # wlan1 exists — but is it registered in batman-adv?
+    # After a quick unplug/replug, wlan1 comes back in "managed" mode,
+    # not "mesh point" mode, and is not in bat0. Detect this.
+    if command -v batctl >/dev/null 2>&1; then
+        if ! batctl if 2>/dev/null | grep -q "wlan1"; then
+            return 2  # present but not in mesh
+        fi
+    fi
+    WIFI_LOST_SINCE=0
+    WIFI_RECOVERY_ATTEMPTED=false
+    return 0
 }
 
 attempt_wifi_recovery() {
@@ -424,7 +431,19 @@ case "${1:-}" in
             wifi_ok=0
             check_wifi_dongle || wifi_ok=$?
 
-            if [ "$wifi_ok" -ne 0 ]; then
+            # wlan1 exists but not in batman — quick replug or driver reset
+            if [ "$wifi_ok" -eq 2 ]; then
+                echo "[!] WiFi dongle present but not in mesh — restarting mesh..."
+                led_heartbeat
+                CURRENT_STATE="starting"
+                STARTING_SINCE=$(date +%s)
+                systemctl restart nightwatch-mesh 2>/dev/null || true
+                sleep 10
+                systemctl restart nightwatch-discovery 2>/dev/null || true
+                continue
+            fi
+
+            if [ "$wifi_ok" -eq 1 ]; then
                 if [ "$WIFI_LOST_SINCE" -eq 0 ]; then
                     WIFI_LOST_SINCE=$(date +%s)
                     echo "[!] WiFi dongle (wlan1) disappeared!"
