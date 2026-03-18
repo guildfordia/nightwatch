@@ -462,10 +462,16 @@ case "${1:-}" in
                 fi
             fi
 
-            # Restore PWR LED if we recovered from wifi_crashed
+            # WiFi dongle came back — restart mesh and discovery to rejoin
             if [ "$CURRENT_STATE" = "wifi_crashed" ] && [ "$wifi_ok" -eq 0 ]; then
+                echo "[+] WiFi dongle recovered! Restarting mesh and discovery..."
+                systemctl restart nightwatch-mesh 2>/dev/null || true
+                sleep 10
+                systemctl restart nightwatch-discovery 2>/dev/null || true
                 pwr_led_set default
                 CURRENT_STATE=""
+                WIFI_RECOVERY_ATTEMPTED=false
+                WIFI_LOST_SINCE=0
             fi
 
             rc=0
