@@ -375,6 +375,9 @@ func (c *Client) readPump(hub *Hub) {
 			return
 		}
 
+		// Reset read deadline on any received message (not just pongs)
+		c.ws.SetReadDeadline(time.Now().Add(wsPongWait))
+
 		msg := strings.TrimSpace(string(message))
 		if msg == "" {
 			continue

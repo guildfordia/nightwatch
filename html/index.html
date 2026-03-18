@@ -463,11 +463,19 @@
           this.wsBuffer = ''; // reset partial-frame buffer on new connection
           this.reconnectDelay = 1000; // reset backoff on successful connect
           this.updateStatus('connected');
+          // Keepalive: send IRC PING every 45s to prevent idle disconnect
+          this.keepaliveInterval = setInterval(() => {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+              this.ws.send('PING :keepalive\r\n');
+            }
+          }, 45000);
         };
         this.ws.onmessage = (event) => this.handleMessage(event.data);
         this.ws.onclose = (event) => {
           this.connected = false;
           this.registered = false;
+          // Clear keepalive interval
+          if (this.keepaliveInterval) { clearInterval(this.keepaliveInterval); this.keepaliveInterval = null; }
           // Clear stale state so reconnect starts with a clean slate
           this.users = [];
           this.nickMap = {};
