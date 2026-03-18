@@ -298,6 +298,7 @@ check_ready() {
 
     check_svc nightwatch-mesh
     check_svc nightwatch-app
+    check_svc ngircd
 
     # Check if bat0 interface exists (mesh is actually functional)
     if [ ! -d /sys/class/net/bat0 ]; then

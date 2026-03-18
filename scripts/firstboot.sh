@@ -308,11 +308,20 @@ systemctl stop dnsmasq 2>/dev/null || true
 echo ""
 echo "[3/12] Configuring native services..."
 
-# Stop and disable default services
+# Stop and disable default services (nightwatch-app starts them)
 systemctl stop ngircd 2>/dev/null || true
 systemctl disable ngircd 2>/dev/null || true
 systemctl stop nginx 2>/dev/null || true
 systemctl disable nginx 2>/dev/null || true
+
+# Override ngircd to always restart (default is on-failure which misses SIGTERM exits)
+mkdir -p /etc/systemd/system/ngircd.service.d
+cat > /etc/systemd/system/ngircd.service.d/restart.conf <<'OVERRIDE'
+[Service]
+Restart=always
+RestartSec=5
+OVERRIDE
+systemctl daemon-reload
 
 # Remove default nginx config
 rm -f /etc/nginx/sites-enabled/default
