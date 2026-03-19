@@ -462,14 +462,18 @@ configure_router_bssid() {
 
     echo "[+] Configuring router BSSID..."
 
-    # Temporarily remove bat0 from bridge so ARP only reaches local router
-    ip link set "$BAT_IFACE" nomaster 2>/dev/null || true
-    ip addr add 192.168.8.2/24 dev "$BR_IFACE" 2>/dev/null || true
-    sleep 1
+    # Use macvlan on eth0 to reach the local router without touching the mesh bridge
+    ip link add _nightwatch_rv link "$AP_IFACE" type macvlan mode bridge 2>/dev/null || {
+        echo "[!] macvlan not supported — skipping BSSID"
+        return
+    }
+    ip addr add 192.168.8.2/24 dev _nightwatch_rv 2>/dev/null || true
+    ip link set _nightwatch_rv up 2>/dev/null || true
+    sleep 2
 
     local ROUTER_IP=""
     for rip in 192.168.8.100 192.168.8.1; do
-        if ping -c 1 -W 2 "$rip" >/dev/null 2>&1; then
+        if ping -c 1 -W 2 -I _nightwatch_rv "$rip" >/dev/null 2>&1; then
             ROUTER_IP="$rip"
             break
         fi
@@ -513,10 +517,8 @@ ROUTERSCRIPT
         echo "[!] No router found at 192.168.8.100 or 192.168.8.1"
     fi
 
-    # Restore bridge
-    ip addr del 192.168.8.2/24 dev "$BR_IFACE" 2>/dev/null || true
-    ip link set "$BAT_IFACE" master "$BR_IFACE" 2>/dev/null || true
-    ip link set "$BAT_IFACE" up 2>/dev/null || true
+    # Cleanup macvlan
+    ip link del _nightwatch_rv 2>/dev/null || true
 }
 
 setup_gateway() {
@@ -645,7 +647,8 @@ case "$1" in
         fi
 
         # Configure GL.iNet router BSSID for seamless roaming (if connected)
-        configure_router_bssid
+        # Uses macvlan to avoid disrupting the mesh bridge
+        configure_router_bssid &  # run in background so mesh startup isn't blocked
 
         echo ""
         echo "====================================="
