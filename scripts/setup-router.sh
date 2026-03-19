@@ -182,6 +182,10 @@ uci set wireless.@wifi-iface[0].encryption='psk2'
 uci set wireless.@wifi-iface[0].key='__WIFI_PASSWORD__'
 uci set wireless.@wifi-iface[0].network='lan'
 uci set wireless.@wifi-iface[0].mode='ap'
+# Force same BSSID on all routers for seamless client roaming.
+# Clients see one AP regardless of which physical router they're near,
+# so WiFi handoff is transparent (no re-authentication needed).
+uci set wireless.@wifi-iface[0].macaddr='AA:BB:CC:DD:EE:01'
 
 echo "  [2/6] Setting timezone..."
 uci set system.@system[0].timezone='CET-1CEST,M3.5.0,M10.5.0/3'
