@@ -294,6 +294,7 @@ if ! DEBIAN_FRONTEND=noninteractive timeout 600 apt-get install -y -qq \
     netcat-openbsd \
     socat \
     sshpass \
+    usbutils \
     firmware-atheros; then
     firstboot_fail "apt-get install failed or timed out (10 min limit)"
 fi

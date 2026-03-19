@@ -221,48 +221,87 @@ check_wifi_dongle() {
 }
 
 attempt_wifi_recovery() {
-    # Try to recover the WiFi dongle without physical replug:
-    # 1. Reload the ath9k_htc driver
-    # 2. If that works, restart the mesh service
+    # Try to recover the WiFi dongle without physical replug.
+    # Three escalating strategies:
+    #   1. USB device reset (usbreset) — sends USB RESET signal
+    #   2. USB unbind/rebind via sysfs — simulates physical replug at kernel level
+    #   3. Driver reload (modprobe -r/modprobe) — reinitializes firmware
     # Returns 0 = recovered, 1 = still broken (needs physical replug)
 
     if [ "$WIFI_RECOVERY_ATTEMPTED" = true ]; then
-        return 1  # already tried, needs physical replug
+        return 1  # already tried all strategies
     fi
     WIFI_RECOVERY_ATTEMPTED=true
 
-    echo "[!] WiFi dongle lost — attempting USB reset recovery..."
+    echo "[!] WiFi dongle lost — attempting recovery..."
 
-    # Try usbreset if available (resets USB device without physical replug)
-    if command -v usbreset >/dev/null 2>&1; then
-        # Find AR9271 USB device path
-        local usb_dev
-        usb_dev=$(lsusb 2>/dev/null | grep -i "0cf3:9271" | head -1 | sed 's/Bus \([0-9]*\) Device \([0-9]*\).*/\/dev\/bus\/usb\/\1\/\2/')
-        if [ -n "$usb_dev" ] && [ -e "$usb_dev" ]; then
-            echo "[+] Resetting USB device: $usb_dev"
-            usbreset "$usb_dev" 2>/dev/null || true
-            sleep 3
+    # Find the AR9271 USB device
+    local usb_bus usb_dev usb_port
+    usb_bus=$(lsusb 2>/dev/null | grep -i "0cf3:9271" | head -1 | sed 's/Bus \([0-9]*\) Device \([0-9]*\).*/\/dev\/bus\/usb\/\1\/\2/')
+    # Find sysfs USB port path (e.g., "3-2" from dmesg or sysfs)
+    usb_port=$(ls /sys/bus/usb/drivers/ath9k_htc/ 2>/dev/null | grep -E '^[0-9]+-[0-9]' | head -1)
+
+    # ---- Strategy 1: USB device reset ----
+    if [ -n "$usb_bus" ] && [ -e "$usb_bus" ]; then
+        echo "[+] Strategy 1: USB device reset ($usb_bus)"
+        usbreset "$usb_bus" 2>/dev/null || true
+        sleep 5
+        if [ -d /sys/class/net/wlan1 ]; then
+            echo "[+] Strategy 1 succeeded!"
+            _wifi_recovery_restart_mesh
+            return 0
         fi
     fi
 
-    # Reload driver
-    echo "[+] Reloading ath9k_htc driver..."
+    # ---- Strategy 2: USB unbind/rebind ----
+    if [ -n "$usb_port" ]; then
+        echo "[+] Strategy 2: USB unbind/rebind ($usb_port)"
+        echo "$usb_port" > /sys/bus/usb/drivers/usb/unbind 2>/dev/null || true
+        sleep 3
+        echo "$usb_port" > /sys/bus/usb/drivers/usb/bind 2>/dev/null || true
+        sleep 5
+        if [ -d /sys/class/net/wlan1 ]; then
+            echo "[+] Strategy 2 succeeded!"
+            _wifi_recovery_restart_mesh
+            return 0
+        fi
+    else
+        # Try to find port from dmesg
+        usb_port=$(dmesg 2>/dev/null | grep -oP 'usb \K[0-9]+-[0-9]+(?=:.*ath9k)' | tail -1)
+        if [ -n "$usb_port" ]; then
+            echo "[+] Strategy 2: USB unbind/rebind ($usb_port from dmesg)"
+            echo "$usb_port" > /sys/bus/usb/drivers/usb/unbind 2>/dev/null || true
+            sleep 3
+            echo "$usb_port" > /sys/bus/usb/drivers/usb/bind 2>/dev/null || true
+            sleep 5
+            if [ -d /sys/class/net/wlan1 ]; then
+                echo "[+] Strategy 2 succeeded!"
+                _wifi_recovery_restart_mesh
+                return 0
+            fi
+        fi
+    fi
+
+    # ---- Strategy 3: Full driver reload ----
+    echo "[+] Strategy 3: Full driver reload"
     modprobe -r ath9k_htc 2>/dev/null || true
-    sleep 2
+    sleep 3
     modprobe ath9k_htc 2>/dev/null || true
     sleep 5
-
-    # Check if wlan1 came back
     if [ -d /sys/class/net/wlan1 ]; then
-        echo "[+] WiFi dongle recovered! Restarting mesh..."
-        systemctl restart nightwatch-mesh 2>/dev/null || true
-        sleep 5
-        systemctl restart nightwatch-discovery 2>/dev/null || true
+        echo "[+] Strategy 3 succeeded!"
+        _wifi_recovery_restart_mesh
         return 0
     fi
 
-    echo "[!] WiFi dongle recovery FAILED — needs physical USB replug"
+    echo "[!] All recovery strategies FAILED — needs physical USB replug"
     return 1
+}
+
+_wifi_recovery_restart_mesh() {
+    systemctl restart nightwatch-mesh 2>/dev/null || true
+    sleep 5
+    systemctl restart nightwatch-discovery 2>/dev/null || true
 }
 
 # ---- Health checks ----
