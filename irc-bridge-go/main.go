@@ -138,14 +138,21 @@ func (nr *NickRegistry) NextNick() string {
 // ClaimNick tries to reclaim a nick (reconnecting client).
 // Returns true if the nick is not currently active (available to use).
 // Accepts both guestN nicks and custom nicks set via /nick.
+// Retries briefly to handle the race where old connection is still cleaning up.
 func (nr *NickRegistry) ClaimNick(nick string) bool {
-	nr.mu.Lock()
-	defer nr.mu.Unlock()
-	if nr.activeNicks[nick] {
-		return false // someone else is using it right now
+	for attempt := 0; attempt < 3; attempt++ {
+		nr.mu.Lock()
+		if !nr.activeNicks[nick] {
+			nr.activeNicks[nick] = true
+			nr.mu.Unlock()
+			return true
+		}
+		nr.mu.Unlock()
+		if attempt < 2 {
+			time.Sleep(500 * time.Millisecond) // wait for old connection to release
+		}
 	}
-	nr.activeNicks[nick] = true
-	return true
+	return false // still in use after retries
 }
 
 // ReleaseNick marks a nick as no longer actively connected (but still reserved)
@@ -173,6 +180,7 @@ const (
 	wsWriteWait      = 10 * time.Second
 	shutdownTimeout  = 10 * time.Second
 	maxIRCMsgLen     = 400 // IRC limit minus protocol overhead
+	replayBufferSize = 50  // number of recent messages to replay on reconnect
 )
 
 // ircDialTimeout is configurable via IRC_DIAL_TIMEOUT env var (default 10s).
@@ -185,6 +193,46 @@ var ircDialTimeout = func() time.Duration {
 	}
 	return 10 * time.Second
 }()
+
+// --- Message replay buffer ---
+// Stores recent PRIVMSG lines so reconnecting clients don't miss messages.
+
+type ReplayBuffer struct {
+	mu   sync.Mutex
+	msgs []string
+	idx  int
+	full bool
+}
+
+func NewReplayBuffer(size int) *ReplayBuffer {
+	return &ReplayBuffer{msgs: make([]string, size)}
+}
+
+func (rb *ReplayBuffer) Add(line string) {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	rb.msgs[rb.idx] = line
+	rb.idx = (rb.idx + 1) % len(rb.msgs)
+	if rb.idx == 0 {
+		rb.full = true
+	}
+}
+
+func (rb *ReplayBuffer) Recent() []string {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	if !rb.full {
+		result := make([]string, rb.idx)
+		copy(result, rb.msgs[:rb.idx])
+		return result
+	}
+	result := make([]string, len(rb.msgs))
+	copy(result, rb.msgs[rb.idx:])
+	copy(result[len(rb.msgs)-rb.idx:], rb.msgs[:rb.idx])
+	return result
+}
+
+var replayBuffer = NewReplayBuffer(replayBufferSize)
 
 // --- WebSocket upgrader with origin check ---
 
@@ -465,6 +513,11 @@ func (c *Client) ircPump() {
 			log.Printf("[%s] IRC->WS: %s", c.id, line)
 		}
 
+		// Store PRIVMSG in replay buffer for reconnecting clients
+		if strings.Contains(line, "PRIVMSG "+ircChannel) {
+			replayBuffer.Add(line)
+		}
+
 		// Try to send; if channel is full, wait briefly before giving up.
 		// This prevents unnecessary disconnects during IRC floods (mass join/part).
 		select {
@@ -632,6 +685,18 @@ func handleWebSocket(hub *Hub, limiter *RateLimiter, cleanupWg *sync.WaitGroup, 
 		}
 		limiter.Release(clientIP)
 	}()
+
+	// Replay recent messages so reconnecting clients don't miss anything
+	recent := replayBuffer.Recent()
+	if len(recent) > 0 {
+		log.Printf("[%s] Replaying %d recent messages", clientID, len(recent))
+		for _, msg := range recent {
+			// Don't replay the client's own messages (they already have them)
+			if !strings.Contains(msg, "!~"+nick+"@") {
+				client.send <- []byte(msg + "\n")
+			}
+		}
+	}
 
 	go client.writePump()
 	go client.ircPump()
