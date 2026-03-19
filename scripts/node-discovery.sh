@@ -1,4 +1,5 @@
 #!/bin/bash
+export PATH="/usr/sbin:/sbin:$PATH"
 # Nightwatch — Node discovery daemon
 #
 # Broadcasts this node's identity on the mesh via UDP and listens for others.

@@ -1,4 +1,5 @@
 #!/bin/bash
+export PATH="/usr/sbin:/sbin:$PATH"
 # Nightwatch — Debug info collector
 #
 # Generates a JSON file with comprehensive node diagnostics.

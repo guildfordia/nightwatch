@@ -1,4 +1,5 @@
 #!/bin/bash
+export PATH="/usr/sbin:/sbin:$PATH"
 # Nightwatch — LED readiness indicator
 #
 # Uses the Raspberry Pi's onboard green ACT LED to show node status:

@@ -1,4 +1,7 @@
 #!/bin/bash
+# Ensure sbin paths are available (iw, batctl, ip are in /usr/sbin on some systems)
+export PATH="/usr/sbin:/sbin:$PATH"
+
 # Nightwatch mesh network script
 # 802.11s + batman-adv + Linux bridge for client access
 #
