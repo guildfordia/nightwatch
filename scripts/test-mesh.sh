@@ -722,11 +722,11 @@ else
     fail "iptables DNS redirect missing (port 53 on $BR_IFACE)"
 fi
 
-# Port 80 should NOT have a DNAT rule (captive portal removed — caused WebView issues)
+# iptables HTTP redirect (port 80 on br0)
 if echo "$IPTABLES_NAT" | grep -q "\-i $BR_IFACE.*--dport 80.*DNAT"; then
-    warn "iptables HTTP redirect still active (port 80) — captive portal should be removed"
+    pass "iptables HTTP redirect active (port 80 on $BR_IFACE)"
 else
-    pass "No HTTP captive portal redirect (port 80 removed as expected)"
+    fail "iptables HTTP redirect missing (port 80 on $BR_IFACE)"
 fi
 
 # Port 443 should NOT have a DNAT rule (HTTPS redirect was removed)
