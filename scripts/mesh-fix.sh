@@ -400,54 +400,48 @@ start_dnsmasq() {
         echo "[!] dnsmasq config generation failed — captive portal will not work"
     fi
 
-    # ---- Captive portal iptables rules ----
+    # ---- DNS redirect iptables rules ----
     # Intercept ALL DNS traffic (port 53) from clients and redirect to local
     # dnsmasq. Modern phones use hardcoded DNS (8.8.8.8, 1.1.1.1) or
     # DNS-over-HTTPS, bypassing DHCP-provided DNS. Without this, those
     # queries go to unreachable IPs and the phone can't resolve anything.
+    #
+    # NOTE: No HTTP (port 80) redirect. The old captive portal redirect
+    # caused phones to open a restricted WebView that killed WebSocket
+    # connections. DNS-only redirect is enough — dnsmasq resolves all
+    # domains to the local IP, so any URL typed in a real browser works.
     local LOCAL_IP="${MESH_IP%/*}"
-    echo "[+] Setting up captive portal iptables rules..."
+    echo "[+] Setting up DNS redirect iptables rules..."
 
     # Use iptables-restore for atomic rule application (all-or-nothing).
-    # This avoids the window where some rules are active and others aren't,
-    # which can cause brief DNS leaks during service restarts.
     if command -v iptables-restore >/dev/null 2>&1; then
-        # Save existing nat table, strip old nightwatch rules, append ours
         RULES_FILE=$(mktemp /tmp/nightwatch-iptables.XXXXXX)
         iptables-save -t nat 2>/dev/null | grep -v "nightwatch-captive" > "$RULES_FILE" || true
-        # Remove trailing COMMIT if present (we'll add it back)
         sed -i '/^COMMIT$/d' "$RULES_FILE"
         cat >> "$RULES_FILE" << IPTEOF
 -A PREROUTING -i $BR_IFACE -p udp --dport 53 ! -d $LOCAL_IP -j DNAT --to-destination $LOCAL_IP:53 -m comment --comment "nightwatch-captive"
 -A PREROUTING -i $BR_IFACE -p tcp --dport 53 ! -d $LOCAL_IP -j DNAT --to-destination $LOCAL_IP:53 -m comment --comment "nightwatch-captive"
--A PREROUTING -i $BR_IFACE -p tcp --dport 80 ! -d $LOCAL_IP -j DNAT --to-destination $LOCAL_IP:80 -m comment --comment "nightwatch-captive"
 COMMIT
 IPTEOF
         if iptables-restore -T nat < "$RULES_FILE" 2>/dev/null; then
-            echo "[+] iptables rules applied atomically (DNS + HTTP redirect)"
+            echo "[+] iptables rules applied atomically (DNS redirect only)"
             rm -f "$RULES_FILE"
         else
             echo "[!] iptables-restore failed — falling back to individual rules"
             rm -f "$RULES_FILE"
-            # Fallback to individual iptables commands
             iptables -t nat -C PREROUTING -i "$BR_IFACE" -p udp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || \
                 iptables -t nat -A PREROUTING -i "$BR_IFACE" -p udp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53
             iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || \
                 iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53
-            iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80 2>/dev/null || \
-                iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80
         fi
     else
-        # Fallback: individual iptables commands (check-then-add to avoid duplicates)
         iptables -t nat -C PREROUTING -i "$BR_IFACE" -p udp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || \
             iptables -t nat -A PREROUTING -i "$BR_IFACE" -p udp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53
         iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || \
             iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53
-        iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80 2>/dev/null || \
-            iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80
     fi
 
-    echo "[+] iptables rules active (DNS + HTTP redirect)"
+    echo "[+] iptables rules active (DNS redirect only, no HTTP captive portal)"
 }
 
 setup_gateway() {
@@ -636,6 +630,7 @@ case "$1" in
         LOCAL_IP="${MESH_IP%/*}"
         iptables -t nat -D PREROUTING -i "$BR_IFACE" -p udp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || true
         iptables -t nat -D PREROUTING -i "$BR_IFACE" -p tcp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || true
+        # Clean up legacy HTTP redirect rule if present from older versions
         iptables -t nat -D PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80 2>/dev/null || true
 
         # Remove only the Nightwatch MASQUERADE rule (preserve Tailscale NAT)
