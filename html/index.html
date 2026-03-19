@@ -5,6 +5,15 @@
   <meta name="viewport"
         content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>nightwatch</title>
+  <script>
+    // Detect Android captive portal WebView and redirect to real browser.
+    // WebView has restricted WebSocket support and aggressive caching.
+    if (/wv\)/.test(navigator.userAgent) && /Android/.test(navigator.userAgent)) {
+      // Use intent to open in default browser
+      var url = 'http://' + location.hostname + '/';
+      window.location.href = 'intent://' + location.hostname + '/#Intent;scheme=http;action=android.intent.action.VIEW;end';
+    }
+  </script>
   <style>
     :root {
       --vh: 1vh; /* updated by JS for mobile browsers */
@@ -187,10 +196,10 @@
     .error { color: var(--text-error); }
     .join-part { color: var(--text-join); }
     .highlight { color: var(--text-highlight); }
-    .msg-status { font-size: 0.85em; margin-left: 0.5ch; }
-    .msg-pending { color: var(--text-time); opacity: 0.6; }
-    .msg-delivered { color: var(--text-join); }
-    .msg-failed { color: var(--text-error); }
+    .msg-status { font-size: 0.75em; float: right; opacity: 0.3; margin-right: 1ch; }
+    .msg-pending { color: var(--text-time); }
+    .msg-delivered { color: var(--text-primary); }
+    .msg-failed { color: var(--text-error); opacity: 0.7; }
 
     .input-bar {
       background: var(--bg-primary);
@@ -431,9 +440,11 @@
           this.addSystemMessage('Welcome to NIGHTWATCH');
           this.addSystemMessage('Decentralized Mesh Network');
           this.addSystemMessage('Off-Grid conversation');
+          this.addSystemMessage('Change your name: /nick YourName');
           this.addSystemMessage('Type /help for commands');
         } else {
           this.addSystemMessage('Welcome to NIGHTWATCH - Decentralized Mesh Network - Off-Grid conversation');
+          this.addSystemMessage('Change your name: /nick YourName');
           this.addSystemMessage('Type /help for commands, /debug for diagnostics');
         }
         this.addSystemMessage('Connecting to IRC bridge...');
@@ -916,7 +927,7 @@
 
         // Fetch both endpoints in parallel
         const [debugRes, bridgeRes] = await Promise.allSettled([
-          fetch('/api/debug').then(r => r.ok ? r.json() : null).catch(() => null),
+          fetch('/api/debug?t=' + Date.now()).then(r => r.ok ? r.json() : null).catch(() => null),
           fetch('/api/bridge-status').then(r => r.ok ? r.json() : null).catch(() => null)
         ]);
 
