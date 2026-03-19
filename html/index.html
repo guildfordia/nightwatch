@@ -5,15 +5,6 @@
   <meta name="viewport"
         content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>nightwatch</title>
-  <script>
-    // Detect Android captive portal WebView and redirect to real browser.
-    // WebView has restricted WebSocket support and aggressive caching.
-    if (/wv\)/.test(navigator.userAgent) && /Android/.test(navigator.userAgent)) {
-      // Use intent to open in default browser
-      var url = 'http://' + location.hostname + '/';
-      window.location.href = 'intent://' + location.hostname + '/#Intent;scheme=http;action=android.intent.action.VIEW;end';
-    }
-  </script>
   <style>
     :root {
       --vh: 1vh; /* updated by JS for mobile browsers */
