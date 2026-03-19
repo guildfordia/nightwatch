@@ -476,23 +476,39 @@ configure_router_bssid() {
     done
 
     if [ -n "$ROUTER_IP" ]; then
-        # Try to set BSSID via SSH
+        # Set BSSID via SSH and make it persistent via rc.local
+        # GL.iNet firmware resets UCI wireless config on boot, so we need rc.local
         ssh-keygen -f /root/.ssh/known_hosts -R "$ROUTER_IP" 2>/dev/null || true
         ssh-keygen -f /home/user/.ssh/known_hosts -R "$ROUTER_IP" 2>/dev/null || true
-        local RESULT
-        RESULT=$(sshpass -p "$ROUTER_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-            "root@$ROUTER_IP" \
-            "uci get wireless.@wifi-iface[0].macaddr 2>/dev/null" 2>/dev/null || echo "")
 
-        if [ "$RESULT" != "$SHARED_BSSID" ]; then
-            sshpass -p "$ROUTER_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-                "root@$ROUTER_IP" \
-                "uci set wireless.@wifi-iface[0].macaddr='$SHARED_BSSID'; uci commit wireless; wifi reload" \
-                2>/dev/null && echo "[+] Router BSSID set to $SHARED_BSSID" \
-                || echo "[!] Router BSSID set failed (SSH error)"
-        else
-            echo "[+] Router BSSID already $SHARED_BSSID"
-        fi
+        sshpass -p "$ROUTER_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+            "root@$ROUTER_IP" bash -s "$SHARED_BSSID" 2>/dev/null <<'ROUTERSCRIPT' \
+            && echo "[+] Router BSSID configured to $SHARED_BSSID" \
+            || echo "[!] Router BSSID configuration failed (SSH error)"
+BSSID=$1
+# Set BSSID now
+uci -q set wireless.@wifi-iface[-1].macaddr="$BSSID"
+uci commit wireless
+
+# Make it persistent — GL.iNet firmware resets wireless config on boot
+# so we add a post-boot script to rc.local
+if ! grep -q "wifi-iface.*macaddr.*$BSSID" /etc/rc.local 2>/dev/null; then
+    # Insert before 'exit 0' in rc.local (or create if missing)
+    if [ -f /etc/rc.local ]; then
+        sed -i "/^exit 0/i\\uci -q set wireless.@wifi-iface[-1].macaddr='$BSSID' && uci commit wireless && wifi reload" /etc/rc.local
+    else
+        cat > /etc/rc.local <<EOF2
+#!/bin/sh
+uci -q set wireless.@wifi-iface[-1].macaddr='$BSSID' && uci commit wireless && wifi reload
+exit 0
+EOF2
+        chmod +x /etc/rc.local
+    fi
+fi
+
+# Apply immediately
+wifi reload 2>/dev/null || wifi restart 2>/dev/null
+ROUTERSCRIPT
     else
         echo "[!] No router found at 192.168.8.100 or 192.168.8.1"
     fi
