@@ -646,9 +646,10 @@ case "$1" in
             setup_gateway
         fi
 
-        # Configure GL.iNet router BSSID for seamless roaming (if connected)
-        # Uses macvlan to avoid disrupting the mesh bridge
-        configure_router_bssid &  # run in background so mesh startup isn't blocked
+        # Router BSSID configuration disabled — GL.iNet firmware doesn't
+        # reliably support macaddr override. Use Option 2 (802.11r) or
+        # Option 3 (802.11v) for roaming instead.
+        # configure_router_bssid
 
         echo ""
         echo "====================================="
