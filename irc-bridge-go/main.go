@@ -135,14 +135,12 @@ func (nr *NickRegistry) NextNick() string {
 	return nick
 }
 
-// ClaimNick tries to reclaim a previously assigned nick (reconnecting client).
-// Returns true if the nick was previously assigned and not currently active.
+// ClaimNick tries to reclaim a nick (reconnecting client).
+// Returns true if the nick is not currently active (available to use).
+// Accepts both guestN nicks and custom nicks set via /nick.
 func (nr *NickRegistry) ClaimNick(nick string) bool {
 	nr.mu.Lock()
 	defer nr.mu.Unlock()
-	if !nr.assigned[nick] {
-		return false // unknown nick — don't let arbitrary nicks pollute the registry
-	}
 	if nr.activeNicks[nick] {
 		return false // someone else is using it right now
 	}
