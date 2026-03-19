@@ -187,6 +187,10 @@
     .error { color: var(--text-error); }
     .join-part { color: var(--text-join); }
     .highlight { color: var(--text-highlight); }
+    .msg-status { font-size: 0.85em; margin-left: 0.5ch; }
+    .msg-pending { color: var(--text-time); opacity: 0.6; }
+    .msg-delivered { color: var(--text-join); }
+    .msg-failed { color: var(--text-error); }
 
     .input-bar {
       background: var(--bg-primary);
@@ -349,6 +353,7 @@
         this.maxReconnectDelay = 30000; // cap at 30s
         this.reconnectTimer = null;
         this.wsBuffer = ''; // buffer for partial WebSocket frames
+        this.pendingMessages = []; // messages awaiting delivery confirmation
 
         this.themeManager = new ThemeManager();
         // Debug state for live status bar
@@ -484,6 +489,15 @@
           this.updateUserList();
           this.updateStatus('disconnected');
           this.inputField.disabled = true;
+          // Mark any pending messages as possibly failed
+          this.pendingMessages.forEach(({ el, timer }) => {
+            clearTimeout(timer);
+            const indicator = el.querySelector('.msg-status');
+            if (indicator && !indicator.classList.contains('msg-delivered')) {
+              indicator.textContent = ' \u26A0'; indicator.className = 'msg-status msg-failed';
+            }
+          });
+          this.pendingMessages = [];
           const delaySec = (this.reconnectDelay / 1000).toFixed(0);
           this.addSystemMessage(`Connection lost (${event.code}). Reconnecting in ${delaySec}s...`);
           // Cancel any pending reconnect to prevent pile-up (e.g., browser
@@ -560,7 +574,15 @@
         }
 
         this.send(`PRIVMSG ${this.channel} :${input}`);
-        this.addChatMessage(this.nickname, input, true);
+        const msgEl = this.addChatMessage(this.nickname, input, true);
+        // Delivery confirmation: mark as delivered after 2s if still connected
+        if (msgEl) {
+          const timer = setTimeout(() => {
+            const indicator = msgEl.querySelector('.msg-status');
+            if (indicator) { indicator.textContent = ' \u2713'; indicator.className = 'msg-status msg-delivered'; }
+          }, 2000);
+          this.pendingMessages.push({ el: msgEl, timer });
+        }
         this.inputField.value = '';
       }
 
@@ -749,11 +771,13 @@
         const time = this.getTime();
         const nickClass = isOwn ? 'nick-self' : 'nick-other';
         const textClass = isOwn ? 'text-own' : 'text';
+        const statusHtml = isOwn ? '<span class="msg-status msg-pending"> \u23F3</span>' : '';
         const el = document.createElement('div');
         el.className = 'message';
-        el.innerHTML = `<span class="time">${time}</span> <span class="${nickClass}">&lt;${this.escapeHtml(nick)}&gt;</span> <span class="${textClass}">${this.escapeHtml(text)}</span>`;
+        el.innerHTML = `<span class="time">${time}</span> <span class="${nickClass}">&lt;${this.escapeHtml(nick)}&gt;</span> <span class="${textClass}">${this.escapeHtml(text)}</span>${statusHtml}`;
         this.chatArea.appendChild(el);
         this.scrollToBottom();
+        return el;
       }
 
       addAction(nick, action) {
