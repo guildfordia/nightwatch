@@ -448,6 +448,61 @@ IPTEOF
     echo "[+] iptables rules active (DNS + HTTP redirect)"
 }
 
+configure_router_bssid() {
+    # Set shared BSSID on the locally-connected GL.iNet router for seamless roaming.
+    # Temporarily isolates eth0 from the mesh so we only reach the LOCAL router.
+    local SHARED_BSSID="AA:BB:CC:DD:EE:01"
+    local ROUTER_PW="${ROUTER_PASSWORD:-a123456}"
+
+    # Only attempt if eth0 is a bridge port (router connected)
+    if [ ! -d "/sys/class/net/$BR_IFACE/brif/$AP_IFACE" ]; then
+        echo "[+] No router connected ($AP_IFACE not in bridge) — skipping BSSID"
+        return
+    fi
+
+    echo "[+] Configuring router BSSID..."
+
+    # Temporarily remove bat0 from bridge so ARP only reaches local router
+    ip link set "$BAT_IFACE" nomaster 2>/dev/null || true
+    ip addr add 192.168.8.2/24 dev "$BR_IFACE" 2>/dev/null || true
+    sleep 1
+
+    local ROUTER_IP=""
+    for rip in 192.168.8.100 192.168.8.1; do
+        if ping -c 1 -W 2 "$rip" >/dev/null 2>&1; then
+            ROUTER_IP="$rip"
+            break
+        fi
+    done
+
+    if [ -n "$ROUTER_IP" ]; then
+        # Try to set BSSID via SSH
+        ssh-keygen -f /root/.ssh/known_hosts -R "$ROUTER_IP" 2>/dev/null || true
+        ssh-keygen -f /home/user/.ssh/known_hosts -R "$ROUTER_IP" 2>/dev/null || true
+        local RESULT
+        RESULT=$(sshpass -p "$ROUTER_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+            "root@$ROUTER_IP" \
+            "uci get wireless.@wifi-iface[0].macaddr 2>/dev/null" 2>/dev/null || echo "")
+
+        if [ "$RESULT" != "$SHARED_BSSID" ]; then
+            sshpass -p "$ROUTER_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+                "root@$ROUTER_IP" \
+                "uci set wireless.@wifi-iface[0].macaddr='$SHARED_BSSID'; uci commit wireless; wifi reload" \
+                2>/dev/null && echo "[+] Router BSSID set to $SHARED_BSSID" \
+                || echo "[!] Router BSSID set failed (SSH error)"
+        else
+            echo "[+] Router BSSID already $SHARED_BSSID"
+        fi
+    else
+        echo "[!] No router found at 192.168.8.100 or 192.168.8.1"
+    fi
+
+    # Restore bridge
+    ip addr del 192.168.8.2/24 dev "$BR_IFACE" 2>/dev/null || true
+    ip link set "$BAT_IFACE" master "$BR_IFACE" 2>/dev/null || true
+    ip link set "$BAT_IFACE" up 2>/dev/null || true
+}
+
 setup_gateway() {
     if [ "$NODE_MODE" = "gateway" ]; then
         echo "[+] Configuring this node as a mesh gateway..."
@@ -572,6 +627,9 @@ case "$1" in
             start_dnsmasq
             setup_gateway
         fi
+
+        # Configure GL.iNet router BSSID for seamless roaming (if connected)
+        configure_router_bssid
 
         echo ""
         echo "====================================="
