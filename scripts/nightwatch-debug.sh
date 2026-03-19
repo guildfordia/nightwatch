@@ -126,7 +126,7 @@ collect_debug_info() {
     local BR_PORTS=""
     if [ -d /sys/class/net/br0 ]; then
         BR_STATUS="up"
-        BR_IP=$(ip -4 addr show dev br0 2>/dev/null | grep -oP 'inet \K[^ ]+' || echo "none")
+        BR_IP=$(ip -4 addr show dev br0 2>/dev/null | grep -oP 'inet \K[^ ]+' | tr '\n' ' ' | sed 's/ $//' || echo "none")
         BR_PORTS=$(ls /sys/class/net/br0/brif/ 2>/dev/null | tr '\n' ',' | sed 's/,$//' || echo "none")
     fi
 

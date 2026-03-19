@@ -916,14 +916,29 @@
         this.addSystemMessage('Collecting debug info...');
         const sep = '─'.repeat(50);
 
-        // Fetch both endpoints in parallel
+        // Fetch both endpoints in parallel with visible error reporting
+        let debugErr = '', bridgeErr = '';
         const [debugRes, bridgeRes] = await Promise.allSettled([
-          fetch('/api/debug?t=' + Date.now()).then(r => r.ok ? r.json() : null).catch(() => null),
-          fetch('/api/bridge-status').then(r => r.ok ? r.json() : null).catch(() => null)
+          fetch('/api/debug?t=' + Date.now()).then(r => {
+            if (!r.ok) { debugErr = 'HTTP ' + r.status; return null; }
+            return r.text().then(txt => {
+              if (txt.charAt(0) !== '{') { debugErr = 'Not JSON: ' + txt.substring(0,50); return null; }
+              try { return JSON.parse(txt); } catch(e) { debugErr = 'Parse: ' + e.message + ' | ' + txt.substring(0,50); return null; }
+            });
+          }).catch(e => { debugErr = 'Fetch: ' + e.message; return null; }),
+          fetch('/api/bridge-status?t=' + Date.now()).then(r => {
+            if (!r.ok) { bridgeErr = 'HTTP ' + r.status; return null; }
+            return r.text().then(txt => {
+              if (txt.charAt(0) !== '{') { bridgeErr = 'Not JSON: ' + txt.substring(0,50); return null; }
+              try { return JSON.parse(txt); } catch(e) { bridgeErr = 'Parse: ' + e.message + ' | ' + txt.substring(0,50); return null; }
+            });
+          }).catch(e => { bridgeErr = 'Fetch: ' + e.message; return null; })
         ]);
 
         const debug = debugRes.status === 'fulfilled' ? debugRes.value : null;
         const bridge = bridgeRes.status === 'fulfilled' ? bridgeRes.value : null;
+        if (!debug) this.addSystemMessage('DEBUG ERROR: ' + (debugErr || 'unknown'));
+        if (!bridge) this.addSystemMessage('BRIDGE ERROR: ' + (bridgeErr || 'unknown'));
 
         this.appendSystemLine('');
         this.appendSystemLine(`${sep}`);
