@@ -595,6 +595,19 @@ func handleWebSocket(hub *Hub, limiter *RateLimiter, cleanupWg *sync.WaitGroup, 
 		return
 	}
 
+	// Join the channel server-side immediately after registration.
+	// Don't rely on the JS client's ws.onopen to send JOIN — mobile browsers
+	// can fail to fire onopen reliably, leaving the user connected but not in the channel.
+	if _, err = ircConn.Write([]byte(fmt.Sprintf("JOIN %s\r\n", ircChannel))); err != nil {
+		log.Printf("[%s] IRC JOIN write error: %v", clientID, err)
+		nickRegistry.ReleaseNick(nick)
+		ircConn.Close()
+		ws.Close()
+		limiter.Release(clientIP)
+		return
+	}
+	log.Printf("[%s] Server-side JOIN %s for %s", clientID, ircChannel, nick)
+
 	client := &Client{
 		ws:   ws,
 		irc:  ircConn,
