@@ -13,6 +13,7 @@
 # Run by systemd timer every 30 seconds.
 
 set -euo pipefail
+export PATH="/usr/sbin:/sbin:$PATH"
 
 LOG_TAG="nightwatch-watchdog"
 log() { logger -t "$LOG_TAG" "$1" 2>/dev/null || true; }
