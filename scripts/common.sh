@@ -137,6 +137,11 @@ dhcp-range=192.168.199.${dhcp_start},192.168.199.${dhcp_end},255.255.255.0,1h
 dhcp-option=3,${mesh_ip}
 dhcp-option=6,${mesh_ip}
 
+# RFC 8910 Captive Portal API — tells Android 11+ and modern devices
+# where to find the captive portal API (RFC 8908 JSON endpoint).
+# This triggers "Sign in to network" instead of "no internet".
+dhcp-option=114,http://${mesh_ip}/api/captive
+
 # Redirect ALL DNS to this node
 # Every domain resolves to the local Pi so any URL loads the chat page.
 # Users type http://chat.nightwatch or the node IP in their browser.

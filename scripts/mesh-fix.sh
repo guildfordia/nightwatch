@@ -448,6 +448,7 @@ start_dnsmasq() {
         cat >> "$RULES_FILE" << IPTEOF
 -A PREROUTING -i $BR_IFACE -p udp --dport 53 ! -d $LOCAL_IP -j DNAT --to-destination $LOCAL_IP:53 -m comment --comment "nightwatch-captive"
 -A PREROUTING -i $BR_IFACE -p tcp --dport 53 ! -d $LOCAL_IP -j DNAT --to-destination $LOCAL_IP:53 -m comment --comment "nightwatch-captive"
+-A PREROUTING -i $BR_IFACE -p tcp --dport 853 -j DNAT --to-destination $LOCAL_IP:53 -m comment --comment "nightwatch-captive"
 -A PREROUTING -i $BR_IFACE -p tcp --dport 80 ! -d $LOCAL_IP -j DNAT --to-destination $LOCAL_IP:80 -m comment --comment "nightwatch-captive"
 COMMIT
 IPTEOF
@@ -461,6 +462,8 @@ IPTEOF
                 iptables -t nat -A PREROUTING -i "$BR_IFACE" -p udp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53
             iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || \
                 iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53
+            iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 853 -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || \
+                iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 853 -j DNAT --to-destination "$LOCAL_IP":53
             iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80 2>/dev/null || \
                 iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80
         fi
@@ -469,6 +472,8 @@ IPTEOF
             iptables -t nat -A PREROUTING -i "$BR_IFACE" -p udp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53
         iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || \
             iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53
+        iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 853 -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || \
+            iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 853 -j DNAT --to-destination "$LOCAL_IP":53
         iptables -t nat -C PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80 2>/dev/null || \
             iptables -t nat -A PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80
     fi
@@ -734,6 +739,7 @@ case "$1" in
         LOCAL_IP="${MESH_IP%/*}"
         iptables -t nat -D PREROUTING -i "$BR_IFACE" -p udp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || true
         iptables -t nat -D PREROUTING -i "$BR_IFACE" -p tcp --dport 53 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || true
+        iptables -t nat -D PREROUTING -i "$BR_IFACE" -p tcp --dport 853 -j DNAT --to-destination "$LOCAL_IP":53 2>/dev/null || true
         # Clean up legacy HTTP redirect rule if present from older versions
         iptables -t nat -D PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80 2>/dev/null || true
 
