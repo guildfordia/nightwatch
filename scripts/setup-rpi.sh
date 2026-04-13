@@ -175,7 +175,8 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     netcat-openbsd \
     socat \
     sshpass \
-    firmware-atheros
+    firmware-atheros \
+    hostapd
 echo "[+] Packages installed"
 
 # Disable system dnsmasq — we start our own instance on br0 via mesh-fix.sh
@@ -235,15 +236,15 @@ if ! grep -q "^batman-adv" /etc/modules 2>/dev/null; then
 fi
 echo "[+] batman-adv version: $(cat /sys/module/batman_adv/version 2>/dev/null || echo 'loads on boot')"
 
-# Disable hostapd — AP is handled by the external GL.iNet router, not the Pi
+# Disable system hostapd — mesh-fix.sh starts hostapd manually with our config
 systemctl disable hostapd 2>/dev/null || true
 systemctl stop hostapd 2>/dev/null || true
 
 # ---- Step 4b: Network routing ----
 # Architecture:
 #   wlan0 = internet + Tailscale (WiFi client, never touch)
-#   wlan1 = 802.11s mesh (USB dongle, batman-adv)
-#   eth0  = GL.iNet router (external AP for clients, bridged into batman-adv)
+#   wlan1 = 802.11s mesh (USB dongle 1, batman-adv)
+#   wlan2 = hostapd WiFi AP (USB dongle 2, 802.11r fast roaming)
 
 echo ""
 echo "[4b/10] Configuring network routing..."
@@ -332,61 +333,23 @@ else
     exit 1
 fi
 
-# ---- Step 9: Configure GL.iNet router ----
+# ---- Step 9: Generate hostapd config ----
 
 echo ""
-echo "[9/10] Configuring GL.iNet router..."
+echo "[9/10] Generating hostapd config (WiFi AP with 802.11r fast roaming)..."
 
-# Check if router is already configured by SSHing to the configured IP
-# and verifying the WiFi SSID matches what we want
-ROUTER_CONFIGURED_IP="${ROUTER_CONFIGURED_IP:-192.168.8.100}"
-ROUTER_PASSWORD_CHECK=$(grep '^ROUTER_PASSWORD=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)
-WIFI_SSID_CHECK=$(grep '^WIFI_SSID=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)
-ROUTER_ALREADY_CONFIGURED=false
+WIFI_SSID_VAL=$(grep '^WIFI_SSID=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "Nightwatch")
+WIFI_PASSWORD_VAL=$(grep '^WIFI_PASSWORD=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "Nightwatch")
+AP_CHANNEL_VAL=$(grep '^AP_CHANNEL=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "6")
+AP_BSSID_VAL=$(grep '^AP_BSSID=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "02:00:4E:57:00:01")
+AP_IFACE_VAL=$(grep '^AP_IFACE=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "wlan2")
 
-if [ -n "$ROUTER_PASSWORD_CHECK" ] && [ "$ROUTER_PASSWORD_CHECK" != "CHANGE_ME_BEFORE_DEPLOY" ] && command -v sshpass >/dev/null 2>&1; then
-    # Temporarily give eth0 an IP to reach the router
-    ip addr add 192.168.8.2/24 dev eth0 2>/dev/null || true
-    ip link set eth0 up 2>/dev/null || true
-    sleep 1
-    if ping -c 1 -W 2 "$ROUTER_CONFIGURED_IP" >/dev/null 2>&1; then
-        SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o LogLevel=ERROR"
-        CURRENT_SSID=$(SSHPASS="$ROUTER_PASSWORD_CHECK" sshpass -e ssh $SSH_OPTS root@"$ROUTER_CONFIGURED_IP" \
-            "uci get wireless.@wifi-iface[0].ssid 2>/dev/null" 2>/dev/null || echo "")
-        if [ "$CURRENT_SSID" = "$WIFI_SSID_CHECK" ]; then
-            ROUTER_ALREADY_CONFIGURED=true
-        fi
-    fi
-    ip addr del 192.168.8.2/24 dev eth0 2>/dev/null || true
-fi
-
-if [ "$ROUTER_ALREADY_CONFIGURED" = true ]; then
-    echo -e "  ${GREEN}[+] Router already configured (SSID: $CURRENT_SSID at $ROUTER_CONFIGURED_IP)${NC}"
-    echo "  Skipping. To reconfigure: sudo scripts/setup-router.sh"
-else
-    # Try to configure — if it fails, let the user retry or skip
-    ROUTER_RETRIES=0
-    while true; do
-        if "$INSTALL_DIR/scripts/setup-router.sh"; then
-            break
-        fi
-        ROUTER_RETRIES=$((ROUTER_RETRIES + 1))
-        echo ""
-        echo -e "  ${YELLOW}[!] Router not found.${NC}"
-        # Non-interactive or max retries: skip automatically
-        if [ ! -t 0 ] || [ "$ROUTER_RETRIES" -ge 3 ]; then
-            echo "  Skipping router setup. Configure later with: make router"
-            break
-        fi
-        echo "      Plug the router into eth0 and press ${BOLD}r${NC} to retry"
-        echo "      or press ${BOLD}s${NC} to skip (you can do it later with: make router)"
-        read -rp "  [r/s] " router_choice
-        case "$router_choice" in
-            [Ss]) echo "  Skipping router setup."; break ;;
-            *)    echo "  Retrying..." ;;
-        esac
-    done
-fi
+mkdir -p "$INSTALL_DIR/hostapd"
+generate_hostapd_conf "$INSTALL_DIR/hostapd/hostapd.conf" \
+    "$AP_IFACE_VAL" "br0" \
+    "$WIFI_SSID_VAL" "$WIFI_PASSWORD_VAL" \
+    "$AP_CHANNEL_VAL" "$AP_BSSID_VAL"
+echo "[+] hostapd.conf generated (SSID: $WIFI_SSID_VAL, Channel: $AP_CHANNEL_VAL, BSSID: $AP_BSSID_VAL)"
 
 # ---- Step 10: Verify ----
 
@@ -394,7 +357,7 @@ echo ""
 echo "[10/10] Verifying installation..."
 
 ERRORS=0
-for f in .env scripts/mesh-fix.sh scripts/nodeconfig.sh scripts/node-discovery.sh scripts/setup-router.sh irc-bridge-go/irc-bridge html/index.html ngircd/ngircd.conf dnsmasq/dnsmasq.conf nginx/nginx.conf; do
+for f in .env scripts/mesh-fix.sh scripts/nodeconfig.sh scripts/node-discovery.sh irc-bridge-go/irc-bridge html/index.html ngircd/ngircd.conf dnsmasq/dnsmasq.conf hostapd/hostapd.conf nginx/nginx.conf; do
     if [ -f "$INSTALL_DIR/$f" ]; then
         echo -e "  ${GREEN}[OK]${NC} $f"
     else

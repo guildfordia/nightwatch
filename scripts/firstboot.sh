@@ -9,7 +9,7 @@
 #   1. Wait for network (to apt install)
 #   2. Install all system dependencies
 #   3. Install app services (ngircd, nginx)
-#   4. Load batman-adv, disable system hostapd/dnsmasq
+#   4. Load batman-adv, disable system hostapd/dnsmasq (mesh-fix.sh manages them)
 #   5. Configure dhcpcd + DNS (resolv.conf locked)
 #   6. Install Tailscale (if TAILSCALE_AUTH_KEY set)
 #   7. Setup distributed IRC config
@@ -295,7 +295,8 @@ if ! DEBIAN_FRONTEND=noninteractive timeout 600 apt-get install -y -qq \
     socat \
     sshpass \
     usbutils \
-    firmware-atheros; then
+    firmware-atheros \
+    hostapd; then
     firstboot_fail "apt-get install failed or timed out (10 min limit)"
 fi
 echo "[+] System packages installed"
@@ -365,7 +366,7 @@ if ! grep -q "^batman-adv" /etc/modules 2>/dev/null; then
 fi
 echo "[+] batman-adv version: $(cat /sys/module/batman_adv/version 2>/dev/null || echo 'loads on boot')"
 
-# Disable system services we don't need
+# Disable system hostapd — mesh-fix.sh starts hostapd manually with our config
 systemctl disable hostapd 2>/dev/null || true
 systemctl stop hostapd 2>/dev/null || true
 
@@ -433,6 +434,22 @@ DHCP_END=$((200 + (NODE_NUM - 1) * 5 + 5))
 [ "$DHCP_START" -gt 254 ] && DHCP_START=254
 [ "$DHCP_END" -gt 254 ] && DHCP_END=254
 echo "[+] dnsmasq.conf generated (DHCP: .${DHCP_START}-.${DHCP_END})"
+
+# ---- Step 8b: Generate hostapd config ----
+
+echo ""
+echo "[8b/12] Generating hostapd config (WiFi AP with 802.11r)..."
+mkdir -p "$NIGHTWATCH_DIR/hostapd"
+AP_IFACE_VAL=$(grep '^AP_IFACE=' "$NIGHTWATCH_DIR/.env" 2>/dev/null | cut -d= -f2- || echo "wlan2")
+AP_CHANNEL_VAL=$(grep '^AP_CHANNEL=' "$NIGHTWATCH_DIR/.env" 2>/dev/null | cut -d= -f2- || echo "6")
+AP_BSSID_VAL=$(grep '^AP_BSSID=' "$NIGHTWATCH_DIR/.env" 2>/dev/null | cut -d= -f2- || echo "02:00:4E:57:00:01")
+WIFI_SSID_VAL=$(grep '^WIFI_SSID=' "$NIGHTWATCH_DIR/.env" 2>/dev/null | cut -d= -f2- || echo "Nightwatch")
+WIFI_PASSWORD_VAL=$(grep '^WIFI_PASSWORD=' "$NIGHTWATCH_DIR/.env" 2>/dev/null | cut -d= -f2- || echo "Nightwatch")
+generate_hostapd_conf "$NIGHTWATCH_DIR/hostapd/hostapd.conf" \
+    "$AP_IFACE_VAL" "br0" \
+    "$WIFI_SSID_VAL" "$WIFI_PASSWORD_VAL" \
+    "$AP_CHANNEL_VAL" "$AP_BSSID_VAL"
+echo "[+] hostapd.conf generated (SSID: $WIFI_SSID_VAL, ch $AP_CHANNEL_VAL)"
 
 # ---- Step 9: Install systemd services ----
 

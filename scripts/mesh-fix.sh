@@ -6,10 +6,10 @@ export PATH="/usr/sbin:/sbin:$PATH"
 # 802.11s + batman-adv + Linux bridge for client access
 #
 # Architecture:
-#   wlan1 (USB dongle) → 802.11s mesh → batman-adv (bat0)
-#   eth0  (GL.iNet)    → Linux bridge (br0) with bat0 → router clients reach mesh
-#   wlan0 (onboard)    → internet + Tailscale (never touched)
-#   br0 gets the mesh IP; bat0 and eth0 are bridge ports (no IPs)
+#   wlan1 (USB dongle 1) → 802.11s mesh → batman-adv (bat0)
+#   wlan2 (USB dongle 2) → hostapd AP (802.11r) → bridge (br0) with bat0
+#   wlan0 (onboard)      → internet + Tailscale (never touched)
+#   br0 gets the mesh IP; bat0 is added manually, wlan2 is added by hostapd
 
 set -euo pipefail
 
@@ -25,7 +25,11 @@ resolve_node_mode
 
 # Defaults
 MESH_IFACE="${MESH_IFACE:-wlan1}"
-AP_IFACE="${AP_IFACE:-eth0}"
+AP_IFACE="${AP_IFACE:-wlan2}"
+AP_CHANNEL="${AP_CHANNEL:-6}"
+AP_BSSID="${AP_BSSID:-02:00:4E:57:00:01}"
+WIFI_SSID="${WIFI_SSID:-Nightwatch}"
+WIFI_PASSWORD="${WIFI_PASSWORD:-Nightwatch}"
 BAT_IFACE="${BAT_IFACE:-bat0}"
 BR_IFACE="${BR_IFACE:-br0}"
 MESH_ID="${MESH_ID:-nightwatch}"
@@ -57,6 +61,67 @@ load_batman_module() {
         modprobe batman-adv
     fi
     echo "[+] batman-adv version: $(cat /sys/module/batman_adv/version 2>/dev/null || echo 'unknown')"
+}
+
+# wait_for_ap_interface <iface>
+# Waits for the AP WiFi dongle (wlan2) to appear, with USB reset recovery.
+# IMPORTANT: Does NOT use modprobe -r ath9k_htc (would kill wlan1's mesh too).
+# Instead, resets the specific USB device for the second AR9271.
+wait_for_ap_interface() {
+    local AP_IF="$1"
+    echo "[+] Waiting for AP interface $AP_IF..."
+    local FOUND=false
+    for _wait in $(seq 1 30); do
+        if ip link show "$AP_IF" >/dev/null 2>&1; then
+            echo "[+] $AP_IF is available"
+            FOUND=true
+            break
+        fi
+        if [ $((_wait % 5)) -eq 0 ]; then
+            echo "[.] Still waiting for $AP_IF... (${_wait}s/30s)"
+        fi
+        sleep 1
+    done
+
+    # If missing, try USB reset for the second AR9271 only
+    if [ "$FOUND" = false ]; then
+        echo "[!] $AP_IF not found after 30s — attempting USB reset for second AR9271..."
+        local AR9271_COUNT=0
+        for dev in /sys/bus/usb/devices/*/idVendor; do
+            local USB_DEV
+            USB_DEV=$(dirname "$dev")
+            if [ "$(cat "$USB_DEV/idVendor" 2>/dev/null)" = "0cf3" ] && \
+               [ "$(cat "$USB_DEV/idProduct" 2>/dev/null)" = "9271" ]; then
+                AR9271_COUNT=$((AR9271_COUNT + 1))
+                # Reset the second AR9271 (first is the mesh dongle)
+                if [ "$AR9271_COUNT" -eq 2 ]; then
+                    echo "[+] Resetting second AR9271 at $USB_DEV..."
+                    echo 0 > "$USB_DEV/authorized" 2>/dev/null || true
+                    sleep 2
+                    echo 1 > "$USB_DEV/authorized" 2>/dev/null || true
+                    break
+                fi
+            fi
+        done
+        # Wait for recovery
+        for _wait in $(seq 1 15); do
+            if ip link show "$AP_IF" >/dev/null 2>&1; then
+                echo "[+] $AP_IF recovered after USB reset"
+                FOUND=true
+                break
+            fi
+            sleep 1
+        done
+    fi
+
+    if [ "$FOUND" = false ]; then
+        echo "[-] $AP_IF not found — WiFi AP will not be available"
+        return 1
+    fi
+
+    # Tell NetworkManager to leave it alone
+    nmcli dev set "$AP_IF" managed no 2>/dev/null || true
+    return 0
 }
 
 setup_mesh_interface() {
@@ -245,60 +310,23 @@ setup_batman() {
 }
 
 setup_client_bridge() {
-    echo "[+] Creating Linux bridge $BR_IFACE ($BAT_IFACE + $AP_IFACE)..."
+    echo "[+] Creating Linux bridge $BR_IFACE ($BAT_IFACE + hostapd AP)..."
 
-    # batman-adv's "batctl if add" only works for wireless interfaces.
-    # For ethernet (eth0 = GL.iNet router), we use a Linux bridge that
-    # connects bat0 and eth0 at layer 2. The bridge gets the mesh IP.
-    # Note: dhcpcd denyinterfaces is handled by configure_network (setup/firstboot).
-
-    # Release any existing DHCP lease on eth0
-    if command -v dhcpcd >/dev/null 2>&1; then
-        dhcpcd --release "$AP_IFACE" 2>/dev/null || true
-    fi
-
-    # Remove eth0's default route — it points to the GL.iNet router which has
-    # no internet. Without this, it shadows wlan0's route (which has internet)
-    # and apt, git pull, etc. all fail.
-    if ip route show default dev "$AP_IFACE" 2>/dev/null | grep -q .; then
-        ip route del default dev "$AP_IFACE" 2>/dev/null || true
-        echo "[+] Removed default route via $AP_IFACE (no internet on router)"
-    fi
-
-    # Tell NetworkManager to stop managing eth0 entirely.
-    # Without this, NM's netplan-eth0 connection runs DHCP on eth0; when DHCP
-    # fails (no server on the router side), NM detaches eth0 from br0, breaking
-    # the captive portal. On dhcpcd systems this is handled by denyinterfaces.
-    if command -v nmcli >/dev/null 2>&1; then
-        # Deactivate any active NM connection on eth0 first
-        ETH_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep "$AP_IFACE" | head -1 | cut -d: -f1)
-        if [ -n "$ETH_CON" ]; then
-            nmcli con down "$ETH_CON" 2>/dev/null || true
-            echo "[+] Deactivated NM connection '$ETH_CON' on $AP_IFACE"
-        fi
-        nmcli dev set "$AP_IFACE" managed no 2>/dev/null || true
-        echo "[+] NetworkManager: $AP_IFACE set to unmanaged"
-    fi
+    # br0 bridges bat0 (mesh) with the hostapd AP interface (wlan2).
+    # bat0 is added here; wlan2 is added automatically by hostapd via its
+    # bridge=br0 directive (hostapd must start AFTER br0 exists).
 
     # Remove any existing bridge
     ip link set "$BR_IFACE" down 2>/dev/null || true
     ip link del "$BR_IFACE" 2>/dev/null || true
 
-    # Strip IPs from bridge ports — only the bridge itself gets an IP
+    # Strip IPs from bat0 — only the bridge itself gets an IP
     ip addr flush dev "$BAT_IFACE" 2>/dev/null || true
-    ip addr flush dev "$AP_IFACE" 2>/dev/null || true
 
-    # Ensure eth0 is up
-    ip link set "$AP_IFACE" up 2>/dev/null || true
-
-    # Create bridge and add ports
+    # Create bridge with bat0 only (hostapd will add AP_IFACE)
     ip link add name "$BR_IFACE" type bridge
     if ! ip link set "$BAT_IFACE" master "$BR_IFACE"; then
         echo "[-] Failed to add $BAT_IFACE to bridge $BR_IFACE"
-        return 1
-    fi
-    if ! ip link set "$AP_IFACE" master "$BR_IFACE"; then
-        echo "[-] Failed to add $AP_IFACE to bridge $BR_IFACE"
         return 1
     fi
 
@@ -310,7 +338,7 @@ setup_client_bridge() {
     ip addr add 192.168.199.1/32 dev "$BR_IFACE" 2>/dev/null || true
 
     echo "[+] Bridge $BR_IFACE is up with IP ${MESH_IP%/*} + 192.168.199.1 (shared)"
-    echo "[+] Ports: $BAT_IFACE (mesh) + $AP_IFACE (router)"
+    echo "[+] Ports: $BAT_IFACE (mesh) — $AP_IFACE will be added by hostapd"
 }
 
 setup_sound_bridge() {
@@ -448,77 +476,45 @@ IPTEOF
     echo "[+] iptables rules active (DNS + HTTP redirect)"
 }
 
-configure_router_bssid() {
-    # Set shared BSSID on the locally-connected GL.iNet router for seamless roaming.
-    # Temporarily isolates eth0 from the mesh so we only reach the LOCAL router.
-    local SHARED_BSSID="AA:BB:CC:DD:EE:01"
-    local ROUTER_PW="${ROUTER_PASSWORD:-a123456}"
+start_hostapd() {
+    local HOSTAPD_CONF="$PROJECT_DIR/hostapd/hostapd.conf"
+    local HOSTAPD_PID="/var/run/hostapd-nightwatch.pid"
 
-    # Only attempt if eth0 is a bridge port (router connected)
-    if [ ! -d "/sys/class/net/$BR_IFACE/brif/$AP_IFACE" ]; then
-        echo "[+] No router connected ($AP_IFACE not in bridge) — skipping BSSID"
-        return
+    # Kill any existing hostapd
+    if [ -f "$HOSTAPD_PID" ]; then
+        local OLD_PID
+        OLD_PID=$(cat "$HOSTAPD_PID")
+        if kill -0 "$OLD_PID" 2>/dev/null; then
+            if ps -p "$OLD_PID" -o comm= 2>/dev/null | grep -q '^hostapd'; then
+                kill "$OLD_PID" 2>/dev/null || true
+                sleep 1
+            fi
+        fi
+        rm -f "$HOSTAPD_PID"
+    fi
+    # Stop system hostapd to avoid port conflicts
+    systemctl stop hostapd 2>/dev/null || true
+
+    # Generate config if missing
+    if [ ! -f "$HOSTAPD_CONF" ]; then
+        echo "[+] hostapd config not found — generating..."
+        generate_hostapd_conf "$HOSTAPD_CONF" \
+            "$AP_IFACE" "$BR_IFACE" \
+            "$WIFI_SSID" "$WIFI_PASSWORD" \
+            "$AP_CHANNEL" "$AP_BSSID"
     fi
 
-    echo "[+] Configuring router BSSID..."
-
-    # Use macvlan on eth0 to reach the local router without touching the mesh bridge
-    ip link add _nightwatch_rv link "$AP_IFACE" type macvlan mode bridge 2>/dev/null || {
-        echo "[!] macvlan not supported — skipping BSSID"
-        return
-    }
-    ip addr add 192.168.8.2/24 dev _nightwatch_rv 2>/dev/null || true
-    ip link set _nightwatch_rv up 2>/dev/null || true
+    echo "[+] Starting hostapd (WiFi AP on $AP_IFACE, SSID '$WIFI_SSID')..."
+    hostapd -B -P "$HOSTAPD_PID" "$HOSTAPD_CONF"
     sleep 2
 
-    local ROUTER_IP=""
-    for rip in 192.168.8.100 192.168.8.1; do
-        if ping -c 1 -W 2 -I _nightwatch_rv "$rip" >/dev/null 2>&1; then
-            ROUTER_IP="$rip"
-            break
-        fi
-    done
-
-    if [ -n "$ROUTER_IP" ]; then
-        # Set BSSID via SSH and make it persistent via rc.local
-        # GL.iNet firmware resets UCI wireless config on boot, so we need rc.local
-        ssh-keygen -f /root/.ssh/known_hosts -R "$ROUTER_IP" 2>/dev/null || true
-        ssh-keygen -f /home/user/.ssh/known_hosts -R "$ROUTER_IP" 2>/dev/null || true
-
-        sshpass -p "$ROUTER_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-            "root@$ROUTER_IP" bash -s "$SHARED_BSSID" 2>/dev/null <<'ROUTERSCRIPT' \
-            && echo "[+] Router BSSID configured to $SHARED_BSSID" \
-            || echo "[!] Router BSSID configuration failed (SSH error)"
-BSSID=$1
-# Set BSSID now
-uci -q set wireless.@wifi-iface[-1].macaddr="$BSSID"
-uci commit wireless
-
-# Make it persistent — GL.iNet firmware resets wireless config on boot
-# so we add a post-boot script to rc.local
-if ! grep -q "wifi-iface.*macaddr.*$BSSID" /etc/rc.local 2>/dev/null; then
-    # Insert before 'exit 0' in rc.local (or create if missing)
-    if [ -f /etc/rc.local ]; then
-        sed -i "/^exit 0/i\\uci -q set wireless.@wifi-iface[-1].macaddr='$BSSID' && uci commit wireless && wifi reload" /etc/rc.local
+    # Verify hostapd started
+    if [ -f "$HOSTAPD_PID" ] && kill -0 "$(cat "$HOSTAPD_PID")" 2>/dev/null; then
+        echo "[+] hostapd running — AP broadcasting '$WIFI_SSID' (BSSID $AP_BSSID, ch $AP_CHANNEL)"
     else
-        cat > /etc/rc.local <<EOF2
-#!/bin/sh
-uci -q set wireless.@wifi-iface[-1].macaddr='$BSSID' && uci commit wireless && wifi reload
-exit 0
-EOF2
-        chmod +x /etc/rc.local
+        echo "[!] hostapd failed to start — check $HOSTAPD_CONF"
+        echo "[!] WiFi AP is unavailable; mesh network still operational"
     fi
-fi
-
-# Apply immediately
-wifi reload 2>/dev/null || wifi restart 2>/dev/null
-ROUTERSCRIPT
-    else
-        echo "[!] No router found at 192.168.8.100 or 192.168.8.1"
-    fi
-
-    # Cleanup macvlan
-    ip link del _nightwatch_rv 2>/dev/null || true
 }
 
 setup_gateway() {
@@ -621,16 +617,25 @@ case "$1" in
         setup_mesh_interface
         setup_batman
 
+        # Wait for AP dongle (wlan2)
+        AP_AVAILABLE=false
+        if wait_for_ap_interface "$AP_IFACE"; then
+            AP_AVAILABLE=true
+        fi
+
         if [ "$NODE_MODE" = "sound-bridge" ]; then
             # Sound-bridge: eth0 on separate subnet, not bridged
             setup_sound_bridge
+            # Start hostapd if AP dongle is available (WiFi clients still need AP)
+            if [ "$AP_AVAILABLE" = true ]; then
+                start_hostapd
+            fi
             start_dnsmasq
             # batman-adv gw_mode client (sound-bridge is not a gateway)
             batctl meshif "$BAT_IFACE" gw_mode client 2>/dev/null || \
                 batctl gw_mode client 2>/dev/null || true
         else
-            # mesh or gateway: eth0 bridged into br0 with bat0
-            # Retry bridge setup (eth0 may not be ready immediately after boot)
+            # mesh or gateway: bat0 bridged via br0, hostapd adds AP_IFACE
             for _attempt in 1 2 3; do
                 if setup_client_bridge; then
                     break
@@ -642,14 +647,13 @@ case "$1" in
                 echo "[!] Bridge setup failed (attempt $_attempt/3), retrying in ${_attempt}s..."
                 sleep "$_attempt"
             done
+            # Start hostapd (adds AP_IFACE to br0 via bridge= directive)
+            if [ "$AP_AVAILABLE" = true ]; then
+                start_hostapd
+            fi
             start_dnsmasq
             setup_gateway
         fi
-
-        # Router BSSID configuration disabled — GL.iNet firmware doesn't
-        # reliably support macaddr override. Use Option 2 (802.11r) or
-        # Option 3 (802.11v) for roaming instead.
-        # configure_router_bssid
 
         echo ""
         echo "====================================="
@@ -660,13 +664,32 @@ case "$1" in
         echo "  Bridge:  $BAT_IFACE → $BR_IFACE (no eth0)"
         echo "  eth0:    10.0.0.1/24 (Mac Mini)"
         else
-        echo "  Bridge:  $BAT_IFACE + $AP_IFACE → $BR_IFACE"
+        echo "  Bridge:  $BAT_IFACE + $AP_IFACE → $BR_IFACE (hostapd)"
+        fi
+        if [ "$AP_AVAILABLE" = true ]; then
+        echo "  WiFi AP: $WIFI_SSID (BSSID $AP_BSSID, ch $AP_CHANNEL)"
+        else
+        echo "  WiFi AP: UNAVAILABLE ($AP_IFACE not found)"
         fi
         echo "====================================="
         ;;
 
     stop)
         echo "[+] Stopping Nightwatch mesh network..."
+
+        # Stop hostapd (must stop before bridge teardown)
+        HOSTAPD_PID="/var/run/hostapd-nightwatch.pid"
+        if [ -f "$HOSTAPD_PID" ]; then
+            OLD_PID=$(cat "$HOSTAPD_PID")
+            if kill -0 "$OLD_PID" 2>/dev/null; then
+                if ps -p "$OLD_PID" -o comm= 2>/dev/null | grep -q '^hostapd'; then
+                    kill "$OLD_PID" 2>/dev/null || true
+                else
+                    echo "[!] PID $OLD_PID is not hostapd — removing stale PID file"
+                fi
+            fi
+            rm -f "$HOSTAPD_PID"
+        fi
 
         # Stop dnsmasq
         DNSMASQ_PID="/var/run/dnsmasq-nightwatch.pid"
@@ -702,11 +725,10 @@ case "$1" in
         # causing it to vanish from the system. Leaving wlan1 in mesh mode
         # is harmless — setup_mesh_interface handles any state on start.
 
-        # NOTE: wlan0 and eth0 are never touched here — wlan0 provides internet,
-        # eth0 connects to the external router (both must stay up)
+        # NOTE: wlan0 is never touched — it provides internet/Tailscale
 
         # Clean up sound-bridge eth0 address if present
-        ip addr del 10.0.0.1/24 dev "$AP_IFACE" 2>/dev/null || true
+        ip addr del 10.0.0.1/24 dev eth0 2>/dev/null || true
 
         # Remove captive portal iptables rules
         LOCAL_IP="${MESH_IP%/*}"
@@ -762,6 +784,22 @@ case "$1" in
             fi
         else
             echo "  [!] dnsmasq not running"
+        fi
+
+        echo ""
+        echo "== hostapd (WiFi AP) =="
+        HOSTAPD_PID="/var/run/hostapd-nightwatch.pid"
+        if [ -f "$HOSTAPD_PID" ] && kill -0 "$(cat "$HOSTAPD_PID")" 2>/dev/null; then
+            echo "  Status: running (PID $(cat "$HOSTAPD_PID"))"
+            echo "  SSID: ${WIFI_SSID}"
+            echo "  BSSID: ${AP_BSSID}"
+            echo "  Channel: ${AP_CHANNEL}"
+            if command -v hostapd_cli >/dev/null 2>&1; then
+                CLIENT_COUNT=$(hostapd_cli -i "$AP_IFACE" all_sta 2>/dev/null | grep -c "^[0-9a-f]" || echo "0")
+                echo "  Connected clients: $CLIENT_COUNT"
+            fi
+        else
+            echo "  [!] hostapd not running"
         fi
 
         echo ""

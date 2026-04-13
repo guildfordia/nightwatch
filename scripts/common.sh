@@ -156,6 +156,64 @@ pid-file=/var/run/dnsmasq-nightwatch.pid
 DNSEOF
 }
 
+# generate_hostapd_conf <conf_path> <ap_iface> <br_iface> <ssid> <password> <channel> <bssid>
+# Writes the hostapd.conf for WiFi AP with 802.11r (Fast Transition).
+# All nodes share the same BSSID so clients roam seamlessly.
+generate_hostapd_conf() {
+    local conf_path="$1"
+    local ap_iface="$2"
+    local br_iface="$3"
+    local ssid="$4"
+    local password="$5"
+    local channel="${6:-6}"
+    local bssid="${7:-02:00:4E:57:00:01}"
+
+    mkdir -p "$(dirname "$conf_path")"
+
+    cat > "$conf_path" << HAPEOF
+# Nightwatch hostapd — WiFi AP with 802.11r Fast Transition
+# Auto-generated — do not edit manually
+
+interface=$ap_iface
+bridge=$br_iface
+driver=nl80211
+
+# WiFi settings
+ssid=$ssid
+channel=$channel
+hw_mode=g
+ieee80211n=1
+
+# Force the same BSSID on every node (locally-administered MAC).
+# All nodes look like one AP — clients roam at Layer 2 without reconnecting.
+bssid=$bssid
+
+# WPA2-PSK + 802.11r Fast Transition
+# FT-PSK enables fast roaming; WPA-PSK is fallback for older clients.
+wpa=2
+wpa_passphrase=$password
+wpa_key_mgmt=FT-PSK WPA-PSK
+wpa_pairwise=CCMP
+rsn_pairwise=CCMP
+
+# 802.11r Fast Transition (seamless roaming between mesh nodes)
+# mobility_domain: "NW" in hex — must be identical on all nodes
+# ft_psk_generate_local: each node generates FT keys from the PSK independently,
+#   no inter-node key exchange needed (critical for dynamic mesh)
+# ft_over_ds=0: over-the-air only (over-DS needs direct AP-to-AP comms)
+mobility_domain=4e57
+ft_over_ds=0
+ft_psk_generate_local=1
+pmk_r1_push=0
+
+# 802.11n capabilities
+wmm_enabled=1
+
+ctrl_interface=/var/run/hostapd
+ctrl_interface_group=0
+HAPEOF
+}
+
 # set_env_value <file> <key> <value>
 # Safely sets key=value in an env file without sed escaping issues.
 # Handles arbitrary characters in value (quotes, slashes, ampersands, backslashes).
@@ -269,38 +327,36 @@ NETEOF
             echo "[+] dhcpcd configured: static DNS 8.8.8.8 + 1.1.1.1"
         fi
         # Deny bridge port interfaces
-        if ! grep -q "denyinterfaces eth0" "$DHCPCD_CONF"; then
+        if ! grep -q "denyinterfaces.*bat0" "$DHCPCD_CONF"; then
             cat >> "$DHCPCD_CONF" << 'DENYEOF'
 
 # Nightwatch bridge — dhcpcd must not manage these (br0 bridge handles them)
-denyinterfaces eth0 bat0 br0
+denyinterfaces wlan2 bat0 br0
 DENYEOF
-            echo "[+] dhcpcd: eth0/bat0/br0 excluded (bridge ports)"
+            echo "[+] dhcpcd: wlan2/bat0/br0 excluded (bridge ports)"
         fi
         systemctl restart dhcpcd 2>/dev/null || true
     elif command -v nmcli >/dev/null 2>&1; then
-        # eth0 is a bridge port (br0 = bat0 + eth0). NetworkManager must NOT
-        # manage eth0, otherwise it runs DHCP, fails, and detaches eth0 from
-        # br0 — breaking the captive portal. Use a persistent udev-style
-        # unmanaged rule so NM ignores eth0 across reboots.
+        # wlan2 is a bridge port (br0 = bat0 + wlan2 via hostapd). NetworkManager
+        # must NOT manage wlan2, otherwise it interferes with hostapd.
+        # Use a persistent unmanaged rule so NM ignores wlan2 across reboots.
         mkdir -p /etc/NetworkManager/conf.d
         cat > /etc/NetworkManager/conf.d/nightwatch-unmanaged.conf << 'NMEOF'
-# Nightwatch: eth0 and bat0 are bridge ports managed by mesh-fix.sh
+# Nightwatch: wlan2 and bat0 are bridge ports managed by mesh-fix.sh/hostapd
 [keyfile]
-unmanaged-devices=interface-name:eth0;interface-name:bat0;interface-name:br0
+unmanaged-devices=interface-name:wlan2;interface-name:bat0;interface-name:br0
 NMEOF
-        echo "[+] NetworkManager: eth0/bat0/br0 set as permanently unmanaged"
+        echo "[+] NetworkManager: wlan2/bat0/br0 set as permanently unmanaged"
 
-        # Deactivate any existing NM connection on eth0
-        local ETH_CON
-        ETH_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep 'eth0' | head -1 | cut -d: -f1)
-        if [ -n "$ETH_CON" ]; then
-            nmcli con down "$ETH_CON" 2>/dev/null || true
-            # Prevent auto-activation
-            nmcli con mod "$ETH_CON" connection.autoconnect no 2>/dev/null || true
-            echo "[+] Disabled auto-connect for NM connection '$ETH_CON'"
+        # Deactivate any existing NM connection on wlan2
+        local WLAN2_CON
+        WLAN2_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep 'wlan2' | head -1 | cut -d: -f1)
+        if [ -n "$WLAN2_CON" ]; then
+            nmcli con down "$WLAN2_CON" 2>/dev/null || true
+            nmcli con mod "$WLAN2_CON" connection.autoconnect no 2>/dev/null || true
+            echo "[+] Disabled auto-connect for NM connection '$WLAN2_CON'"
         fi
-        nmcli dev set eth0 managed no 2>/dev/null || true
+        nmcli dev set wlan2 managed no 2>/dev/null || true
 
         # Reload NM config so unmanaged rule takes effect
         systemctl reload NetworkManager 2>/dev/null || nmcli general reload 2>/dev/null || true

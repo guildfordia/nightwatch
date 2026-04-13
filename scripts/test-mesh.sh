@@ -103,13 +103,16 @@ fi
 
 section "0. Hardware & System"
 
-# USB WiFi dongle (AR9271) detected
-if lsusb 2>/dev/null | grep -q "0cf3:9271"; then
-    pass "USB WiFi dongle (AR9271) detected"
+# USB WiFi dongles (AR9271) — need two: one for mesh, one for AP
+AR9271_COUNT=$(lsusb 2>/dev/null | grep -c "0cf3:9271" || echo "0")
+if [ "$AR9271_COUNT" -ge 2 ]; then
+    pass "Two USB WiFi dongles (AR9271) detected — mesh + AP"
+elif [ "$AR9271_COUNT" -eq 1 ]; then
+    warn "Only one AR9271 detected — need two (mesh + AP)"
 elif ip link show "$MESH_IFACE" >/dev/null 2>&1; then
     pass "Mesh interface $MESH_IFACE present (dongle detected)"
 else
-    fail "USB WiFi dongle (AR9271) not detected"
+    fail "No USB WiFi dongles (AR9271) detected"
 fi
 
 # Disk space — warn if root partition is >90% full
@@ -618,25 +621,28 @@ if [ -d "/sys/class/net/$BR_IFACE" ]; then
         fail "$BAT_IFACE not in $BR_IFACE (mesh traffic won't reach bridge)"
     fi
 
-    # Check eth0 is a bridge port (not expected in sound-bridge mode)
-    if [ "$NODE_MODE" = "sound-bridge" ]; then
-        if [ -d "/sys/class/net/$BR_IFACE/brif/$AP_IFACE" ]; then
-            warn "$AP_IFACE should NOT be in $BR_IFACE in sound-bridge mode"
-        else
-            pass "$AP_IFACE correctly excluded from $BR_IFACE (sound-bridge mode)"
-        fi
-        # Check eth0 has the Mac Mini subnet IP
-        eth0_ip=$(ip -4 addr show dev "$AP_IFACE" 2>/dev/null | grep -oP 'inet \K[0-9.]+' || echo "")
-        if [ "$eth0_ip" = "10.0.0.1" ]; then
-            pass "$AP_IFACE has 10.0.0.1 (Mac Mini subnet)"
-        else
-            fail "$AP_IFACE should have 10.0.0.1 but has '$eth0_ip'"
-        fi
+    # Check AP interface is a bridge port (added by hostapd via bridge= directive)
+    if [ -d "/sys/class/net/$BR_IFACE/brif/$AP_IFACE" ]; then
+        pass "$AP_IFACE is a port of $BR_IFACE (added by hostapd)"
     else
-        if [ -d "/sys/class/net/$BR_IFACE/brif/$AP_IFACE" ]; then
-            pass "$AP_IFACE is a port of $BR_IFACE"
+        warn "$AP_IFACE not in $BR_IFACE — is hostapd running?"
+    fi
+
+    # Check hostapd is running
+    HOSTAPD_PID="/var/run/hostapd-nightwatch.pid"
+    if [ -f "$HOSTAPD_PID" ] && kill -0 "$(cat "$HOSTAPD_PID")" 2>/dev/null; then
+        pass "hostapd running (PID $(cat "$HOSTAPD_PID"))"
+    else
+        fail "hostapd not running — WiFi AP is unavailable"
+    fi
+
+    # Sound-bridge mode: check eth0 has the Mac Mini subnet IP
+    if [ "$NODE_MODE" = "sound-bridge" ]; then
+        eth0_ip=$(ip -4 addr show dev eth0 2>/dev/null | grep -oP 'inet \K[0-9.]+' || echo "")
+        if [ "$eth0_ip" = "10.0.0.1" ]; then
+            pass "eth0 has 10.0.0.1 (Mac Mini subnet)"
         else
-            warn "$AP_IFACE not in $BR_IFACE (run: sudo ip link set $AP_IFACE master $BR_IFACE)"
+            fail "eth0 should have 10.0.0.1 but has '$eth0_ip'"
         fi
     fi
 else

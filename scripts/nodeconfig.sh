@@ -109,10 +109,10 @@ scan_mesh() {
         mkdir -p /etc/NetworkManager/conf.d
         cat > "$NM_UNMANAGED_CONF" << NMEOF
 [keyfile]
-unmanaged-devices=interface-name:${MESH_IFACE}
+unmanaged-devices=interface-name:${MESH_IFACE};interface-name:wlan2
 NMEOF
         nmcli general reload 2>/dev/null || true
-        log "NetworkManager: $MESH_IFACE permanently set to unmanaged"
+        log "NetworkManager: $MESH_IFACE and wlan2 permanently set to unmanaged"
     fi
 
     # Release interface from NetworkManager (immediate effect)
