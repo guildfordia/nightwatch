@@ -330,6 +330,15 @@ setup_client_bridge() {
         return 1
     fi
 
+    # Pin br0's MAC to bat0's MAC BEFORE hostapd adds wlan2.
+    # Without this, the bridge adopts wlan2's MAC (the shared BSSID) which
+    # confuses batman-adv's DAT — the same MAC appears on multiple nodes,
+    # breaking cross-node ARP resolution.
+    BRIDGE_MAC=$(cat /sys/class/net/"$BAT_IFACE"/address 2>/dev/null)
+    if [ -n "$BRIDGE_MAC" ]; then
+        ip link set "$BR_IFACE" address "$BRIDGE_MAC"
+    fi
+
     # Bring up bridge and assign mesh IP
     ip link set "$BR_IFACE" up
     ip addr add "$MESH_IP" dev "$BR_IFACE"
