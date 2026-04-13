@@ -430,6 +430,7 @@ install_systemd_services() {
     systemctl enable nightwatch-bridge.service
     systemctl enable nightwatch-led.service
     systemctl enable nightwatch-debug.service
+    systemctl enable nightwatch-watchdog.timer
 
     echo "[+] Systemd services installed and enabled"
 }

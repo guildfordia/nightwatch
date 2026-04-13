@@ -1,9 +1,14 @@
 #!/bin/bash
 # Nightwatch — Mesh Watchdog
 #
-# Checks that wlan1 is in mesh mode and batman-adv is functional.
-# If the ath9k_htc firmware has reset (dropping wlan1 back to managed mode),
-# restarts the mesh service to recover.
+# Checks that wlan1 is in mesh mode, hostapd is running, and batman-adv
+# is functional. Recovers from ath9k_htc firmware crashes, interface swaps
+# after driver reload, and hostapd failures.
+#
+# Recovery strategy (escalating):
+#   1. Restart mesh service (fixes most issues)
+#   2. USB device reset (fixes firmware crashes)
+#   3. Reboot (fixes interface swaps after driver reload)
 #
 # Run by systemd timer every 30 seconds.
 
@@ -11,6 +16,8 @@ set -euo pipefail
 
 LOG_TAG="nightwatch-watchdog"
 log() { logger -t "$LOG_TAG" "$1" 2>/dev/null || true; }
+
+FAIL_COUNT_FILE="/run/nightwatch-watchdog-fails"
 
 # Read config
 if [ -f /etc/nightwatch.conf ]; then
@@ -20,64 +27,104 @@ fi
 NIGHTWATCH_DIR="${NIGHTWATCH_DIR:-/opt/nightwatch}"
 
 MESH_IFACE="wlan1"
-# Read from .env (actual config), fall back to .env.example (template)
+AP_IFACE="wlan2"
 if [ -f "$NIGHTWATCH_DIR/.env" ]; then
     MESH_IFACE=$(grep '^MESH_IFACE=' "$NIGHTWATCH_DIR/.env" | cut -d= -f2 || echo "wlan1")
+    AP_IFACE=$(grep '^AP_IFACE=' "$NIGHTWATCH_DIR/.env" | cut -d= -f2 || echo "wlan2")
 elif [ -f "$NIGHTWATCH_DIR/.env.example" ]; then
     MESH_IFACE=$(grep '^MESH_IFACE=' "$NIGHTWATCH_DIR/.env.example" | cut -d= -f2 || echo "wlan1")
+    AP_IFACE=$(grep '^AP_IFACE=' "$NIGHTWATCH_DIR/.env.example" | cut -d= -f2 || echo "wlan2")
 fi
 
 # Check if mesh service is supposed to be running
 if ! systemctl is-active --quiet nightwatch-mesh 2>/dev/null; then
-    # Mesh service isn't active — nothing to watch
     exit 0
 fi
 
-# Check if wlan1 exists
+# Track consecutive failures for escalation
+get_fail_count() { cat "$FAIL_COUNT_FILE" 2>/dev/null || echo 0; }
+set_fail_count() { echo "$1" > "$FAIL_COUNT_FILE" 2>/dev/null || true; }
+clear_fails() { rm -f "$FAIL_COUNT_FILE" 2>/dev/null || true; }
+
+HEALTHY=true
+
+# ---- Check 1: mesh interface exists and is in mesh mode ----
+
 if [ ! -d "/sys/class/net/$MESH_IFACE" ]; then
-    log "$MESH_IFACE missing — dongle may have disconnected, attempting USB reset"
-    # Find the device by vendor:product ID since the net/ subdirectory
-    # disappears when the ath9k_htc driver crashes
+    log "$MESH_IFACE missing — dongle may have crashed"
+    HEALTHY=false
+else
+    IFACE_TYPE=$(iw dev "$MESH_IFACE" info 2>/dev/null | grep -oP 'type \K\S+' || true)
+    if [ "$IFACE_TYPE" != "mesh" ]; then
+        log "$MESH_IFACE is '$IFACE_TYPE' (expected mesh)"
+        HEALTHY=false
+    fi
+fi
+
+# ---- Check 2: mesh interface is in batman-adv ----
+
+if [ "$HEALTHY" = true ]; then
+    if ! batctl meshif bat0 if 2>/dev/null | grep -q "$MESH_IFACE" && \
+       ! batctl if 2>/dev/null | grep -q "$MESH_IFACE"; then
+        log "$MESH_IFACE not in batman-adv"
+        HEALTHY=false
+    fi
+fi
+
+# ---- Check 3: hostapd is running ----
+
+HOSTAPD_PID="/var/run/hostapd-nightwatch.pid"
+if [ "$HEALTHY" = true ]; then
+    if [ ! -f "$HOSTAPD_PID" ] || ! kill -0 "$(cat "$HOSTAPD_PID" 2>/dev/null)" 2>/dev/null; then
+        log "hostapd not running"
+        HEALTHY=false
+    fi
+fi
+
+# ---- Check 4: AP interface exists ----
+
+if [ "$HEALTHY" = true ] && [ ! -d "/sys/class/net/$AP_IFACE" ]; then
+    log "$AP_IFACE missing"
+    HEALTHY=false
+fi
+
+# ---- All healthy — reset failure counter ----
+
+if [ "$HEALTHY" = true ]; then
+    clear_fails
+    exit 0
+fi
+
+# ---- Recovery (escalating) ----
+
+FAILS=$(get_fail_count)
+FAILS=$((FAILS + 1))
+set_fail_count "$FAILS"
+
+if [ "$FAILS" -le 2 ]; then
+    # Level 1: Restart mesh service
+    log "Recovery attempt $FAILS/6: restarting mesh service"
+    systemctl restart nightwatch-mesh 2>/dev/null || true
+
+elif [ "$FAILS" -le 4 ]; then
+    # Level 2: USB reset for AR9271 dongles + restart mesh
+    log "Recovery attempt $FAILS/6: USB reset + mesh restart"
     for dev in /sys/bus/usb/devices/*/idVendor; do
         USB_DEV=$(dirname "$dev")
         if [ "$(cat "$USB_DEV/idVendor" 2>/dev/null)" = "0cf3" ] && \
            [ "$(cat "$USB_DEV/idProduct" 2>/dev/null)" = "9271" ]; then
-            log "Found AR9271 at $USB_DEV — resetting"
+            log "Resetting AR9271 at $USB_DEV"
             echo 0 > "$USB_DEV/authorized" 2>/dev/null || true
             sleep 2
             echo 1 > "$USB_DEV/authorized" 2>/dev/null || true
-            sleep 5
-            break
         fi
     done
-    if [ -d "/sys/class/net/$MESH_IFACE" ]; then
-        log "$MESH_IFACE recovered after USB reset — restarting mesh"
-        systemctl restart nightwatch-mesh
-    else
-        log "$MESH_IFACE still missing after USB reset"
-    fi
-    exit 0
-fi
+    sleep 5
+    systemctl restart nightwatch-mesh 2>/dev/null || true
 
-# Check if wlan1 is in mesh mode
-IFACE_TYPE=$(iw dev "$MESH_IFACE" info 2>/dev/null | grep -oP 'type \K\S+' || true)
-
-if [ "$IFACE_TYPE" != "mesh" ]; then
-    log "$MESH_IFACE is in '$IFACE_TYPE' mode (expected mesh) — restarting mesh service"
-    systemctl restart nightwatch-mesh
-    exit 0
-fi
-
-# Check if batctl is available
-if ! command -v batctl >/dev/null 2>&1; then
-    log "batctl not found — cannot monitor mesh"
-    exit 1
-fi
-
-# Check if wlan1 is registered in batman-adv (try new syntax, fall back to old)
-if ! batctl meshif bat0 if 2>/dev/null | grep -q "$MESH_IFACE" && \
-   ! batctl if 2>/dev/null | grep -q "$MESH_IFACE"; then
-    log "$MESH_IFACE not in batman-adv — restarting mesh service"
-    systemctl restart nightwatch-mesh
-    exit 0
+elif [ "$FAILS" -le 6 ]; then
+    # Level 3: Reboot (fixes interface swaps after driver reload)
+    log "Recovery attempt $FAILS/6: rebooting (interface may be swapped)"
+    clear_fails
+    reboot
 fi
