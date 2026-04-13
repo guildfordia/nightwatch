@@ -202,6 +202,7 @@ rsn_pairwise=CCMP
 #   no inter-node key exchange needed (critical for dynamic mesh)
 # ft_over_ds=0: over-the-air only (over-DS needs direct AP-to-AP comms)
 mobility_domain=4e57
+nas_identifier=nightwatch
 ft_over_ds=0
 ft_psk_generate_local=1
 pmk_r1_push=0
