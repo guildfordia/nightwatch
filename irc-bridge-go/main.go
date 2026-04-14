@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -308,9 +309,12 @@ type Client struct {
 func (c *Client) close() {
 	c.once.Do(func() {
 		close(c.done)
-		// Close underlying connections to unblock any goroutines blocked
-		// on network reads (ReadMessage, scanner.Scan)
+		// Send graceful QUIT to IRC so the server releases our nick immediately
+		// instead of waiting for PingTimeout (5min) to detect a dead TCP socket.
+		// This lets clients reclaim their nick on fast reconnect.
 		if c.irc != nil {
+			c.irc.SetWriteDeadline(time.Now().Add(1 * time.Second))
+			c.irc.Write([]byte("QUIT :Disconnected\r\n"))
 			c.irc.Close()
 		}
 		if c.ws != nil {
@@ -714,6 +718,27 @@ var (
 
 const healthCacheTTL = 5 * time.Second
 
+func handleBlink(w http.ResponseWriter, r *http.Request) {
+	// Blink the onboard LED for 10 seconds to identify this Pi
+	go func() {
+		cmd := exec.Command("sh", "-c", `
+			LED=/sys/class/leds/ACT
+			[ -d "$LED" ] || LED=/sys/class/leds/led0
+			[ -d "$LED" ] || exit 1
+			ORIG=$(cat "$LED/trigger" | grep -oP '\[\K[^\]]+')
+			echo none > "$LED/trigger"
+			for i in $(seq 1 20); do
+				echo 1 > "$LED/brightness"; sleep 0.25
+				echo 0 > "$LED/brightness"; sleep 0.25
+			done
+			echo "$ORIG" > "$LED/trigger"
+		`)
+		cmd.Run()
+	}()
+	w.Header().Set("Content-Type", "text/plain")
+	fmt.Fprint(w, "ok")
+}
+
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	healthMu.Lock()
 
@@ -867,6 +892,7 @@ func main() {
 	})
 	mux.HandleFunc("/health", handleHealth)
 	mux.HandleFunc("/status", handleStatus(hub, limiter))
+	mux.HandleFunc("/blink", handleBlink)
 
 	server := &http.Server{
 		Addr:    listenAddr,
