@@ -430,13 +430,13 @@ start_dnsmasq() {
     # Also stop the system dnsmasq to avoid port conflicts
     systemctl stop dnsmasq 2>/dev/null || true
 
-    if [ ! -f "$DNSMASQ_CONF" ]; then
-        echo "[+] dnsmasq config not found — generating..."
-        local node_num="${PI_NUMBER:-1}"
-        local mesh_ip="${MESH_IP%/*}"
-        generate_dnsmasq_conf "$DNSMASQ_CONF" "$node_num" "$mesh_ip"
-        echo "[+] dnsmasq.conf generated for node $node_num"
-    fi
+    # Always regenerate dnsmasq config on start so .env changes take effect.
+    # Previously only generated if missing — stale configs caused DHCP to break
+    # after changing PI_NUMBER or MESH_IP without manually removing the file.
+    local node_num="${PI_NUMBER:-1}"
+    local mesh_ip="${MESH_IP%/*}"
+    generate_dnsmasq_conf "$DNSMASQ_CONF" "$node_num" "$mesh_ip"
+    echo "[+] dnsmasq.conf regenerated for node $node_num (mesh IP $mesh_ip)"
 
     if [ -f "$DNSMASQ_CONF" ]; then
         echo "[+] Starting dnsmasq (DHCP + captive portal DNS on $BR_IFACE)..."
@@ -515,14 +515,14 @@ start_hostapd() {
     # Stop system hostapd to avoid port conflicts
     systemctl stop hostapd 2>/dev/null || true
 
-    # Generate config if missing
-    if [ ! -f "$HOSTAPD_CONF" ]; then
-        echo "[+] hostapd config not found — generating..."
-        generate_hostapd_conf "$HOSTAPD_CONF" \
-            "$AP_IFACE" "$BR_IFACE" \
-            "$WIFI_SSID" "$WIFI_PASSWORD" \
-            "$AP_CHANNEL" "$AP_BSSID"
-    fi
+    # Always regenerate config on start so .env changes (SSID, password, BSSID,
+    # channel) take effect. Previously only generated if missing — stale configs
+    # caused connection issues after changing settings.
+    generate_hostapd_conf "$HOSTAPD_CONF" \
+        "$AP_IFACE" "$BR_IFACE" \
+        "$WIFI_SSID" "$WIFI_PASSWORD" \
+        "$AP_CHANNEL" "$AP_BSSID"
+    echo "[+] hostapd.conf regenerated (SSID: $WIFI_SSID, BSSID: $AP_BSSID, ch $AP_CHANNEL)"
 
     echo "[+] Starting hostapd (WiFi AP on $AP_IFACE, SSID '$WIFI_SSID')..."
     hostapd -B -P "$HOSTAPD_PID" "$HOSTAPD_CONF"
