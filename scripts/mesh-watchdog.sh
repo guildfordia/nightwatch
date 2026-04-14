@@ -29,16 +29,19 @@ NIGHTWATCH_DIR="${NIGHTWATCH_DIR:-/opt/nightwatch}"
 
 MESH_IFACE="wlan1"
 AP_IFACE="wlan2"
+NODE_MODE="mesh"
 if [ -f "$NIGHTWATCH_DIR/.env" ]; then
     MESH_IFACE=$(grep '^MESH_IFACE=' "$NIGHTWATCH_DIR/.env" | cut -d= -f2 || echo "wlan1")
     AP_IFACE=$(grep '^AP_IFACE=' "$NIGHTWATCH_DIR/.env" | cut -d= -f2 || echo "wlan2")
+    NODE_MODE=$(grep '^NODE_MODE=' "$NIGHTWATCH_DIR/.env" | cut -d= -f2 || echo "mesh")
 elif [ -f "$NIGHTWATCH_DIR/.env.example" ]; then
     MESH_IFACE=$(grep '^MESH_IFACE=' "$NIGHTWATCH_DIR/.env.example" | cut -d= -f2 || echo "wlan1")
     AP_IFACE=$(grep '^AP_IFACE=' "$NIGHTWATCH_DIR/.env.example" | cut -d= -f2 || echo "wlan2")
+    NODE_MODE=$(grep '^NODE_MODE=' "$NIGHTWATCH_DIR/.env.example" | cut -d= -f2 || echo "mesh")
 fi
 
-# Check if mesh service is supposed to be running
-if ! systemctl is-active --quiet nightwatch-mesh 2>/dev/null; then
+# Only run if mesh service is enabled (not disabled by operator)
+if ! systemctl is-enabled --quiet nightwatch-mesh 2>/dev/null; then
     exit 0
 fi
 
@@ -49,12 +52,19 @@ clear_fails() { rm -f "$FAIL_COUNT_FILE" 2>/dev/null || true; }
 
 HEALTHY=true
 
+# If mesh is in "failed" or "inactive" state, treat as unhealthy immediately
+MESH_STATE=$(systemctl is-active nightwatch-mesh 2>/dev/null || echo "unknown")
+if [ "$MESH_STATE" = "failed" ] || [ "$MESH_STATE" = "inactive" ]; then
+    log "nightwatch-mesh is $MESH_STATE — triggering recovery"
+    HEALTHY=false
+fi
+
 # ---- Check 1: mesh interface exists and is in mesh mode ----
 
-if [ ! -d "/sys/class/net/$MESH_IFACE" ]; then
+if [ "$HEALTHY" = true ] && [ ! -d "/sys/class/net/$MESH_IFACE" ]; then
     log "$MESH_IFACE missing — dongle may have crashed"
     HEALTHY=false
-else
+elif [ "$HEALTHY" = true ]; then
     IFACE_TYPE=$(iw dev "$MESH_IFACE" info 2>/dev/null | grep -oP 'type \K\S+' || true)
     if [ "$IFACE_TYPE" != "mesh" ]; then
         log "$MESH_IFACE is '$IFACE_TYPE' (expected mesh)"
@@ -72,19 +82,19 @@ if [ "$HEALTHY" = true ]; then
     fi
 fi
 
-# ---- Check 3: hostapd is running ----
+# ---- Check 3: hostapd is running (skip in sound-bridge mode) ----
 
 HOSTAPD_PID="/var/run/hostapd-nightwatch.pid"
-if [ "$HEALTHY" = true ]; then
+if [ "$HEALTHY" = true ] && [ "$NODE_MODE" != "sound-bridge" ]; then
     if [ ! -f "$HOSTAPD_PID" ] || ! kill -0 "$(cat "$HOSTAPD_PID" 2>/dev/null)" 2>/dev/null; then
         log "hostapd not running"
         HEALTHY=false
     fi
 fi
 
-# ---- Check 4: AP interface exists ----
+# ---- Check 4: AP interface exists (skip in sound-bridge mode) ----
 
-if [ "$HEALTHY" = true ] && [ ! -d "/sys/class/net/$AP_IFACE" ]; then
+if [ "$HEALTHY" = true ] && [ "$NODE_MODE" != "sound-bridge" ] && [ ! -d "/sys/class/net/$AP_IFACE" ]; then
     log "$AP_IFACE missing"
     HEALTHY=false
 fi

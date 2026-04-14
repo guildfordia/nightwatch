@@ -354,52 +354,58 @@ setup_sound_bridge() {
     # Sound-bridge mode: eth0 connects to a Mac Mini running nightwatch-sound.
     # eth0 is NOT added to the br0 bridge. Instead it gets its own subnet
     # (10.0.0.1/24) so the Pi can route traffic between mesh and Mac Mini.
-    echo "[+] Sound-bridge mode: configuring $AP_IFACE for Mac Mini (10.0.0.0/24)..."
+    # Note: uses eth0 explicitly (not $AP_IFACE) since AP_IFACE is wlan2 in
+    # the hostapd-based architecture, and the Mac Mini is always on ethernet.
+    local SOUND_IFACE="eth0"
+    echo "[+] Sound-bridge mode: configuring $SOUND_IFACE for Mac Mini (10.0.0.0/24)..."
 
-    # Create br0 with ONLY bat0 (no eth0)
+    # Create br0 with ONLY bat0 (no eth0, no wlan2)
     ip link set "$BR_IFACE" down 2>/dev/null || true
     ip link del "$BR_IFACE" 2>/dev/null || true
 
     ip addr flush dev "$BAT_IFACE" 2>/dev/null || true
-    ip addr flush dev "$AP_IFACE" 2>/dev/null || true
+    ip addr flush dev "$SOUND_IFACE" 2>/dev/null || true
 
     # Release any DHCP lease on eth0
     if command -v dhcpcd >/dev/null 2>&1; then
-        dhcpcd --release "$AP_IFACE" 2>/dev/null || true
+        dhcpcd --release "$SOUND_IFACE" 2>/dev/null || true
     fi
 
     # Remove eth0's default route (no internet on this link)
-    ip route del default dev "$AP_IFACE" 2>/dev/null || true
+    ip route del default dev "$SOUND_IFACE" 2>/dev/null || true
 
     # Tell NetworkManager to stop managing eth0
     if command -v nmcli >/dev/null 2>&1; then
-        ETH_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep "$AP_IFACE" | head -1 | cut -d: -f1)
+        ETH_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep "$SOUND_IFACE" | head -1 | cut -d: -f1 || true)
         if [ -n "$ETH_CON" ]; then
             nmcli con down "$ETH_CON" 2>/dev/null || true
         fi
-        nmcli dev set "$AP_IFACE" managed no 2>/dev/null || true
+        nmcli dev set "$SOUND_IFACE" managed no 2>/dev/null || true
     fi
 
     # Bridge: only bat0 (mesh traffic), no eth0
     ip link add name "$BR_IFACE" type bridge
     ip link set "$BAT_IFACE" master "$BR_IFACE"
+
+    # Pin br0's MAC to bat0's so it stays unique across nodes
+    BRIDGE_MAC=$(cat /sys/class/net/"$BAT_IFACE"/address 2>/dev/null)
+    if [ -n "$BRIDGE_MAC" ]; then
+        ip link set "$BR_IFACE" address "$BRIDGE_MAC"
+    fi
+
     ip link set "$BR_IFACE" up
     ip addr add "$MESH_IP" dev "$BR_IFACE"
 
     echo "[+] Bridge $BR_IFACE up with IP ${MESH_IP%/*} (bat0 only, no eth0)"
 
     # eth0: static IP on a separate subnet for the Mac Mini
-    ip link set "$AP_IFACE" up
-    ip addr add 10.0.0.1/24 dev "$AP_IFACE"
+    ip link set "$SOUND_IFACE" up
+    ip addr add 10.0.0.1/24 dev "$SOUND_IFACE"
 
-    echo "[+] $AP_IFACE configured: 10.0.0.1/24 (Mac Mini subnet)"
+    echo "[+] $SOUND_IFACE configured: 10.0.0.1/24 (Mac Mini subnet)"
 
     # Enable IP forwarding so Mac Mini (10.0.0.x) can reach the mesh (192.168.199.x)
     sysctl -w net.ipv4.ip_forward=1 > /dev/null
-
-    # Route between subnets (no NAT needed — both sides are private)
-    # Mesh nodes can reach 10.0.0.x via this node's mesh IP
-    # Mac Mini can reach 192.168.199.x via 10.0.0.1 (this node)
     echo "[+] IP forwarding enabled (mesh <-> Mac Mini routing)"
 }
 
@@ -631,10 +637,12 @@ case "$1" in
         setup_mesh_interface
         setup_batman
 
-        # Wait for AP dongle (wlan2)
+        # Wait for AP dongle (wlan2) — skip in sound-bridge mode (no AP needed)
         AP_AVAILABLE=false
-        if wait_for_ap_interface "$AP_IFACE"; then
-            AP_AVAILABLE=true
+        if [ "$NODE_MODE" != "sound-bridge" ]; then
+            if wait_for_ap_interface "$AP_IFACE"; then
+                AP_AVAILABLE=true
+            fi
         fi
 
         if [ "$NODE_MODE" = "sound-bridge" ]; then
