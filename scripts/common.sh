@@ -127,8 +127,10 @@ generate_dnsmasq_conf() {
 # Auto-generated — do not edit manually
 
 # Only listen on the mesh bridge
+# bind-dynamic adapts to interface changes (e.g., hostapd adding wlan2 to br0
+# after dnsmasq starts). bind-interfaces creates a stale socket in this case.
 interface=br0
-bind-interfaces
+bind-dynamic
 
 # DHCP range for WiFi clients (each node gets 5 addresses to avoid conflicts)
 # Batman-adv bridges all routers, so DHCP broadcasts reach every node's dnsmasq.
