@@ -694,6 +694,10 @@ case "$1" in
         echo "  WiFi AP: UNAVAILABLE ($AP_IFACE not found)"
         fi
         echo "====================================="
+
+        # Restart LED service so it picks up the new healthy state
+        # (prevents stale fast-blink from a prior failed boot)
+        systemctl restart nightwatch-led 2>/dev/null || true
         ;;
 
     stop)
