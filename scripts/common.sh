@@ -204,20 +204,20 @@ bssid=$bssid
 # FT-PSK enables fast roaming; WPA-PSK is fallback for older clients.
 wpa=2
 wpa_passphrase=$password
-wpa_key_mgmt=FT-PSK WPA-PSK
+# WPA-PSK only by default. FT-PSK (802.11r) enables fast roaming but some
+# Samsung phones reject it. Uncomment the line below to enable 802.11r:
+# wpa_key_mgmt=FT-PSK WPA-PSK
+wpa_key_mgmt=WPA-PSK
 wpa_pairwise=CCMP
 rsn_pairwise=CCMP
 
 # 802.11r Fast Transition (seamless roaming between mesh nodes)
-# mobility_domain: "NW" in hex — must be identical on all nodes
-# ft_psk_generate_local: each node generates FT keys from the PSK independently,
-#   no inter-node key exchange needed (critical for dynamic mesh)
-# ft_over_ds=0: over-the-air only (over-DS needs direct AP-to-AP comms)
-mobility_domain=4e57
-nas_identifier=nightwatch
-ft_over_ds=0
-ft_psk_generate_local=1
-pmk_r1_push=0
+# Uncomment these if wpa_key_mgmt includes FT-PSK above:
+# mobility_domain=4e57
+# nas_identifier=nightwatch
+# ft_over_ds=0
+# ft_psk_generate_local=1
+# pmk_r1_push=0
 
 # 802.11n capabilities
 wmm_enabled=1
