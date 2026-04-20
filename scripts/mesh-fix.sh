@@ -432,8 +432,12 @@ start_dnsmasq() {
         rm -f "$DNSMASQ_PID"
     fi
 
-    # Also stop the system dnsmasq to avoid port conflicts
+    # Kill ALL dnsmasq instances — with bind-dynamic, multiple instances can
+    # share the same port (SO_REUSEADDR), causing DHCP to silently fail.
+    # The PID file check above only kills one; this catches any stragglers.
+    killall -9 dnsmasq 2>/dev/null || true
     systemctl stop dnsmasq 2>/dev/null || true
+    sleep 1
 
     # Always regenerate dnsmasq config on start so .env changes take effect.
     # Previously only generated if missing — stale configs caused DHCP to break
