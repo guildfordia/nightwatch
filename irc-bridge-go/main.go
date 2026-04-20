@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -175,7 +174,7 @@ const (
 	listenAddr       = ":3000"
 	maxConnsPerIP    = 5
 	wsReadLimit      = 4096
-	clientSendBuffer = 256 // buffered channel size for WebSocket messages
+	clientSendBuffer = 512 // buffered channel size for WebSocket messages (larger for slow mesh links)
 	wsPongWait       = 5 * time.Minute   // mobile browsers may background for minutes
 	wsPingPeriod     = 4 * time.Minute   // must be < pongWait
 	wsWriteWait      = 10 * time.Second
@@ -718,22 +717,48 @@ var (
 
 const healthCacheTTL = 5 * time.Second
 
+// findLED returns the sysfs path for the onboard activity LED.
+func findLED() string {
+	for _, name := range []string{"ACT", "led0", "act"} {
+		path := "/sys/class/leds/" + name
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	return ""
+}
+
 func handleBlink(w http.ResponseWriter, r *http.Request) {
-	// Blink the onboard LED for 10 seconds to identify this Pi
+	led := findLED()
+	if led == "" {
+		http.Error(w, "no LED found", http.StatusNotFound)
+		return
+	}
+	// Blink the onboard LED for 10 seconds to identify this Pi.
+	// Uses direct sysfs writes (no shell) to avoid injection risks.
 	go func() {
-		cmd := exec.Command("sh", "-c", `
-			LED=/sys/class/leds/ACT
-			[ -d "$LED" ] || LED=/sys/class/leds/led0
-			[ -d "$LED" ] || exit 1
-			ORIG=$(cat "$LED/trigger" | grep -oP '\[\K[^\]]+')
-			echo none > "$LED/trigger"
-			for i in $(seq 1 20); do
-				echo 1 > "$LED/brightness"; sleep 0.25
-				echo 0 > "$LED/brightness"; sleep 0.25
-			done
-			echo "$ORIG" > "$LED/trigger"
-		`)
-		cmd.Run()
+		triggerPath := led + "/trigger"
+		brightPath := led + "/brightness"
+		// Save original trigger
+		orig, _ := os.ReadFile(triggerPath)
+		origTrigger := "mmc0" // safe default
+		// Parse "[current]" from trigger file
+		s := string(orig)
+		if start := strings.Index(s, "["); start >= 0 {
+			if end := strings.Index(s[start:], "]"); end >= 0 {
+				origTrigger = s[start+1 : start+end]
+			}
+		}
+		// Disable trigger, blink manually
+		os.WriteFile(triggerPath, []byte("none"), 0644)
+		for i := 0; i < 20; i++ {
+			os.WriteFile(brightPath, []byte("1"), 0644)
+			time.Sleep(250 * time.Millisecond)
+			os.WriteFile(brightPath, []byte("0"), 0644)
+			time.Sleep(250 * time.Millisecond)
+		}
+		// Restore original trigger
+		os.WriteFile(triggerPath, []byte(origTrigger), 0644)
 	}()
 	w.Header().Set("Content-Type", "text/plain")
 	fmt.Fprint(w, "ok")

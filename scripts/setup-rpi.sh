@@ -251,6 +251,9 @@ echo "[4b/10] Configuring network routing..."
 
 configure_network
 
+# Persistent WiFi dongle names (prevent wlan1/wlan2 swap after driver reload)
+setup_persistent_wifi_names
+
 # ---- Step 5: Register project path ----
 
 echo ""
