@@ -12,6 +12,8 @@
 #   source "$SCRIPT_DIR/common.sh"
 
 # Maximum number of nodes in the mesh (IPs .101-.120)
+# Note: DHCP pools (.201-.254) only fit 11 nodes (5 IPs each).
+# Nodes 12-20 work for mesh/IRC but can't serve DHCP to WiFi clients.
 MAX_NODES=20
 
 # load_env <path> — loads .env file with allexport, exits on missing file
@@ -168,6 +170,11 @@ generate_hostapd_conf() {
     local conf_path="$1"
     local ap_iface="$2"
     local br_iface="$3"
+    # Validate password length (WPA2-PSK requires 8-63 characters)
+    if [ ${#5} -lt 8 ] || [ ${#5} -gt 63 ]; then
+        echo "generate_hostapd_conf: WiFi password must be 8-63 characters (got ${#5})" >&2
+        return 1
+    fi
     local ssid="$4"
     local password="$5"
     local channel="${6:-6}"

@@ -41,6 +41,11 @@ if [ -z "$MESH_IP" ]; then
     exit 1
 fi
 
+if [ -z "${PI_NUMBER:-}" ]; then
+    echo "[-] Error: PI_NUMBER not set in $ENV_FILE"
+    exit 1
+fi
+
 # Validate MESH_IP is a valid IPv4 address (strip CIDR suffix for check)
 MESH_IP_CHECK="${MESH_IP%/*}"
 if [[ ! "$MESH_IP_CHECK" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -528,9 +533,21 @@ start_hostapd() {
     hostapd -B -P "$HOSTAPD_PID" "$HOSTAPD_CONF"
     sleep 2
 
-    # Verify hostapd started
+    # Verify hostapd started and added AP_IFACE to bridge
     if [ -f "$HOSTAPD_PID" ] && kill -0 "$(cat "$HOSTAPD_PID")" 2>/dev/null; then
         echo "[+] hostapd running — AP broadcasting '$WIFI_SSID' (BSSID $AP_BSSID, ch $AP_CHANNEL)"
+        # Wait for hostapd to add AP_IFACE to br0 (bridge= directive)
+        # dnsmasq must not start until the bridge has all its ports
+        for _brwait in $(seq 1 10); do
+            if [ -d "/sys/class/net/$BR_IFACE/brif/$AP_IFACE" ]; then
+                echo "[+] $AP_IFACE joined $BR_IFACE"
+                break
+            fi
+            sleep 1
+        done
+        if [ ! -d "/sys/class/net/$BR_IFACE/brif/$AP_IFACE" ]; then
+            echo "[!] Warning: $AP_IFACE did not join $BR_IFACE — DHCP may not reach WiFi clients"
+        fi
     else
         echo "[!] hostapd failed to start — check $HOSTAPD_CONF"
         echo "[!] WiFi AP is unavailable; mesh network still operational"

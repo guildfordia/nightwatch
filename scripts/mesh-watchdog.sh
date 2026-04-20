@@ -116,6 +116,12 @@ if [ "$FAILS" -le 2 ]; then
     # Level 1: Restart mesh service
     log "Recovery attempt $FAILS/6: restarting mesh service"
     systemctl restart nightwatch-mesh 2>/dev/null || true
+    # Give mesh time to start, then check if it recovered
+    sleep 10
+    if systemctl is-active --quiet nightwatch-mesh 2>/dev/null; then
+        log "Recovery succeeded after mesh restart"
+        clear_fails
+    fi
 
 elif [ "$FAILS" -le 4 ]; then
     # Level 2: USB reset for AR9271 dongles + restart mesh
@@ -132,6 +138,12 @@ elif [ "$FAILS" -le 4 ]; then
     done
     sleep 5
     systemctl restart nightwatch-mesh 2>/dev/null || true
+    # Give mesh time to start, then check if it recovered
+    sleep 10
+    if systemctl is-active --quiet nightwatch-mesh 2>/dev/null; then
+        log "Recovery succeeded after USB reset"
+        clear_fails
+    fi
 
 elif [ "$FAILS" -le 6 ]; then
     # Level 3: Reboot (fixes interface swaps after driver reload)

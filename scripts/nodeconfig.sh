@@ -445,7 +445,7 @@ if [ "$CURRENT_HOSTNAME" != "$NEW_HOSTNAME" ]; then
 fi
 
 # ---- Ensure eth0 doesn't steal the default route from wlan0 ----
-# eth0 connects to the GL.iNet router (local AP, no internet). If DHCP on eth0
+# wlan2 is the hostapd WiFi AP interface. eth0 is unused in mesh mode.
 # sets a default route, it shadows wlan0 (which has actual internet) and breaks
 # package installs during firstboot. Fix this early, before anything needs internet.
 AP_IFACE="${AP_IFACE:-eth0}"

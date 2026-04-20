@@ -109,7 +109,7 @@ done
 if [ "$NODE_MODE" = "mesh" ]; then
     echo ""
     echo -e "  ${BOLD}Node mode:${NC}"
-    echo "    1) mesh          (default — eth0 bridged to router)"
+    echo "    1) mesh          (default — hostapd AP on wlan2)"
     echo "    2) gateway       (internet sharing via wlan0)"
     echo "    3) sound-bridge  (eth0 to Mac Mini for nightwatch-sound)"
     read -rp "  Choose mode [1]: " mode_choice
@@ -410,7 +410,7 @@ echo "  Mode:     $NODE_MODE"
 if [ "$NODE_MODE" = "sound-bridge" ]; then
 echo "  Bridge:   br0 (bat0 only) + eth0 → Mac Mini (10.0.0.1/24)"
 else
-echo "  Bridge:   br0 (bat0 + eth0 → GL.iNet router)"
+echo "  Bridge:   br0 (bat0 + wlan2 → hostapd AP)"
 fi
 echo ""
 echo -e "  ${BOLD}Next steps:${NC}"
