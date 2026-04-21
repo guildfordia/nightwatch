@@ -76,8 +76,9 @@ Escalating recovery (after consecutive failures):
 
 - **802.11s + batman-adv** — real multi-hop mesh routing (not just single-hop ad-hoc)
 - **hostapd WiFi AP** — Pi acts as its own AP via second USB dongle (no external router needed)
-- **Shared BSSID across nodes** — all APs broadcast the same MAC, clients roam at Layer 2
-- **802.11r Fast Transition** (optional) — sub-second roaming for compatible clients
+- **Unique BSSID per node, same SSID** — phone sees multiple "Nightwatch" APs and switches to the strongest
+- **802.11v BSS Transition Management** — AP can steer clients to a better node
+- **802.11r Fast Transition** (optional, disabled by default) — sub-second roaming for compatible clients (Samsung rejects it)
 - **Dynamic node assignment** — flash and boot, no configuration needed
 - **SAE encryption** — optional WPA3-level security on mesh links
 - **Automatic peer discovery** — UDP broadcast, no manual config
@@ -90,7 +91,7 @@ Escalating recovery (after consecutive failures):
 - **DoT interception** — port 853 redirected to local DNS
 - **dnsmasq DHCP** — Pi serves DHCP to WiFi clients on br0
 - **Terminal-style web UI** — clean, fast, works on any device
-- **In-chat `/blink` command** — blink the Pi's LED to identify which node you're connected to
+- **In-chat `/blink` command** — blink LEDs on all mesh nodes to identify which Pi is near you
 - **Persistent nicknames** — saved in localStorage, reclaimed on reconnect
 - **Integration test suite** — `make test` verifies mesh, services, and cross-node IRC
 - **Golden image cloning** — set up one Pi, clone to all others
@@ -239,7 +240,7 @@ FREQ=2412
 # ── WiFi AP (hostapd on wlan2) ──
 AP_IFACE=wlan2
 AP_CHANNEL=6
-AP_BSSID=02:00:4E:57:00:01    # Shared across all nodes for seamless roaming
+AP_BSSID=02:00:4E:57:00:01    # Currently unused (unique BSSIDs per node by default)
 WIFI_SSID=Nightwatch
 WIFI_PASSWORD=Nightwatch
 
@@ -290,7 +291,7 @@ make info         # Print detailed node information
 | Command | Action |
 |---------|--------|
 | `/nick <name>` | Change your nickname (saved in localStorage, persists across reconnects) |
-| `/blink` | Blink the LED on the Pi you're currently connected to (10 seconds) |
+| `/blink` | Blink LEDs on all mesh nodes (10 seconds) — see which Pi is near you |
 | `/nodes` | Show mesh network map |
 | `/debug` | Show full node diagnostics |
 | `/help` | List commands |
@@ -300,8 +301,8 @@ make info         # Print detailed node information
 1. **802.11s** creates wireless links between neighboring nodes (wlan1, USB dongle #1)
 2. **batman-adv** (kernel module) builds a Layer 2 mesh on top — handles multi-hop routing, topology discovery, and self-healing
 3. **br0** (Linux bridge) joins bat0 + wlan2; bat0 is added manually, wlan2 is added by hostapd via its `bridge=br0` directive
-4. **br0's MAC is pinned to bat0's MAC** so it stays unique per node (without this, batman-adv's DAT gets confused by the shared hostapd BSSID)
-5. **hostapd** on wlan2 broadcasts "Nightwatch" with the shared BSSID `02:00:4E:57:00:01`
+4. **br0's MAC is pinned to bat0's MAC** so each node's bridge has a unique MAC (required for batman-adv DAT to route correctly)
+5. **hostapd** on wlan2 broadcasts "Nightwatch" with the dongle's own BSSID (unique per node, same SSID)
 6. **dnsmasq** on the Pi serves DHCP + captive portal DNS to clients on br0
 7. **Native services** (ngircd, irc-bridge, nginx) bind to br0's IP, reachable from any client
 8. **Node discovery** broadcasts on bat0, auto-configures ngircd federation
@@ -419,7 +420,7 @@ The bridge now sends `QUIT` to the IRC server on WebSocket disconnect, releasing
 
 ### Both my Pis broadcast "Nightwatch" — does my phone roam between them?
 
-With shared BSSID enabled, both APs look like the same AP. The phone's WiFi stack treats it as a single network and roams transparently when the signal weakens. For 802.11r Fast Transition (sub-second handoff), enable FT-PSK in `hostapd.conf` — but some Samsung phones reject FT-PSK, so it's disabled by default.
+Each node uses its own BSSID (unique MAC) but the same SSID "Nightwatch." When nodes are close enough for overlapping AP coverage (~15-20m), the phone stays connected seamlessly — no roaming needed because one AP covers the whole area while the mesh syncs messages. When nodes are further apart, the phone disconnects briefly (~5s) and reconnects to the stronger AP automatically. 802.11v BSS Transition Management can also steer the phone to a better node. 802.11r Fast Transition is available in the config but disabled by default (some Samsung phones reject FT-PSK).
 
 ## Security
 
@@ -430,19 +431,26 @@ With shared BSSID enabled, both APs look like the same AP. The phone's WiFi stac
 - **Generated configs**: `ngircd.conf`, `hostapd.conf`, `dnsmasq.conf` are regenerated at runtime (no secrets in git)
 - **Local-only traffic**: All mesh traffic stays on the mesh, never touches internet
 
-## Recent Changes (this branch)
+## Recent Changes
 
-- **Replaced GL.iNet router with hostapd** on a second USB WiFi dongle — full control over BSSID, no external hardware needed
-- **Shared BSSID across all nodes** for transparent Layer-2 roaming
-- **802.11r support** in hostapd.conf (FT-PSK, currently disabled by default for Samsung compatibility)
-- **Bridge MAC pinning** in `setup_client_bridge()` — fixes batman-adv DAT confusion with shared BSSID
+- **Replaced GL.iNet router with hostapd** on a second USB WiFi dongle — full control over AP, no external hardware needed
+- **Unique BSSID per node** with same SSID — phone sees multiple APs and switches to strongest
+- **802.11v BSS Transition Management** — tested and working for AP-initiated client steering
+- **802.11r support** in hostapd.conf (FT-PSK, disabled by default — Samsung rejects it)
+- **Bridge MAC pinning** in `setup_client_bridge()` — fixes batman-adv DAT routing with hostapd
 - **Auto-recovery watchdog** with escalating recovery (restart → USB reset → reboot)
+- **Manual LED control** — no kernel triggers, LED never gets stuck in stale state
 - **Sound-bridge mode** properly handles eth0/Mac Mini in the new architecture
 - **Captive portal** improvements: RFC 8908/8910 API, DHCP option 114, DoT interception
 - **Always regenerate** `dnsmasq.conf` and `hostapd.conf` on mesh service start (prevents stale configs)
+- **Targeted dnsmasq kill** — only kills Nightwatch's instance, not other system dnsmasq
 - **IRC bridge sends QUIT** on WebSocket disconnect for instant nick release
-- **`/blink` chat command** to identify which node you're connected to
-- **Captive portal `/api/captive`** endpoint for Android 11+ Captive Portal API
+- **Nick auto-reclaim** — if ghost session holds your nick, bridge retries every 10s until reclaimed
+- **Nick fallback** — gets `Antoine_` instead of `guest155` when original nick is taken
+- **`/blink` broadcasts to all nodes** — see which Pi is physically near you
+- **Message deduplication** — replay buffer doesn't show duplicates after roaming reconnect
+- **Faster WebSocket keepalive** (15s) — detects disconnects faster for nick release
+- **Persistent WiFi naming** — udev rules prevent wlan1/wlan2 swap after driver reload
 
 ## TODO
 
