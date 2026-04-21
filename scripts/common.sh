@@ -197,10 +197,9 @@ channel=$channel
 hw_mode=g
 ieee80211n=1
 
-# Each node uses its own BSSID (wlan2's real MAC). The phone sees multiple
-# "Nightwatch" APs and switches to the strongest one when signal drops.
-# Shared BSSID was tested but phones hold onto one AP until complete signal
-# loss instead of scanning for a stronger instance of the same BSSID.
+# Shared BSSID: all nodes look like one AP to the phone. The WiFi driver
+# handles the transition at Layer 1 — no disconnect/reconnect needed.
+# With unique BSSIDs, Samsung refuses to auto-connect to a different BSSID.
 # bssid=$bssid
 
 # WPA2-PSK + 802.11r Fast Transition
