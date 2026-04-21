@@ -127,10 +127,9 @@ generate_dnsmasq_conf() {
 # Auto-generated — do not edit manually
 
 # Only listen on the mesh bridge
-# bind-dynamic adapts to interface changes (e.g., hostapd adding wlan2 to br0
-# after dnsmasq starts). bind-interfaces creates a stale socket in this case.
+# Only listen on the mesh bridge
 interface=br0
-bind-dynamic
+bind-interfaces
 
 # DHCP range for WiFi clients (each node gets 5 addresses to avoid conflicts)
 # Batman-adv bridges all routers, so DHCP broadcasts reach every node's dnsmasq.
@@ -198,9 +197,11 @@ channel=$channel
 hw_mode=g
 ieee80211n=1
 
-# Force the same BSSID on every node (locally-administered MAC).
-# All nodes look like one AP — clients roam at Layer 2 without reconnecting.
-bssid=$bssid
+# Each node uses its own BSSID (wlan2's real MAC). The phone sees multiple
+# "Nightwatch" APs and switches to the strongest one when signal drops.
+# Shared BSSID was tested but phones hold onto one AP until complete signal
+# loss instead of scanning for a stronger instance of the same BSSID.
+# bssid=$bssid
 
 # WPA2-PSK + 802.11r Fast Transition
 # FT-PSK enables fast roaming; WPA-PSK is fallback for older clients.
