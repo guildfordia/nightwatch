@@ -51,6 +51,8 @@ led_heartbeat() {
 }
 
 led_fast_blink() {
+    # Reset trigger first to ensure clean state transition
+    led_set_trigger "none"
     led_set_trigger "timer"
     echo 100 > "$LED_PATH/delay_on" 2>/dev/null || true
     echo 100 > "$LED_PATH/delay_off" 2>/dev/null || true
@@ -58,7 +60,9 @@ led_fast_blink() {
 
 led_ready() {
     # Slow blink (2s on / 2s off) — visually distinct from heartbeat and fast blink.
-    # Solid LED was too easy to miss on Pi 5 (looked "off").
+    # Reset trigger first — switching directly from timer(100ms) to timer(2000ms)
+    # can fail silently on some kernels if the trigger is already "timer".
+    led_set_trigger "none"
     led_set_trigger "timer"
     echo 2000 > "$LED_PATH/delay_on" 2>/dev/null || true
     echo 2000 > "$LED_PATH/delay_off" 2>/dev/null || true

@@ -1,6 +1,6 @@
 [Unit]
 Description=Nightwatch LED Readiness Indicator
-After=nightwatch-app.service
+After=nightwatch-mesh.service
 Wants=nightwatch-mesh.service nightwatch-app.service
 
 [Service]
