@@ -770,6 +770,26 @@ func findLED() string {
 }
 
 func handleBlink(w http.ResponseWriter, r *http.Request) {
+	// Also forward blink to all mesh peers so the node with the phone on
+	// its local WiFi also blinks. Solves the roaming issue where /blink
+	// goes to the old node via mesh instead of the local WiFi node.
+	if r.URL.Query().Get("forward") != "1" {
+		go func() {
+			data, err := os.ReadFile("/run/nightwatch-peers")
+			if err != nil {
+				return
+			}
+			client := &http.Client{Timeout: 3 * time.Second}
+			for _, line := range strings.Split(string(data), "\n") {
+				parts := strings.Split(line, "|")
+				if len(parts) >= 2 {
+					peerIP := parts[1]
+					client.Get(fmt.Sprintf("http://%s:3000/blink?forward=1", peerIP))
+				}
+			}
+		}()
+	}
+
 	led := findLED()
 	if led == "" {
 		http.Error(w, "no LED found", http.StatusNotFound)

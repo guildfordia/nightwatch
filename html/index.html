@@ -573,7 +573,7 @@
 
         if (input === '/blink') {
           this.inputField.value = '';
-          this.addSystemMessage('Blinking LED on this node...');
+          this.addSystemMessage('Blinking LED on all mesh nodes...');
           fetch('/api/blink').then(r => {
             if (r.ok) this.addSystemMessage('LED blinking for 10 seconds');
             else this.addSystemMessage('Blink failed');
