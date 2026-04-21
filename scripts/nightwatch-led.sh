@@ -47,7 +47,16 @@ led_set_trigger() {
 }
 
 led_heartbeat() {
-    led_set_trigger "heartbeat"
+    # Manual heartbeat — no kernel trigger
+    led_set_trigger "none"
+}
+
+led_heartbeat_cycle() {
+    # Smooth fade-like pattern: short on, longer off (like breathing)
+    echo 1 > "$LED_PATH/brightness" 2>/dev/null || true
+    sleep 0.3
+    echo 0 > "$LED_PATH/brightness" 2>/dev/null || true
+    sleep 0.7
 }
 
 led_fast_blink() {
@@ -608,16 +617,19 @@ case "${1:-}" in
             esac
 
             # Blink manually instead of sleeping — no kernel triggers that get stuck.
-            # Each cycle is ~2s (ready) or ~2s of fast blinks (error), then re-check.
+            # Each cycle re-checks health after ~10s of blinking.
             case "$CURRENT_STATE" in
                 ready)
-                    for _blink in 1 2 3 4 5; do led_ready_cycle; done  # ~10s of slow blink
+                    for _blink in 1 2 3 4 5; do led_ready_cycle; done
                     ;;
                 error)
-                    for _blink in $(seq 1 50); do led_fast_blink_cycle; done  # ~10s of fast blink
+                    for _blink in $(seq 1 50); do led_fast_blink_cycle; done
+                    ;;
+                starting|"")
+                    for _blink in 1 2 3 4 5 6 7 8 9 10; do led_heartbeat_cycle; done
                     ;;
                 *)
-                    sleep 10  # heartbeat/other states still use kernel trigger
+                    sleep 10
                     ;;
             esac
         done
