@@ -432,10 +432,10 @@ start_dnsmasq() {
         rm -f "$DNSMASQ_PID"
     fi
 
-    # Kill ALL dnsmasq instances — with bind-dynamic, multiple instances can
-    # share the same port (SO_REUSEADDR), causing DHCP to silently fail.
-    # The PID file check above only kills one; this catches any stragglers.
-    killall -9 dnsmasq 2>/dev/null || true
+    # Kill any dnsmasq instances using our config — avoids duplicates that
+    # cause DHCP to silently fail. Uses pkill -f to match only Nightwatch's
+    # dnsmasq, not system dnsmasq or other services.
+    pkill -9 -f "dnsmasq --conf-file=$PROJECT_DIR" 2>/dev/null || true
     systemctl stop dnsmasq 2>/dev/null || true
     sleep 1
 

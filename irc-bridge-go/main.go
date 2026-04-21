@@ -300,6 +300,7 @@ type Client struct {
 	send   chan []byte
 	done   chan struct{} // signals all goroutines to stop
 	once   sync.Once     // ensures done is closed only once
+	mu     sync.Mutex    // protects nick (written by auto-reclaim goroutine)
 	id     string
 	ip     string
 	nick   string        // IRC nick assigned to this client
@@ -704,7 +705,9 @@ func handleWebSocket(hub *Hub, limiter *RateLimiter, cleanupWg *sync.WaitGroup, 
 						ircConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 						if _, err := ircConn.Write([]byte(fmt.Sprintf("NICK %s\r\n", desiredNick))); err == nil {
 							nickRegistry.ReleaseNick(nick)
+							client.mu.Lock()
 							client.nick = desiredNick
+							client.mu.Unlock()
 							log.Printf("[%s] Auto-reclaimed original nick: %s", clientID, desiredNick)
 						} else {
 							nickRegistry.ReleaseNick(desiredNick)
