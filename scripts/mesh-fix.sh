@@ -716,10 +716,8 @@ case "$1" in
         fi
         echo "====================================="
 
-        # Restart LED service in background so mesh-fix.sh doesn't block.
-        # Without the &, systemctl restart can hang and prevent the mesh
-        # service from transitioning to "active", blocking all dependent services.
-        (systemctl restart nightwatch-led 2>/dev/null || true) &
+        # LED service starts After=nightwatch-app.service, so it only checks
+        # health when everything is already up — no stale fast-blink on boot.
         ;;
 
     stop)
