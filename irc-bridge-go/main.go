@@ -625,9 +625,23 @@ func handleWebSocket(hub *Hub, limiter *RateLimiter, cleanupWg *sync.WaitGroup, 
 		if nickRegistry.ClaimNick(nick) {
 			log.Printf("[%s] Reclaimed nick: %s", clientID, nick)
 		} else {
-			// Nick is actively in use by someone else — assign a new one
-			log.Printf("[%s] Nick %s in use, assigning new nick", clientID, nick)
-			nick = nickRegistry.NextNick()
+			// Nick is taken (ghost session from roaming). Try with _ suffix
+			// before falling back to guest — preserves recognizable identity.
+			claimed := false
+			tryNick := nick
+			for i := 0; i < 3; i++ {
+				tryNick = tryNick + "_"
+				if len(tryNick) <= 12 && isValidIRCNick(tryNick) && nickRegistry.ClaimNick(tryNick) {
+					nick = tryNick
+					claimed = true
+					log.Printf("[%s] Nick %s taken, using %s", clientID, r.URL.Query().Get("nick"), nick)
+					break
+				}
+			}
+			if !claimed {
+				log.Printf("[%s] Nick %s and variants in use, assigning new nick", clientID, r.URL.Query().Get("nick"))
+				nick = nickRegistry.NextNick()
+			}
 		}
 	} else {
 		nick = nickRegistry.NextNick()
