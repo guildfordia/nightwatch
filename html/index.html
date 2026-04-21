@@ -347,6 +347,7 @@
         this.users = [];
         this.nickMap = {};
         this.pendingNickChange = null;
+        this.seenMessages = new Set(); // dedup replay messages after roaming reconnect
         this.userListVisible = window.innerWidth >= 1200;
         this.bannerRendered = false; // prevent re-render on resize
         this.reconnectDelay = 1000; // start at 1s, exponential backoff
@@ -781,6 +782,15 @@
       }
 
       addChatMessage(nick, text, isOwn) {
+        // Deduplicate replay messages after roaming reconnect
+        const msgKey = nick + ':' + text;
+        if (!isOwn && this.seenMessages.has(msgKey)) return null;
+        this.seenMessages.add(msgKey);
+        // Keep set bounded (last 500 messages)
+        if (this.seenMessages.size > 500) {
+          const first = this.seenMessages.values().next().value;
+          this.seenMessages.delete(first);
+        }
         const time = this.getTime();
         const nickClass = isOwn ? 'nick-self' : 'nick-other';
         const textClass = isOwn ? 'text-own' : 'text';
