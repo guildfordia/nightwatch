@@ -51,21 +51,31 @@ led_heartbeat() {
 }
 
 led_fast_blink() {
-    # Reset trigger first to ensure clean state transition
+    # Manual fast blink — no kernel triggers (they get stuck between state changes)
     led_set_trigger "none"
-    led_set_trigger "timer"
-    echo 100 > "$LED_PATH/delay_on" 2>/dev/null || true
-    echo 100 > "$LED_PATH/delay_off" 2>/dev/null || true
+    echo 1 > "$LED_PATH/brightness" 2>/dev/null || true
+}
+
+led_fast_blink_cycle() {
+    # One cycle of fast blink (call in loop instead of sleep 10)
+    echo 1 > "$LED_PATH/brightness" 2>/dev/null || true
+    sleep 0.1
+    echo 0 > "$LED_PATH/brightness" 2>/dev/null || true
+    sleep 0.1
 }
 
 led_ready() {
-    # Slow blink (2s on / 2s off) — visually distinct from heartbeat and fast blink.
-    # Reset trigger first — switching directly from timer(100ms) to timer(2000ms)
-    # can fail silently on some kernels if the trigger is already "timer".
+    # Manual slow blink — no kernel triggers
     led_set_trigger "none"
-    led_set_trigger "timer"
-    echo 2000 > "$LED_PATH/delay_on" 2>/dev/null || true
-    echo 2000 > "$LED_PATH/delay_off" 2>/dev/null || true
+    echo 1 > "$LED_PATH/brightness" 2>/dev/null || true
+}
+
+led_ready_cycle() {
+    # One cycle of slow blink (call in loop instead of sleep 10)
+    echo 1 > "$LED_PATH/brightness" 2>/dev/null || true
+    sleep 1
+    echo 0 > "$LED_PATH/brightness" 2>/dev/null || true
+    sleep 1
 }
 
 led_restore_default() {
@@ -597,7 +607,19 @@ case "${1:-}" in
                     ;;
             esac
 
-            sleep 10
+            # Blink manually instead of sleeping — no kernel triggers that get stuck.
+            # Each cycle is ~2s (ready) or ~2s of fast blinks (error), then re-check.
+            case "$CURRENT_STATE" in
+                ready)
+                    for _blink in 1 2 3 4 5; do led_ready_cycle; done  # ~10s of slow blink
+                    ;;
+                error)
+                    for _blink in $(seq 1 50); do led_fast_blink_cycle; done  # ~10s of fast blink
+                    ;;
+                *)
+                    sleep 10  # heartbeat/other states still use kernel trigger
+                    ;;
+            esac
         done
         ;;
 
