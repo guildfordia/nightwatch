@@ -446,12 +446,26 @@ With shared BSSID enabled, both APs look like the same AP. The phone's WiFi stac
 
 ## TODO
 
-- [ ] Improve captive portal compatibility with Samsung's HTTPS connectivity check (needs valid TLS cert or local-only solution)
-- [ ] Add udev rules for persistent wlan1/wlan2 naming (avoid swap after driver reload)
-- [ ] Support channel persistence — IRC history survives service restarts
-- [ ] Add mesh network map to web UI — show topology, latency, and node status
-- [ ] Add monitoring/alerting — detect and notify when nodes go offline
-- [ ] Test 802.11r in production deployment with non-Samsung devices
+### High Priority
+
+- [ ] **Fix Android captive portal** — Samsung Android 16 refuses to stay on Nightwatch when competing networks (cellular, home WiFi) exist. HTTPS connectivity check fails (self-signed cert). Investigate local ACME cert, custom connectivity check response, or Android-specific workarounds
+- [ ] **Fix 802.11r (FT-PSK) on Samsung** — Fast Transition would give sub-second roaming, but Samsung rejects the connection when FT-PSK is advertised. Test with `FT-SAE`, different hostapd settings, or different Samsung firmware versions
+- [ ] **Service node follows WiFi AP after roaming** — After 802.11v transition, the WebSocket stays on the original node via mesh (phone's ARP cache points to old node's MAC). Needs bridge-level solution (ebtables MAC rewrite, shared br0 MAC with BLA, or DHCP force-renew)
+
+### Medium Priority
+
+- [ ] **Migration script for existing nodes** — Nodes upgrading from the old GL.iNet router setup have stale `.env` values (e.g., `AP_IFACE=eth0`). Build a script that updates `.env` for the hostapd architecture
+- [ ] **802.11v automatic steering** — Build a daemon that monitors client signal strength and sends BSS Transition Management requests when a client would be better served by another node
+- [ ] **Test 3+ node chain** — Multi-hop mesh (A→B→C) is the real deployment model. Verify IRC federation, roaming, and message sync across a chain where no single node reaches every other node
+- [ ] **Test 802.11r with non-Samsung devices** — FT-PSK may work on iPhones, Pixels, and other Android phones. Test and document compatibility
+
+### Low Priority
+
+- [ ] **Improve `/blink` to identify local WiFi node** — Currently blinks all mesh nodes. Check hostapd association list to blink only the node the phone's WiFi is connected to
+- [ ] **Show current node in chat UI** — Display which node the user is connected to in the top bar (requires solving the ARP cache issue above)
+- [ ] **Channel persistence** — IRC message history doesn't survive service restarts. Add disk-backed logging and replay
+- [ ] **Web-based mesh map** — Visual topology showing connected nodes, signal strengths, latency, and user locations
+- [ ] **Reduce roaming disconnect time** — Currently ~5s with WPA-PSK re-authentication. Investigate WPA-PSK key caching (OKC/PMK caching) as an alternative to 802.11r
 
 ## Contributing
 
