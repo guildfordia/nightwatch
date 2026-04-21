@@ -690,6 +690,33 @@ func handleWebSocket(hub *Hub, limiter *RateLimiter, cleanupWg *sync.WaitGroup, 
 
 	hub.register <- client
 
+	// Auto-reclaim: if we got a _ suffix (ghost blocking original nick),
+	// keep trying to rename back to the original nick in the background.
+	desiredNick := r.URL.Query().Get("nick")
+	if desiredNick != "" && desiredNick != nick && isValidIRCNick(desiredNick) {
+		go func() {
+			for i := 0; i < 6; i++ {
+				select {
+				case <-client.done:
+					return
+				case <-time.After(10 * time.Second):
+					if nickRegistry.ClaimNick(desiredNick) {
+						ircConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+						if _, err := ircConn.Write([]byte(fmt.Sprintf("NICK %s\r\n", desiredNick))); err == nil {
+							nickRegistry.ReleaseNick(nick)
+							client.nick = desiredNick
+							log.Printf("[%s] Auto-reclaimed original nick: %s", clientID, desiredNick)
+						} else {
+							nickRegistry.ReleaseNick(desiredNick)
+						}
+						return
+					}
+				}
+			}
+			log.Printf("[%s] Could not reclaim %s after 60s", clientID, desiredNick)
+		}()
+	}
+
 	// Release rate limiter slot when client disconnects.
 	// cleanupCtx is cancelled on shutdown so cleanupWg.Wait() won't hang.
 	cleanupWg.Add(1)

@@ -470,12 +470,12 @@
           this.wsBuffer = ''; // reset partial-frame buffer on new connection
           this.reconnectDelay = 1000; // reset backoff on successful connect
           this.updateStatus('connected');
-          // Keepalive: send IRC PING every 45s to prevent idle disconnect
+          // Keepalive: send IRC PING every 15s — faster disconnect detection during roaming
           this.keepaliveInterval = setInterval(() => {
             if (this.ws && this.ws.readyState === WebSocket.OPEN) {
               this.ws.send('PING :keepalive\r\n');
             }
-          }, 45000);
+          }, 15000);
         };
         this.ws.onmessage = (event) => this.handleMessage(event.data);
         this.ws.onclose = (event) => {
@@ -563,9 +563,20 @@
           this.inputField.value = '';
           this.addSystemMessage('Commands:');
           this.addSystemMessage('  /nick <name>  - Change your nickname');
+          this.addSystemMessage('  /blink        - Blink the LED on your current node');
           this.addSystemMessage('  /nodes        - Show mesh network map');
           this.addSystemMessage('  /debug        - Show full node diagnostics');
           this.addSystemMessage('  /help         - Show this help');
+          return;
+        }
+
+        if (input === '/blink') {
+          this.inputField.value = '';
+          this.addSystemMessage('Blinking LED on this node...');
+          fetch('/api/blink').then(r => {
+            if (r.ok) this.addSystemMessage('LED blinking for 10 seconds');
+            else this.addSystemMessage('Blink failed');
+          }).catch(() => this.addSystemMessage('Blink failed'));
           return;
         }
 
