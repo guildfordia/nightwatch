@@ -462,12 +462,21 @@ install_systemd_services() {
 
     chmod +x "$project_dir"/scripts/*.sh 2>/dev/null || true
 
-    for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch-app nightwatch-bridge nightwatch-led nightwatch-debug; do
-        local src="$project_dir/scripts/${svc}.service"
-        if [ -f "$src" ]; then
-            sed "s|/opt/nightwatch|$project_dir|g" "$src" > "/etc/systemd/system/${svc}.service"
-        fi
+    # Copy every nightwatch-*.{service,timer} from scripts/ into /etc/systemd/system/.
+    # Globbing (vs. a hard-coded list) means new units added to scripts/ are
+    # picked up automatically — avoids the class of bug where a `systemctl enable`
+    # below references a unit that was never copied.
+    # nightwatch-firstboot.service is excluded: it's installed by nightwatch-stage.sh
+    # and is what's currently executing this code.
+    shopt -s nullglob
+    local src
+    for src in "$project_dir"/scripts/nightwatch-*.service "$project_dir"/scripts/nightwatch-*.timer; do
+        local name
+        name=$(basename "$src")
+        [ "$name" = "nightwatch-firstboot.service" ] && continue
+        sed "s|/opt/nightwatch|$project_dir|g" "$src" > "/etc/systemd/system/$name"
     done
+    shopt -u nullglob
 
     systemctl daemon-reload
 
