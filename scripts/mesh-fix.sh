@@ -276,13 +276,23 @@ WPAEOF
     else
         echo "[+] Joining open mesh '$MESH_ID' on $FREQ MHz..."
         iw dev "$MESH_IFACE" mesh join "$MESH_ID" freq "$FREQ"
-        # Disable HWMP forwarding — batman-adv handles routing
-        # (mesh_fwding sysfs may not exist immediately after join)
-        { echo 0 > /sys/class/net/"$MESH_IFACE"/mesh/mesh_fwding; } 2>/dev/null || true
     fi
 
     sleep 1
-    echo "[+] 802.11s mesh interface ready"
+
+    # Disable 802.11s HWMP forwarding so batman-adv can route unicast frames.
+    # Running HWMP and batman-adv together causes every unicast packet to be
+    # dropped while HWMP resolves a path — broadcasts/OGMs/ARP still flow, so
+    # the failure looks like "mesh layer sees everyone but pings die".
+    # Must use `iw set mesh_param` — the /sys/class/net/.../mesh/mesh_fwding
+    # sysfs path was removed in recent kernels.
+    iw dev "$MESH_IFACE" set mesh_param mesh_fwding 0
+
+    # Raise MTU so batman-adv doesn't have to fragment (batman adds ~28 bytes
+    # of header; at the default 1500 the extra bytes force L2 fragmentation).
+    ip link set "$MESH_IFACE" mtu 1532
+
+    echo "[+] 802.11s mesh interface ready (HWMP off, MTU 1532)"
 }
 
 setup_batman() {
