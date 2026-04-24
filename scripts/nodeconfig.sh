@@ -425,23 +425,61 @@ if [ "$CURRENT_HOSTNAME" != "$NEW_HOSTNAME" ]; then
     else
         log "Warning: hostname change to $NEW_HOSTNAME may not have taken effect (got: $ACTUAL_HOSTNAME)"
     fi
-    # Restart Avahi so the new hostname is advertised via mDNS (.local)
-    # A simple restart can leave stale hostname cached (e.g. after re-flash).
-    # Explicitly set host-name in avahi config to guarantee correctness.
-    if [ -f /etc/avahi/avahi-daemon.conf ]; then
-        if grep -q '^host-name=' /etc/avahi/avahi-daemon.conf 2>/dev/null; then
-            sed -i "s/^host-name=.*/host-name=$NEW_HOSTNAME/" /etc/avahi/avahi-daemon.conf
-        elif grep -q '^#host-name=' /etc/avahi/avahi-daemon.conf 2>/dev/null; then
-            sed -i "s/^#host-name=.*/host-name=$NEW_HOSTNAME/" /etc/avahi/avahi-daemon.conf
-        else
-            sed -i "/^\[server\]/a host-name=$NEW_HOSTNAME" /etc/avahi/avahi-daemon.conf
+fi
+
+# ---- Configure avahi (hostname + interface scoping) ----
+# Always apply, even when hostname is unchanged, so code updates to the
+# interface-scoping policy land on existing nodes without needing a
+# hostname change to trigger the update.
+#
+# Interface scoping prevents mDNS collisions that suppress A records:
+# each Pi has 4+ interfaces (wlan0 home LAN, wlan1 mesh, wlan2 AP, eth0,
+# bat0, br0) and avahi's default (publish on all) means one Pi announces
+# nightwatch-N from multiple MACs. Combined with batman-adv's L2 mDNS
+# reflection across the mesh, avahi's collision detector trips and
+# suppresses the A record — symptom: `_workstation._tcp` advertisement
+# still visible but `nightwatch-N.local` fails to resolve.
+#
+# Policy: publish only on client-facing LAN interfaces. Mesh-facing
+# interfaces (wlan1, bat0) and the bridge that carries mesh traffic (br0)
+# are excluded. AP clients use IP/fixed config, not mDNS, so they don't
+# need .local resolution.
+AVAHI_CONF=/etc/avahi/avahi-daemon.conf
+AVAHI_ALLOW_IFACES="wlan0,eth0"
+AVAHI_CHANGED=false
+if [ -f "$AVAHI_CONF" ]; then
+    # host-name
+    if grep -q '^host-name=' "$AVAHI_CONF" 2>/dev/null; then
+        if ! grep -qx "host-name=$NEW_HOSTNAME" "$AVAHI_CONF"; then
+            sed -i "s/^host-name=.*/host-name=$NEW_HOSTNAME/" "$AVAHI_CONF"
+            AVAHI_CHANGED=true
         fi
+    elif grep -q '^#host-name=' "$AVAHI_CONF" 2>/dev/null; then
+        sed -i "s/^#host-name=.*/host-name=$NEW_HOSTNAME/" "$AVAHI_CONF"
+        AVAHI_CHANGED=true
+    else
+        sed -i "/^\[server\]/a host-name=$NEW_HOSTNAME" "$AVAHI_CONF"
+        AVAHI_CHANGED=true
     fi
-    if systemctl is-active --quiet avahi-daemon 2>/dev/null; then
-        systemctl stop avahi-daemon 2>/dev/null || true
-        systemctl start avahi-daemon
-        log "Restarted avahi-daemon to advertise $NEW_HOSTNAME.local"
+    # allow-interfaces
+    if grep -q '^allow-interfaces=' "$AVAHI_CONF" 2>/dev/null; then
+        if ! grep -qx "allow-interfaces=$AVAHI_ALLOW_IFACES" "$AVAHI_CONF"; then
+            sed -i "s/^allow-interfaces=.*/allow-interfaces=$AVAHI_ALLOW_IFACES/" "$AVAHI_CONF"
+            AVAHI_CHANGED=true
+        fi
+    elif grep -q '^#allow-interfaces=' "$AVAHI_CONF" 2>/dev/null; then
+        sed -i "s|^#allow-interfaces=.*|allow-interfaces=$AVAHI_ALLOW_IFACES|" "$AVAHI_CONF"
+        AVAHI_CHANGED=true
+    else
+        sed -i "/^\[server\]/a allow-interfaces=$AVAHI_ALLOW_IFACES" "$AVAHI_CONF"
+        AVAHI_CHANGED=true
     fi
+fi
+
+if [ "$AVAHI_CHANGED" = true ] && systemctl is-active --quiet avahi-daemon 2>/dev/null; then
+    systemctl stop avahi-daemon 2>/dev/null || true
+    systemctl start avahi-daemon
+    log "Restarted avahi-daemon ($NEW_HOSTNAME.local on: $AVAHI_ALLOW_IFACES)"
 fi
 
 # ---- Ensure eth0 doesn't steal the default route from wlan0 ----
