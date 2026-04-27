@@ -209,6 +209,63 @@ collect_debug_info() {
         STATIONS_JSON+="]"
     fi
 
+    # ---- AP (clients connected to wlan2 via hostapd) ----
+    local AP_INTERFACE="" AP_CHANNEL="" AP_BUSY_PCT=null
+    local AP_STATIONS_JSON="[]"
+    local AP_STA_COUNT=0
+    local AP_EV_CONN=0 AP_EV_DISC=0 AP_EV_AUTH_FAIL=0
+    local AP_DHCP_LEASES=0
+    AP_INTERFACE=$(iw dev 2>/dev/null | awk '/Interface/{i=$2} /type AP/{print i; exit}')
+    if [ -n "$AP_INTERFACE" ]; then
+        AP_CHANNEL=$(iw dev "$AP_INTERFACE" info 2>/dev/null | awk '/channel/{print $2; exit}')
+        AP_STATIONS_JSON="["
+        local AP_FIRST=true
+        local AP_CUR_MAC="" AP_CUR_SIG="" AP_CUR_TX=0 AP_CUR_RX=0 AP_CUR_TIME=0 AP_CUR_INACT=0
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^Station ]]; then
+                if [ -n "$AP_CUR_MAC" ]; then
+                    if [ "$AP_FIRST" = true ]; then AP_FIRST=false; else AP_STATIONS_JSON+=","; fi
+                    AP_STATIONS_JSON+="{\"mac\":\"$AP_CUR_MAC\",\"signal_dbm\":\"$AP_CUR_SIG\",\"tx_bytes\":$AP_CUR_TX,\"rx_bytes\":$AP_CUR_RX,\"connected_seconds\":$AP_CUR_TIME,\"inactive_ms\":$AP_CUR_INACT}"
+                    AP_STA_COUNT=$((AP_STA_COUNT + 1))
+                fi
+                AP_CUR_MAC=$(echo "$line" | awk '{print $2}')
+                AP_CUR_SIG=""; AP_CUR_TX=0; AP_CUR_RX=0; AP_CUR_TIME=0; AP_CUR_INACT=0
+            elif [[ "$line" =~ signal: ]]; then
+                AP_CUR_SIG=$(echo "$line" | grep -oP 'signal:\s*\K[-0-9]+' || true)
+            elif [[ "$line" =~ "tx bytes:" ]]; then
+                AP_CUR_TX=$(echo "$line" | awk '{print $3}' | tr -dc '0-9'); : "${AP_CUR_TX:=0}"
+            elif [[ "$line" =~ "rx bytes:" ]]; then
+                AP_CUR_RX=$(echo "$line" | awk '{print $3}' | tr -dc '0-9'); : "${AP_CUR_RX:=0}"
+            elif [[ "$line" =~ "connected time:" ]]; then
+                AP_CUR_TIME=$(echo "$line" | awk '{print $3}' | tr -dc '0-9'); : "${AP_CUR_TIME:=0}"
+            elif [[ "$line" =~ "inactive time:" ]]; then
+                AP_CUR_INACT=$(echo "$line" | awk '{print $3}' | tr -dc '0-9'); : "${AP_CUR_INACT:=0}"
+            fi
+        done <<< "$(iw dev "$AP_INTERFACE" station dump 2>/dev/null || true)"
+        if [ -n "$AP_CUR_MAC" ]; then
+            if [ "$AP_FIRST" = true ]; then AP_FIRST=false; else AP_STATIONS_JSON+=","; fi
+            AP_STATIONS_JSON+="{\"mac\":\"$AP_CUR_MAC\",\"signal_dbm\":\"$AP_CUR_SIG\",\"tx_bytes\":$AP_CUR_TX,\"rx_bytes\":$AP_CUR_RX,\"connected_seconds\":$AP_CUR_TIME,\"inactive_ms\":$AP_CUR_INACT}"
+            AP_STA_COUNT=$((AP_STA_COUNT + 1))
+        fi
+        AP_STATIONS_JSON+="]"
+        AP_BUSY_PCT=$(iw dev "$AP_INTERFACE" survey dump 2>/dev/null | awk '
+            /\[in use\]/ {in_use=1; next}
+            in_use && /channel busy time:/ {busy=$4}
+            in_use && /channel active time:/ {active=$4}
+            END { if (active+0 > 0) printf "%.0f", (busy/active)*100; else print "null" }
+        ' || echo null)
+        : "${AP_BUSY_PCT:=null}"
+        local EV_LOG
+        EV_LOG=$(journalctl -u hostapd --since "60 sec ago" -q --no-pager 2>/dev/null || true)
+        AP_EV_CONN=$(printf '%s\n' "$EV_LOG" | grep -c "AP-STA-CONNECTED" || true)
+        AP_EV_DISC=$(printf '%s\n' "$EV_LOG" | grep -c "AP-STA-DISCONNECTED" || true)
+        AP_EV_AUTH_FAIL=$(printf '%s\n' "$EV_LOG" | grep -cE "auth_fail|deauthenticated due to.*reason 23" || true)
+    fi
+    if [ -f /var/lib/misc/dnsmasq.leases ]; then
+        AP_DHCP_LEASES=$(wc -l < /var/lib/misc/dnsmasq.leases 2>/dev/null || echo 0)
+        : "${AP_DHCP_LEASES:=0}"
+    fi
+
     # ---- Conflict check ----
     local CONFLICT=""
     if [ -f /run/nightwatch-conflict ]; then
@@ -263,6 +320,19 @@ collect_debug_info() {
     "status": "$BR_STATUS",
     "ip": "$BR_IP",
     "ports": "$BR_PORTS"
+  },
+  "ap": {
+    "interface": "$AP_INTERFACE",
+    "channel": "$AP_CHANNEL",
+    "station_count": $AP_STA_COUNT,
+    "stations": $AP_STATIONS_JSON,
+    "channel_busy_pct": $AP_BUSY_PCT,
+    "events_60s": {
+      "connected": $AP_EV_CONN,
+      "disconnected": $AP_EV_DISC,
+      "auth_fail": $AP_EV_AUTH_FAIL
+    },
+    "dhcp_leases": $AP_DHCP_LEASES
   },
   "discovery": {
     "peers": $PEERS_JSON
