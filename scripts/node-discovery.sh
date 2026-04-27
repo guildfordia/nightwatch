@@ -153,6 +153,17 @@ expire_peers() {
         if [ -f "${PEER_FILE}.changed" ]; then
             rm -f "${PEER_FILE}.changed"
             update_irc_config
+            # Send a gratuitous ARP for the anycast service IP so any client
+            # that had its ARP cache pointing at the now-expired peer's MAC
+            # immediately re-resolves .1 to a live node's MAC. Without this,
+            # clients can be ARP-stale for up to ~30s after a node disappears,
+            # making the seamless-roaming experience feel broken.
+            # Best-effort: arping may not be installed on every node, and we
+            # don't want a missing tool to break peer expiry. -U = unsolicited
+            # (gratuitous), -c 3 = three sends to overcome packet loss.
+            if command -v arping >/dev/null 2>&1; then
+                arping -U -I br0 -c 3 192.168.199.1 >/dev/null 2>&1 &
+            fi
         fi
     done
 }
