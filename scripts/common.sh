@@ -126,16 +126,30 @@ bind-interfaces
 # DHCP range for WiFi clients (each node gets 5 addresses to avoid conflicts)
 # Batman-adv bridges all routers, so DHCP broadcasts reach every node's dnsmasq.
 # Non-overlapping ranges prevent duplicate leases: 20 nodes × 5 = .201-.240+
-dhcp-range=192.168.199.${dhcp_start},192.168.199.${dhcp_end},255.255.255.0,1h
+# Lease is short (5m) so a phone that roamed away from a dead node renews fast
+# and doesn't hold a stale gateway/DNS reference. Anycast .1 (below) means the
+# gateway/DNS values stay valid across roams — short lease covers IP-range edge
+# cases (phone keeps a lease from node X but is now associated to node Y; on
+# renewal, node Y's dnsmasq NAKs the wrong-range IP and reissues from its own).
+dhcp-range=192.168.199.${dhcp_start},192.168.199.${dhcp_end},255.255.255.0,5m
 
-# Tell clients to use this node as gateway and DNS
-dhcp-option=3,${mesh_ip}
-dhcp-option=6,${mesh_ip}
+# Anycast service IP — every node also holds 192.168.199.1/24 on br0 (set up
+# in mesh-fix.sh). Gateway, DNS, and captive portal API all point at .1 so the
+# phone's DHCP-issued config survives a roam: the underlying node may change,
+# but .1 is always answered by *some* live node on the bridge.
+dhcp-option=3,192.168.199.1
+dhcp-option=6,192.168.199.1
 
-# Redirect ALL DNS to this node (captive portal)
-# Every domain resolves to the local Pi — phone detects "no internet" and
-# opens captive portal popup, which shows the Nightwatch chat page.
-address=/#/${mesh_ip}
+# RFC 8910 Captive Portal API — tells Android 11+ and modern devices where to
+# find the captive portal API (RFC 8908 JSON endpoint). Triggers "Sign in to
+# network" on the phone instead of "no internet".
+dhcp-option=114,http://192.168.199.1/api/captive
+
+# Redirect ALL DNS to the anycast IP (captive portal)
+# Every domain resolves to .1 — phone hits the chat page no matter which AP
+# it's currently associated to, and reconnects after a roam land at the
+# current AP rather than the original (possibly dead) one.
+address=/#/192.168.199.1
 
 # Don't read /etc/resolv.conf (we handle all DNS ourselves)
 no-resolv

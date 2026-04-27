@@ -294,7 +294,14 @@ setup_client_bridge() {
     ip link set "$BR_IFACE" up
     ip addr add "$MESH_IP" dev "$BR_IFACE"
 
-    echo "[+] Bridge $BR_IFACE is up with IP ${MESH_IP%/*}"
+    # Anycast service IP: every node holds 192.168.199.1 as a secondary IP on
+    # br0. DHCP hands this out as gateway+DNS instead of the per-node mesh IP,
+    # so when a phone roams (or a node dies), it keeps talking to the same
+    # logical IP and lands on whichever node is currently the L2 next-hop.
+    # Reduces dependency on a specific node's liveness for IP-layer service.
+    ip addr add 192.168.199.1/24 dev "$BR_IFACE" 2>/dev/null || true
+
+    echo "[+] Bridge $BR_IFACE is up with IP ${MESH_IP%/*} (+ anycast .1)"
     echo "[+] Ports: $BAT_IFACE (mesh) + $AP_IFACE (router)"
 }
 
