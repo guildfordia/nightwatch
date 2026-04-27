@@ -1,0 +1,22 @@
+[Unit]
+Description=Nightwatch Roamer — fleet-wide 802.11v BSS Transition steering
+After=network-online.target nightwatch-mesh.service
+Wants=nightwatch-mesh.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/opt/nightwatch/.env
+# Default to dry-run on first deploy. Flip to false in /opt/nightwatch/.env
+# (NIGHTWATCH_ROAMER_DRYRUN=false) once you've verified the daemon's
+# decisions look sensible in journalctl -u nightwatch-roamer.
+Environment=NIGHTWATCH_ROAMER_DRYRUN=true
+ExecStart=/usr/bin/python3 /opt/nightwatch/scripts/nightwatch-roamer.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+# hostapd_cli needs root for the control socket
+User=root
+
+[Install]
+WantedBy=multi-user.target
