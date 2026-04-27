@@ -35,6 +35,13 @@ BR_IFACE="${BR_IFACE:-br0}"
 MESH_ID="${MESH_ID:-nightwatch}"
 FREQ="${FREQ:-2412}"
 MESH_SAE_PASSWORD="${MESH_SAE_PASSWORD:-}"
+# Encryption-by-default. If MESH_SAE_PASSWORD is empty, refuse to start
+# unless MESH_OPEN_OK=true is explicitly set. This forces a deliberate
+# choice rather than silently shipping unencrypted mesh links (which
+# leak everything: IRC chat, debug.json content, beacon broadcasts).
+# For art deployments where openness is part of the work, set
+# MESH_OPEN_OK=true in .env.
+MESH_OPEN_OK="${MESH_OPEN_OK:-false}"
 
 if [ -z "$MESH_IP" ]; then
     echo "[-] Error: MESH_IP not set in $ENV_FILE"
@@ -44,6 +51,29 @@ fi
 if [ -z "${PI_NUMBER:-}" ]; then
     echo "[-] Error: PI_NUMBER not set in $ENV_FILE"
     exit 1
+fi
+
+if [ -z "$MESH_SAE_PASSWORD" ] && [ "$MESH_OPEN_OK" != "true" ]; then
+    cat >&2 << 'SAEERR'
+[-] Error: MESH_SAE_PASSWORD is empty and MESH_OPEN_OK is not "true".
+
+Open meshes leak all traffic to anyone within radio range — IRC chat,
+debug.json, peer beacons. To proceed:
+
+  Option 1 (recommended): set a strong shared password in .env on EVERY node:
+    MESH_SAE_PASSWORD=$(openssl rand -base64 24)
+    # …same value across all 6 nodes; rotate per deployment
+
+  Option 2 (explicit opt-in to openness):
+    MESH_OPEN_OK=true
+
+If this is an art-piece where openness is intentional, choose Option 2
+and document the choice in your deployment notes.
+SAEERR
+    exit 1
+fi
+if [ -z "$MESH_SAE_PASSWORD" ]; then
+    echo "[!] WARNING: open mesh (MESH_OPEN_OK=true). All mesh traffic is unencrypted."
 fi
 
 # Validate MESH_IP is a valid IPv4 address (strip CIDR suffix for check)
