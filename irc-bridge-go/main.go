@@ -196,16 +196,64 @@ var ircDialTimeout = func() time.Duration {
 
 // --- Message replay buffer ---
 // Stores recent PRIVMSG lines so reconnecting clients don't miss messages.
+// Optionally persists to disk so history survives bridge restarts (set
+// REPLAY_LOG_PATH=/var/lib/nightwatch/replay.log to enable). When the
+// log file grows beyond replayLogMaxLines the file is rewritten with
+// the most-recent half kept (keeps disk usage bounded without losing
+// the active conversation tail).
+
+const (
+	replayLogMaxLines = 1000
+)
 
 type ReplayBuffer struct {
-	mu   sync.Mutex
-	msgs []string
-	idx  int
-	full bool
+	mu      sync.Mutex
+	msgs    []string
+	idx     int
+	full    bool
+	logFile *os.File // nil if persistence disabled
+	logPath string
+	added   int // counter for periodic truncation check
 }
 
 func NewReplayBuffer(size int) *ReplayBuffer {
 	return &ReplayBuffer{msgs: make([]string, size)}
+}
+
+// LoadFromFile opens path for append + reads the last `size` lines into the
+// ring buffer so the in-memory replay survives across restarts. Errors are
+// logged but don't fail the bridge — persistence is best-effort.
+func (rb *ReplayBuffer) LoadFromFile(path string) {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	rb.logPath = path
+	if data, err := os.ReadFile(path); err == nil {
+		lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+		// Take the last len(rb.msgs) lines
+		start := 0
+		if len(lines) > len(rb.msgs) {
+			start = len(lines) - len(rb.msgs)
+		}
+		for i, line := range lines[start:] {
+			if i >= len(rb.msgs) || line == "" {
+				continue
+			}
+			rb.msgs[i] = line
+			rb.idx = (i + 1) % len(rb.msgs)
+		}
+		if len(lines)-start >= len(rb.msgs) {
+			rb.full = true
+		}
+		log.Printf("[replay] loaded %d line(s) from %s", len(lines)-start, path)
+	} else if !os.IsNotExist(err) {
+		log.Printf("[replay] failed to read %s: %v (will create on first append)", path, err)
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
+	if err != nil {
+		log.Printf("[replay] persistence DISABLED — could not open %s: %v", path, err)
+		return
+	}
+	rb.logFile = f
 }
 
 func (rb *ReplayBuffer) Add(line string) {
@@ -216,6 +264,53 @@ func (rb *ReplayBuffer) Add(line string) {
 	if rb.idx == 0 {
 		rb.full = true
 	}
+	if rb.logFile != nil {
+		// Best-effort write; never fail the bridge on a disk hiccup.
+		if _, err := rb.logFile.WriteString(line + "\n"); err != nil {
+			log.Printf("[replay] write failed: %v", err)
+		}
+		rb.added++
+		// Cheap periodic truncate: every 100 adds, check size and trim.
+		if rb.added%100 == 0 {
+			rb.maybeTruncate()
+		}
+	}
+}
+
+// maybeTruncate keeps the on-disk log bounded. Caller holds rb.mu.
+func (rb *ReplayBuffer) maybeTruncate() {
+	if rb.logPath == "" {
+		return
+	}
+	data, err := os.ReadFile(rb.logPath)
+	if err != nil {
+		return
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) <= replayLogMaxLines {
+		return
+	}
+	keep := lines[len(lines)-replayLogMaxLines/2:]
+	tmp := rb.logPath + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strings.Join(keep, "\n")+"\n"), 0640); err != nil {
+		log.Printf("[replay] truncate failed at write: %v", err)
+		return
+	}
+	if rb.logFile != nil {
+		_ = rb.logFile.Close()
+	}
+	if err := os.Rename(tmp, rb.logPath); err != nil {
+		log.Printf("[replay] truncate failed at rename: %v", err)
+		return
+	}
+	f, err := os.OpenFile(rb.logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
+	if err != nil {
+		log.Printf("[replay] truncate: reopen failed: %v", err)
+		rb.logFile = nil
+		return
+	}
+	rb.logFile = f
+	log.Printf("[replay] log truncated to %d lines", len(keep))
 }
 
 func (rb *ReplayBuffer) Recent() []string {
@@ -233,6 +328,14 @@ func (rb *ReplayBuffer) Recent() []string {
 }
 
 var replayBuffer = NewReplayBuffer(replayBufferSize)
+
+func init() {
+	// Persistence is opt-in via env. Off by default keeps current behavior
+	// (ephemeral, art-piece-friendly "the network forgets").
+	if path := os.Getenv("REPLAY_LOG_PATH"); path != "" {
+		replayBuffer.LoadFromFile(path)
+	}
+}
 
 // --- WebSocket upgrader with origin check ---
 

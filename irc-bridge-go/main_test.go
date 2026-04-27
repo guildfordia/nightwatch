@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"os"
 	"context"
 	"net"
 	"net/http"
@@ -498,5 +500,92 @@ func TestConfigValues(t *testing.T) {
 func TestListenAddr(t *testing.T) {
 	if !strings.HasPrefix(listenAddr, ":") {
 		t.Fatalf("listenAddr %q should start with ':'", listenAddr)
+	}
+}
+
+// ============================================================
+// Replay Buffer Persistence Tests
+// ============================================================
+
+func TestReplayBufferInMemoryOnly(t *testing.T) {
+	rb := NewReplayBuffer(3)
+	rb.Add("a")
+	rb.Add("b")
+	if got := rb.Recent(); len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("Recent() = %v, want [a b]", got)
+	}
+}
+
+func TestReplayBufferRingsCorrectly(t *testing.T) {
+	rb := NewReplayBuffer(3)
+	rb.Add("a")
+	rb.Add("b")
+	rb.Add("c")
+	rb.Add("d") // wraps; "a" drops out
+	got := rb.Recent()
+	if len(got) != 3 || got[0] != "b" || got[1] != "c" || got[2] != "d" {
+		t.Fatalf("Recent() after wrap = %v, want [b c d]", got)
+	}
+}
+
+func TestReplayBufferPersistsAcrossInstances(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/replay.log"
+
+	rb1 := NewReplayBuffer(5)
+	rb1.LoadFromFile(path) // file doesn't exist yet — opens for append, no error
+	rb1.Add("first")
+	rb1.Add("second")
+	rb1.Add("third")
+	if rb1.logFile != nil {
+		_ = rb1.logFile.Sync()
+		_ = rb1.logFile.Close()
+	}
+
+	// Simulate a restart: new buffer, load same file
+	rb2 := NewReplayBuffer(5)
+	rb2.LoadFromFile(path)
+	got := rb2.Recent()
+	if len(got) != 3 {
+		t.Fatalf("after reload Recent() has %d lines, want 3 (got=%v)", len(got), got)
+	}
+	if got[0] != "first" || got[1] != "second" || got[2] != "third" {
+		t.Fatalf("after reload Recent() = %v, want [first second third]", got)
+	}
+}
+
+func TestReplayBufferTruncatesOversizedLog(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/replay.log"
+
+	// Write a deliberately large log directly
+	var lines []string
+	for i := 0; i < replayLogMaxLines+200; i++ {
+		lines = append(lines, fmt.Sprintf("line-%d", i))
+	}
+	content := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0640); err != nil {
+		t.Fatal(err)
+	}
+
+	rb := NewReplayBuffer(5)
+	rb.LoadFromFile(path)
+	// Trigger a truncate manually by adding 100 messages (matches the 100-add cadence)
+	for i := 0; i < 100; i++ {
+		rb.Add(fmt.Sprintf("new-%d", i))
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultLines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(resultLines) > replayLogMaxLines {
+		t.Fatalf("after truncate, log has %d lines, want <= %d", len(resultLines), replayLogMaxLines)
+	}
+	// And the last line should be one of the most-recent additions
+	last := resultLines[len(resultLines)-1]
+	if !strings.HasPrefix(last, "new-") {
+		t.Fatalf("after truncate, last line is %q, want a 'new-*' entry", last)
 	}
 }
