@@ -2,6 +2,7 @@
 Description=Nightwatch First Boot Setup
 After=network-online.target
 Wants=network-online.target
+Before=nightwatch-nodeconfig.service nightwatch-mesh.service
 ConditionPathExists=!/opt/nightwatch/.firstboot-done
 
 [Service]

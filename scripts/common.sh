@@ -2,7 +2,6 @@
 # Nightwatch — Shared helper library
 #
 # Sourced by all scripts that need common patterns:
-#   - Docker Compose detection
 #   - .env file loading
 #   - ngircd.conf base template generation
 #   - Mesh IP calculation
@@ -13,18 +12,9 @@
 #   source "$SCRIPT_DIR/common.sh"
 
 # Maximum number of nodes in the mesh (IPs .101-.120)
+# Note: DHCP pools (.201-.254) only fit 11 nodes (5 IPs each).
+# Nodes 12-20 work for mesh/IRC but can't serve DHCP to WiFi clients.
 MAX_NODES=20
-
-# detect_docker_compose — sets DC to "docker compose" or "docker-compose"
-detect_docker_compose() {
-    if docker compose version >/dev/null 2>&1; then
-        DC="docker compose"
-    elif command -v docker-compose >/dev/null 2>&1; then
-        DC="docker-compose"
-    else
-        DC="docker compose"
-    fi
-}
 
 # load_env <path> — loads .env file with allexport, exits on missing file
 load_env() {
@@ -35,12 +25,15 @@ load_env() {
     fi
     # Temporarily disable nounset — .env values may contain $literal text
     # that bash would try to expand as variables (e.g. passwords with $)
+    # Use subshell-free approach: always restore nounset even if source fails
     set +o nounset
     set -o allexport
     # shellcheck source=/dev/null
-    source "$env_file"
+    local _load_env_rc=0
+    source "$env_file" || _load_env_rc=$?
     set +o allexport
     set -o nounset
+    return $_load_env_rc
 }
 
 # generate_ngircd_base_conf <conf_path> <server_name> <node_num>
@@ -61,17 +54,17 @@ AdminInfo2 = Mesh Network
 AdminEMail = admin@nightwatch.local
 Listen = 0.0.0.0
 MotdPhrase = Nightwatch mesh node $node_num
-ServerUID = abc
-ServerGID = abc
+ServerUID = irc
+ServerGID = irc
 
 [Limits]
 MaxConnections = 150
 MaxConnectionsIP = 25
 MaxJoins = 3
 MaxNickLength = 12
-PingTimeout = 300
-PongTimeout = 60
-IdleTimeout = 900
+PingTimeout = 120
+PongTimeout = 30
+IdleTimeout = 0
 MaxChannelNameLength = 15
 MaxTopicLength = 80
 MaxAwayLen = 40
@@ -110,8 +103,22 @@ generate_dnsmasq_conf() {
     local conf_path="$1"
     local node_num="$2"
     local mesh_ip="${3%/*}"  # strip CIDR suffix if present
+
+    # Validate node_num is within range (prevents invalid DHCP ranges)
+    if ! [[ "$node_num" =~ ^[0-9]+$ ]] || [ "$node_num" -lt 1 ] || [ "$node_num" -gt "$MAX_NODES" ]; then
+        echo "generate_dnsmasq_conf: node_num $node_num out of range (1-$MAX_NODES)" >&2
+        return 1
+    fi
+
     local dhcp_start=$((200 + (node_num - 1) * 5 + 1))
     local dhcp_end=$((200 + (node_num - 1) * 5 + 5))
+    # Cap at .254 to stay within /24 subnet
+    [ "$dhcp_end" -gt 254 ] && dhcp_end=254
+    if [ "$dhcp_start" -gt 254 ]; then
+        echo "generate_dnsmasq_conf: node $node_num has no DHCP range (start .${dhcp_start} > .254)" >&2
+        echo "  Reduce MAX_NODES or use fewer nodes. Max 11 nodes fit in .201-.254." >&2
+        return 1
+    fi
 
     mkdir -p "$(dirname "$conf_path")"
 
@@ -119,6 +126,7 @@ generate_dnsmasq_conf() {
 # Nightwatch dnsmasq — DHCP + captive portal DNS for WiFi clients
 # Auto-generated — do not edit manually
 
+# Only listen on the mesh bridge
 # Only listen on the mesh bridge
 interface=br0
 bind-interfaces
@@ -132,9 +140,14 @@ dhcp-range=192.168.199.${dhcp_start},192.168.199.${dhcp_end},255.255.255.0,1h
 dhcp-option=3,${mesh_ip}
 dhcp-option=6,${mesh_ip}
 
-# Redirect ALL DNS to this node (captive portal)
-# Every domain resolves to the local Pi — phone detects "no internet" and
-# opens captive portal popup, which shows the Nightwatch chat page.
+# RFC 8910 Captive Portal API — tells Android 11+ and modern devices
+# where to find the captive portal API (RFC 8908 JSON endpoint).
+# This triggers "Sign in to network" instead of "no internet".
+dhcp-option=114,http://${mesh_ip}/api/captive
+
+# Redirect ALL DNS to this node
+# Every domain resolves to the local Pi so any URL loads the chat page.
+# Users type http://chat.nightwatch or the node IP in their browser.
 address=/#/${mesh_ip}
 
 # Don't read /etc/resolv.conf (we handle all DNS ourselves)
@@ -151,6 +164,71 @@ pid-file=/var/run/dnsmasq-nightwatch.pid
 DNSEOF
 }
 
+# generate_hostapd_conf <conf_path> <ap_iface> <br_iface> <ssid> <password> <channel> <bssid>
+# Writes the hostapd.conf for WiFi AP with 802.11r (Fast Transition).
+# All nodes share the same BSSID so clients roam seamlessly.
+generate_hostapd_conf() {
+    local conf_path="$1"
+    local ap_iface="$2"
+    local br_iface="$3"
+    # Validate password length (WPA2-PSK requires 8-63 characters)
+    if [ ${#5} -lt 8 ] || [ ${#5} -gt 63 ]; then
+        echo "generate_hostapd_conf: WiFi password must be 8-63 characters (got ${#5})" >&2
+        return 1
+    fi
+    local ssid="$4"
+    local password="$5"
+    local channel="${6:-6}"
+    local bssid="${7:-02:00:4E:57:00:01}"
+
+    mkdir -p "$(dirname "$conf_path")"
+
+    cat > "$conf_path" << HAPEOF
+# Nightwatch hostapd — WiFi AP with 802.11r Fast Transition
+# Auto-generated — do not edit manually
+
+interface=$ap_iface
+bridge=$br_iface
+driver=nl80211
+
+# WiFi settings
+ssid=$ssid
+channel=$channel
+hw_mode=g
+ieee80211n=1
+
+# Shared BSSID: all nodes look like one AP to the phone. The WiFi driver
+# handles the transition at Layer 1 — no disconnect/reconnect needed.
+# With unique BSSIDs, Samsung refuses to auto-connect to a different BSSID.
+# bssid=$bssid
+
+# WPA2-PSK + 802.11r Fast Transition
+# FT-PSK enables fast roaming; WPA-PSK is fallback for older clients.
+wpa=2
+wpa_passphrase=$password
+# WPA-PSK only by default. FT-PSK (802.11r) enables fast roaming but some
+# Samsung phones reject it. Uncomment the line below to enable 802.11r:
+# wpa_key_mgmt=FT-PSK WPA-PSK
+wpa_key_mgmt=WPA-PSK
+wpa_pairwise=CCMP
+rsn_pairwise=CCMP
+
+# 802.11r Fast Transition (seamless roaming between mesh nodes)
+# Uncomment these if wpa_key_mgmt includes FT-PSK above:
+# mobility_domain=4e57
+# nas_identifier=nightwatch
+# ft_over_ds=0
+# ft_psk_generate_local=1
+# pmk_r1_push=0
+
+# 802.11n capabilities
+wmm_enabled=1
+
+ctrl_interface=/var/run/hostapd
+ctrl_interface_group=0
+HAPEOF
+}
+
 # set_env_value <file> <key> <value>
 # Safely sets key=value in an env file without sed escaping issues.
 # Handles arbitrary characters in value (quotes, slashes, ampersands, backslashes).
@@ -160,6 +238,9 @@ set_env_value() {
     local value="$3"
     local tmp="${file}.tmp.$$"
 
+    # Secure temp file (may contain secrets like passwords)
+    (umask 077 && : > "$tmp")
+
     # Strip surrounding quotes if the value is already quoted
     # (e.g. .secrets files may have KEY='value' to protect $)
     if [[ "$value" =~ ^\'(.*)\'$ ]]; then
@@ -168,11 +249,14 @@ set_env_value() {
         value="${BASH_REMATCH[1]}"
     fi
 
-    # Wrap in single quotes if value contains shell-sensitive characters
-    # Simple single quotes work for both bash `source` and Docker Compose .env
+    # Wrap in single quotes if value contains shell-sensitive characters.
+    # Single quotes in the value must be escaped as '\'' (end quote, escaped
+    # literal quote, reopen quote) — the standard POSIX idiom.
     local quoted_value="$value"
     if [[ "$value" == *'$'* ]] || [[ "$value" == *'`'* ]] || [[ "$value" == *'\'* ]] || [[ "$value" == *'"'* ]] || [[ "$value" == *'!'* ]] || [[ "$value" == *"'"* ]]; then
-        quoted_value="'$value'"
+        # Escape any single quotes inside the value: ' → '\''
+        local escaped="${value//\'/\'\\\'\'}"
+        quoted_value="'$escaped'"
     fi
 
     if grep -q "^${key}=" "$file" 2>/dev/null; then
@@ -190,6 +274,36 @@ set_env_value() {
         # Append new key
         printf '%s=%s\n' "$key" "$quoted_value" >> "$file"
     fi
+
+    # Flush to disk so a power loss doesn't leave a truncated/empty config
+    sync 2>/dev/null || true
+}
+
+# resolve_node_mode — sets NODE_MODE from env, with backward compat for MESH_GATEWAY
+# Valid modes: mesh (default), gateway, sound-bridge
+# If NODE_MODE is not set but MESH_GATEWAY=true, maps to gateway mode.
+resolve_node_mode() {
+    local mode="${NODE_MODE:-}"
+
+    # Backward compat: MESH_GATEWAY=true → gateway mode
+    if [ -z "$mode" ] && [ "${MESH_GATEWAY:-false}" = "true" ]; then
+        mode="gateway"
+    fi
+
+    # Default to mesh
+    mode="${mode:-mesh}"
+
+    # Validate
+    case "$mode" in
+        mesh|gateway|sound-bridge) ;;
+        *)
+            echo "resolve_node_mode: unknown mode '$mode' (valid: mesh, gateway, sound-bridge)" >&2
+            mode="mesh"
+            ;;
+    esac
+
+    NODE_MODE="$mode"
+    export NODE_MODE
 }
 
 # check_deps <cmd1> [cmd2] ... — verifies required commands exist, exits with message if missing
@@ -228,38 +342,36 @@ NETEOF
             echo "[+] dhcpcd configured: static DNS 8.8.8.8 + 1.1.1.1"
         fi
         # Deny bridge port interfaces
-        if ! grep -q "denyinterfaces eth0" "$DHCPCD_CONF"; then
+        if ! grep -q "denyinterfaces.*bat0" "$DHCPCD_CONF"; then
             cat >> "$DHCPCD_CONF" << 'DENYEOF'
 
 # Nightwatch bridge — dhcpcd must not manage these (br0 bridge handles them)
-denyinterfaces eth0 bat0 br0
+denyinterfaces wlan2 bat0 br0
 DENYEOF
-            echo "[+] dhcpcd: eth0/bat0/br0 excluded (bridge ports)"
+            echo "[+] dhcpcd: wlan2/bat0/br0 excluded (bridge ports)"
         fi
         systemctl restart dhcpcd 2>/dev/null || true
     elif command -v nmcli >/dev/null 2>&1; then
-        # eth0 is a bridge port (br0 = bat0 + eth0). NetworkManager must NOT
-        # manage eth0, otherwise it runs DHCP, fails, and detaches eth0 from
-        # br0 — breaking the captive portal. Use a persistent udev-style
-        # unmanaged rule so NM ignores eth0 across reboots.
+        # wlan2 is a bridge port (br0 = bat0 + wlan2 via hostapd). NetworkManager
+        # must NOT manage wlan2, otherwise it interferes with hostapd.
+        # Use a persistent unmanaged rule so NM ignores wlan2 across reboots.
         mkdir -p /etc/NetworkManager/conf.d
         cat > /etc/NetworkManager/conf.d/nightwatch-unmanaged.conf << 'NMEOF'
-# Nightwatch: eth0 and bat0 are bridge ports managed by mesh-fix.sh
+# Nightwatch: wlan2 and bat0 are bridge ports managed by mesh-fix.sh/hostapd
 [keyfile]
-unmanaged-devices=interface-name:eth0;interface-name:bat0;interface-name:br0
+unmanaged-devices=interface-name:wlan2;interface-name:bat0;interface-name:br0
 NMEOF
-        echo "[+] NetworkManager: eth0/bat0/br0 set as permanently unmanaged"
+        echo "[+] NetworkManager: wlan2/bat0/br0 set as permanently unmanaged"
 
-        # Deactivate any existing NM connection on eth0
-        local ETH_CON
-        ETH_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep 'eth0' | head -1 | cut -d: -f1)
-        if [ -n "$ETH_CON" ]; then
-            nmcli con down "$ETH_CON" 2>/dev/null || true
-            # Prevent auto-activation
-            nmcli con mod "$ETH_CON" connection.autoconnect no 2>/dev/null || true
-            echo "[+] Disabled auto-connect for NM connection '$ETH_CON'"
+        # Deactivate any existing NM connection on wlan2
+        local WLAN2_CON
+        WLAN2_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep 'wlan2' | head -1 | cut -d: -f1)
+        if [ -n "$WLAN2_CON" ]; then
+            nmcli con down "$WLAN2_CON" 2>/dev/null || true
+            nmcli con mod "$WLAN2_CON" connection.autoconnect no 2>/dev/null || true
+            echo "[+] Disabled auto-connect for NM connection '$WLAN2_CON'"
         fi
-        nmcli dev set eth0 managed no 2>/dev/null || true
+        nmcli dev set wlan2 managed no 2>/dev/null || true
 
         # Reload NM config so unmanaged rule takes effect
         systemctl reload NetworkManager 2>/dev/null || nmcli general reload 2>/dev/null || true
@@ -286,8 +398,59 @@ DNSEOF
 nameserver 8.8.8.8
 nameserver 1.1.1.1
 DNSEOF
-    chattr +i /etc/resolv.conf
-    echo "[+] /etc/resolv.conf locked (immutable) with 8.8.8.8 + 1.1.1.1"
+    if chattr +i /etc/resolv.conf 2>/dev/null; then
+        echo "[+] /etc/resolv.conf locked (immutable) with 8.8.8.8 + 1.1.1.1"
+    else
+        echo "[!] Warning: could not lock /etc/resolv.conf (filesystem may not support chattr)"
+    fi
+}
+
+# setup_persistent_wifi_names
+# Creates udev rules to assign stable wlan1/wlan2 names based on USB port path.
+# Without this, modprobe -r/modprobe ath9k_htc can swap interface names.
+# Run once during install — rules persist across reboots and driver reloads.
+setup_persistent_wifi_names() {
+    local RULES_FILE="/etc/udev/rules.d/72-nightwatch-wifi.rules"
+    local count=0
+
+    # Find AR9271 dongles and their USB port paths
+    for sysdev in /sys/bus/usb/devices/*/idVendor; do
+        local usbdev
+        usbdev=$(dirname "$sysdev")
+        if [ "$(cat "$usbdev/idVendor" 2>/dev/null)" = "0cf3" ] && \
+           [ "$(cat "$usbdev/idProduct" 2>/dev/null)" = "9271" ]; then
+            local devpath
+            devpath=$(basename "$usbdev")
+            count=$((count + 1))
+            if [ "$count" -eq 1 ]; then
+                local path1="$devpath"
+            elif [ "$count" -eq 2 ]; then
+                local path2="$devpath"
+            fi
+        fi
+    done
+
+    if [ "$count" -lt 2 ]; then
+        echo "[!] Found $count AR9271 dongle(s) — need 2 for persistent naming (mesh + AP)"
+        return 0
+    fi
+
+    # Sort paths so the lower USB port is always wlan1 (mesh)
+    if [ "$path1" \> "$path2" ]; then
+        local tmp="$path1"; path1="$path2"; path2="$tmp"
+    fi
+
+    cat > "$RULES_FILE" << UDEVEOF
+# Nightwatch: persistent WiFi dongle names by USB port
+# wlan1 = mesh (802.11s), wlan2 = AP (hostapd)
+# Generated by setup_persistent_wifi_names — do not edit
+SUBSYSTEM=="net", ACTION=="add", DEVPATH=="*/$path1/*", DRIVERS=="ath9k_htc", NAME="wlan1"
+SUBSYSTEM=="net", ACTION=="add", DEVPATH=="*/$path2/*", DRIVERS=="ath9k_htc", NAME="wlan2"
+UDEVEOF
+
+    echo "[+] Persistent WiFi naming: wlan1=$path1 (mesh), wlan2=$path2 (AP)"
+    echo "[+] Rules written to $RULES_FILE"
+    udevadm control --reload-rules 2>/dev/null || true
 }
 
 # install_systemd_services <project_dir>
@@ -299,12 +462,21 @@ install_systemd_services() {
 
     chmod +x "$project_dir"/scripts/*.sh 2>/dev/null || true
 
-    for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch-docker; do
-        local src="$project_dir/scripts/${svc}.service"
-        if [ -f "$src" ]; then
-            sed "s|/opt/nightwatch|$project_dir|g" "$src" > "/etc/systemd/system/${svc}.service"
-        fi
+    # Copy every nightwatch-*.{service,timer} from scripts/ into /etc/systemd/system/.
+    # Globbing (vs. a hard-coded list) means new units added to scripts/ are
+    # picked up automatically — avoids the class of bug where a `systemctl enable`
+    # below references a unit that was never copied.
+    # nightwatch-firstboot.service is excluded: it's installed by nightwatch-stage.sh
+    # and is what's currently executing this code.
+    shopt -s nullglob
+    local src
+    for src in "$project_dir"/scripts/nightwatch-*.service "$project_dir"/scripts/nightwatch-*.timer; do
+        local name
+        name=$(basename "$src")
+        [ "$name" = "nightwatch-firstboot.service" ] && continue
+        sed "s|/opt/nightwatch|$project_dir|g" "$src" > "/etc/systemd/system/$name"
     done
+    shopt -u nullglob
 
     systemctl daemon-reload
 
@@ -315,7 +487,16 @@ install_systemd_services() {
     systemctl enable nightwatch-nodeconfig.service
     systemctl enable nightwatch-mesh.service
     systemctl enable nightwatch-discovery.service
-    systemctl enable nightwatch-docker.service
+    systemctl enable nightwatch-app.service
+    # Remove legacy nightwatch-docker.service if present (renamed to nightwatch-app)
+    if systemctl is-enabled nightwatch-docker.service >/dev/null 2>&1; then
+        systemctl disable nightwatch-docker.service 2>/dev/null || true
+        rm -f /etc/systemd/system/nightwatch-docker.service
+    fi
+    systemctl enable nightwatch-bridge.service
+    systemctl enable nightwatch-led.service
+    systemctl enable nightwatch-debug.service
+    systemctl enable nightwatch-watchdog.timer
 
     echo "[+] Systemd services installed and enabled"
 }

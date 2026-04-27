@@ -2,12 +2,13 @@
 Description=Nightwatch Node Discovery (UDP broadcast)
 After=nightwatch-mesh.service
 Requires=nightwatch-mesh.service
+PartOf=nightwatch-mesh.service
 
 [Service]
 Type=simple
 ExecStart=/opt/nightwatch/scripts/node-discovery.sh start
 ExecStop=/opt/nightwatch/scripts/node-discovery.sh stop
-Restart=on-failure
+Restart=always
 RestartSec=10
 StandardOutput=journal+console
 StandardError=journal+console

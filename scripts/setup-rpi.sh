@@ -5,23 +5,24 @@
 #   1. Asks for node number (or derives from hostname)
 #   2. Sets hostname to nightwatch-<N>
 #   3. Installs all system packages
-#   4. Installs Docker + Docker Compose
+#   4. Installs app services (ngircd, nginx, irc-bridge)
 #   5. Loads batman-adv, disables system hostapd
 #   6. Saves project path to /etc/nightwatch.conf
 #   7. Generates .env + ngircd.conf from node number
-#   8. Installs systemd services (nodeconfig, mesh, docker)
-#   9. Builds Docker images
+#   8. Installs systemd services (nodeconfig, mesh, app services)
+#   9. Verifies irc-bridge binary
 #   10. Tells you to reboot — everything starts automatically
 #
 # Usage:
 #   sudo ./scripts/setup-rpi.sh              # Interactive (asks for node number)
 #   sudo ./scripts/setup-rpi.sh 3            # Node 3
 #   sudo ./scripts/setup-rpi.sh 5 --gateway  # Node 5, gateway mode
+#   sudo ./scripts/setup-rpi.sh 5 --mode sound-bridge  # Node 5, sound-bridge mode
 #
 # After reboot, the boot sequence is:
 #   nodeconfig → generates .env from hostname
 #   mesh       → starts 802.11s + batman-adv + hostapd AP
-#   docker     → starts IRC + bridge + nginx
+#   nightwatch-app → starts IRC + bridge + nginx
 
 set -euo pipefail
 
@@ -41,14 +42,33 @@ NC='\033[0m'
 # ---- Parse arguments ----
 
 NODE_NUM=""
+NODE_MODE=""
 IS_GATEWAY=false
 
-for arg in "$@"; do
+ARGS=("$@")
+i=0
+while [ $i -lt ${#ARGS[@]} ]; do
+    arg="${ARGS[$i]}"
     case "$arg" in
-        --gateway|-gw) IS_GATEWAY=true ;;
+        --gateway|-gw) NODE_MODE="gateway"; IS_GATEWAY=true ;;
+        --mode)        i=$((i+1)); NODE_MODE="${ARGS[$i]:-mesh}" ;;
         [0-9]*)        NODE_NUM="$arg" ;;
     esac
+    i=$((i+1))
 done
+
+# Backward compat: --gateway sets NODE_MODE=gateway
+if [ "$IS_GATEWAY" = true ] && [ -z "$NODE_MODE" ]; then
+    NODE_MODE="gateway"
+fi
+NODE_MODE="${NODE_MODE:-mesh}"
+
+# Validate mode
+case "$NODE_MODE" in
+    mesh|gateway|sound-bridge) ;;
+    *) echo -e "${RED}Error: invalid mode '$NODE_MODE' (valid: mesh, gateway, sound-bridge)${NC}"; exit 1 ;;
+esac
+IS_GATEWAY=$( [ "$NODE_MODE" = "gateway" ] && echo true || echo false )
 
 # ---- Must be root ----
 
@@ -85,26 +105,33 @@ while [ -z "$NODE_NUM" ] || ! [[ "$NODE_NUM" =~ ^[0-9]+$ ]] || [ "$NODE_NUM" -lt
     read -rp "  Enter node number (1-20): " NODE_NUM
 done
 
-# Ask about gateway if not specified via flag
-if [ "$IS_GATEWAY" = false ]; then
-    read -rp "  Is this the gateway node (internet sharing)? [y/N] " gw_confirm
-    if [[ "$gw_confirm" =~ ^[Yy]$ ]]; then
-        IS_GATEWAY=true
-    fi
+# Ask about mode if not specified via flag (only for default mesh mode)
+if [ "$NODE_MODE" = "mesh" ]; then
+    echo ""
+    echo -e "  ${BOLD}Node mode:${NC}"
+    echo "    1) mesh          (default — hostapd AP on wlan2)"
+    echo "    2) gateway       (internet sharing via wlan0)"
+    echo "    3) sound-bridge  (eth0 to Mac Mini for nightwatch-sound)"
+    read -rp "  Choose mode [1]: " mode_choice
+    case "$mode_choice" in
+        2) NODE_MODE="gateway"; IS_GATEWAY=true ;;
+        3) NODE_MODE="sound-bridge" ;;
+        *) NODE_MODE="mesh" ;;
+    esac
 fi
 
 MESH_IP="$(mesh_ip_for_node "$NODE_NUM")"
-if [ "$IS_GATEWAY" = true ]; then
-    NEW_HOSTNAME="nightwatch-gw-${NODE_NUM}"
-else
-    NEW_HOSTNAME="nightwatch-${NODE_NUM}"
-fi
+case "$NODE_MODE" in
+    gateway)      NEW_HOSTNAME="nightwatch-gw-${NODE_NUM}" ;;
+    sound-bridge) NEW_HOSTNAME="nightwatch-sb-${NODE_NUM}" ;;
+    *)            NEW_HOSTNAME="nightwatch-${NODE_NUM}" ;;
+esac
 
 echo ""
 echo -e "  ${BOLD}Node:${NC}     #$NODE_NUM"
 echo -e "  ${BOLD}Hostname:${NC} $NEW_HOSTNAME"
 echo -e "  ${BOLD}Mesh IP:${NC}  $MESH_IP"
-echo -e "  ${BOLD}Gateway:${NC}  $IS_GATEWAY"
+echo -e "  ${BOLD}Mode:${NC}     $NODE_MODE"
 echo ""
 read -rp "  Continue with setup? [Y/n] " final_confirm
 if [[ "$final_confirm" =~ ^[Nn]$ ]]; then
@@ -131,7 +158,8 @@ echo ""
 echo "[2/10] Installing system packages..."
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    docker.io \
+    ngircd \
+    nginx \
     batctl \
     bridge-utils \
     dnsmasq \
@@ -147,38 +175,56 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     netcat-openbsd \
     socat \
     sshpass \
-    firmware-atheros
+    firmware-atheros \
+    hostapd
 echo "[+] Packages installed"
 
 # Disable system dnsmasq — we start our own instance on br0 via mesh-fix.sh
 systemctl disable dnsmasq 2>/dev/null || true
 systemctl stop dnsmasq 2>/dev/null || true
 
-# ---- Step 3: Docker Compose ----
+# ---- Step 3: Configure native services ----
 
 echo ""
-echo "[3/10] Installing Docker Compose..."
-if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
-    ARCH=$(uname -m)
-    case "$ARCH" in
-        aarch64|arm64) COMPOSE_ARCH="linux-aarch64" ;;
-        armv7l|armhf)  COMPOSE_ARCH="linux-armv7" ;;
-        x86_64)        COMPOSE_ARCH="linux-x86_64" ;;
-        *)             echo "[-] Unsupported arch: $ARCH"; exit 1 ;;
-    esac
-    COMPOSE_VERSION="v2.24.6"
-    curl -SL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-${COMPOSE_ARCH}" \
-        -o /usr/local/bin/docker-compose
-    chmod +x /usr/local/bin/docker-compose
-    echo "[+] Docker Compose $COMPOSE_VERSION installed"
-else
-    echo "[+] Docker Compose already available"
-fi
+echo "[3/10] Configuring native services (ngircd, nginx, irc-bridge)..."
 
-systemctl enable docker
-systemctl start docker
-usermod -aG docker "$REAL_USER"
-echo "[+] Docker ready ($REAL_USER added to docker group)"
+# Stop default services — Nightwatch manages them via systemd
+systemctl stop ngircd 2>/dev/null || true
+systemctl stop nginx 2>/dev/null || true
+systemctl disable ngircd 2>/dev/null || true
+systemctl disable nginx 2>/dev/null || true
+
+# Symlink nginx config
+rm -f /etc/nginx/sites-enabled/default
+ln -sf "$INSTALL_DIR/nginx/nginx.conf" /etc/nginx/conf.d/nightwatch.conf
+
+# Symlink nginx html root
+rm -rf /usr/share/nginx/html
+ln -sf "$INSTALL_DIR/html" /usr/share/nginx/html
+
+# Generate self-signed certs for captive portal HTTPS redirect (if missing)
+CERT_DIR="$INSTALL_DIR/nginx/certs"
+if [ ! -f "$CERT_DIR/captive.crt" ] || [ ! -f "$CERT_DIR/captive.key" ]; then
+    mkdir -p "$CERT_DIR"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+        -keyout "$CERT_DIR/captive.key" \
+        -out "$CERT_DIR/captive.crt" \
+        -subj "/CN=nightwatch.local" 2>/dev/null
+    echo "[+] Self-signed TLS cert generated for captive portal"
+fi
+ln -sf "$CERT_DIR" /etc/nginx/certs
+
+# Symlink ngircd config
+ln -sf "$INSTALL_DIR/ngircd/ngircd.conf" /etc/ngircd/ngircd.conf
+
+# Create data dir for irc-bridge nick counter
+mkdir -p "$INSTALL_DIR/irc-bridge-go/data"
+chown "$REAL_USER:$REAL_USER" "$INSTALL_DIR/irc-bridge-go/data"
+
+# Ensure irc-bridge binary is executable
+chmod +x "$INSTALL_DIR/irc-bridge-go/irc-bridge" 2>/dev/null || true
+
+echo "[+] Native services configured"
 
 # ---- Step 4: batman-adv ----
 
@@ -190,20 +236,23 @@ if ! grep -q "^batman-adv" /etc/modules 2>/dev/null; then
 fi
 echo "[+] batman-adv version: $(cat /sys/module/batman_adv/version 2>/dev/null || echo 'loads on boot')"
 
-# Disable hostapd — AP is handled by the external GL.iNet router, not the Pi
+# Disable system hostapd — mesh-fix.sh starts hostapd manually with our config
 systemctl disable hostapd 2>/dev/null || true
 systemctl stop hostapd 2>/dev/null || true
 
 # ---- Step 4b: Network routing ----
 # Architecture:
 #   wlan0 = internet + Tailscale (WiFi client, never touch)
-#   wlan1 = 802.11s mesh (USB dongle, batman-adv)
-#   eth0  = GL.iNet router (external AP for clients, bridged into batman-adv)
+#   wlan1 = 802.11s mesh (USB dongle 1, batman-adv)
+#   wlan2 = hostapd WiFi AP (USB dongle 2, 802.11r fast roaming)
 
 echo ""
 echo "[4b/10] Configuring network routing..."
 
 configure_network
+
+# Persistent WiFi dongle names (prevent wlan1/wlan2 swap after driver reload)
+setup_persistent_wifi_names
 
 # ---- Step 5: Register project path ----
 
@@ -223,8 +272,8 @@ cp "$INSTALL_DIR/.env.example" "$ENV_FILE"
 set_env_value "$ENV_FILE" "PI_NUMBER" "$NODE_NUM"
 set_env_value "$ENV_FILE" "MESH_IP" "$MESH_IP"
 
-if [ "$IS_GATEWAY" = true ]; then
-    set_env_value "$ENV_FILE" "MESH_GATEWAY" "true"
+set_env_value "$ENV_FILE" "NODE_MODE" "$NODE_MODE"
+if [ "$NODE_MODE" = "gateway" ]; then
     set_env_value "$ENV_FILE" "INET_IFACE" "wlan0"
 fi
 
@@ -241,7 +290,7 @@ if grep -q "CHANGE_ME_BEFORE_DEPLOY" "$ENV_FILE"; then
     set_env_value "$ENV_FILE" "IRC_LINK_PASSWORD" "$IRC_PWD"
 fi
 
-echo "[+] .env generated (PI_NUMBER=$NODE_NUM, MESH_IP=$MESH_IP, GATEWAY=$IS_GATEWAY)"
+echo "[+] .env generated (PI_NUMBER=$NODE_NUM, MESH_IP=$MESH_IP, MODE=$NODE_MODE)"
 
 # Generate ngircd config
 cd "$INSTALL_DIR"
@@ -268,67 +317,42 @@ echo "[+] Services installed and enabled:"
 echo "    • nightwatch-nodeconfig (generates config from hostname)"
 echo "    • nightwatch-mesh (802.11s + batman-adv + AP)"
 echo "    • nightwatch-discovery (UDP broadcast node discovery)"
-echo "    • nightwatch-docker (IRC + bridge + nginx)"
+echo "    • nightwatch-app (IRC + bridge + nginx orchestrator)"
+echo "    • nightwatch-led (green LED readiness indicator)"
+echo "    • nightwatch-debug (debug info collector)"
 
-# ---- Step 8: Build Docker images ----
-
-echo ""
-echo "[8/10] Building Docker images (this may take a few minutes)..."
-cd "$INSTALL_DIR"
-
-detect_docker_compose
-
-$DC --env-file .env build
-echo "[+] Docker images built"
-
-# ---- Step 9: Configure GL.iNet router ----
+# ---- Step 8: Verify irc-bridge binary ----
 
 echo ""
-echo "[9/10] Configuring GL.iNet router..."
-
-# Check if router is already configured by SSHing to the configured IP
-# and verifying the WiFi SSID matches what we want
-ROUTER_CONFIGURED_IP="${ROUTER_CONFIGURED_IP:-192.168.8.100}"
-ROUTER_PASSWORD_CHECK=$(grep '^ROUTER_PASSWORD=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)
-WIFI_SSID_CHECK=$(grep '^WIFI_SSID=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)
-ROUTER_ALREADY_CONFIGURED=false
-
-if [ -n "$ROUTER_PASSWORD_CHECK" ] && [ "$ROUTER_PASSWORD_CHECK" != "CHANGE_ME_BEFORE_DEPLOY" ] && command -v sshpass >/dev/null 2>&1; then
-    # Temporarily give eth0 an IP to reach the router
-    ip addr add 192.168.8.2/24 dev eth0 2>/dev/null || true
-    ip link set eth0 up 2>/dev/null || true
-    sleep 1
-    if ping -c 1 -W 2 "$ROUTER_CONFIGURED_IP" >/dev/null 2>&1; then
-        SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o LogLevel=ERROR"
-        CURRENT_SSID=$(SSHPASS="$ROUTER_PASSWORD_CHECK" sshpass -e ssh $SSH_OPTS root@"$ROUTER_CONFIGURED_IP" \
-            "uci get wireless.@wifi-iface[0].ssid 2>/dev/null" 2>/dev/null || echo "")
-        if [ "$CURRENT_SSID" = "$WIFI_SSID_CHECK" ]; then
-            ROUTER_ALREADY_CONFIGURED=true
-        fi
-    fi
-    ip addr del 192.168.8.2/24 dev eth0 2>/dev/null || true
-fi
-
-if [ "$ROUTER_ALREADY_CONFIGURED" = true ]; then
-    echo -e "  ${GREEN}[+] Router already configured (SSID: $CURRENT_SSID at $ROUTER_CONFIGURED_IP)${NC}"
-    echo "  Skipping. To reconfigure: sudo scripts/setup-router.sh"
+echo "[8/10] Verifying irc-bridge binary..."
+if [ -x "$INSTALL_DIR/irc-bridge-go/irc-bridge" ]; then
+    echo "[+] irc-bridge binary found ($( ls -lh "$INSTALL_DIR/irc-bridge-go/irc-bridge" | awk '{print $5}'))"
 else
-    # Try to configure — if it fails, let the user retry or skip
-    while true; do
-        if "$INSTALL_DIR/scripts/setup-router.sh"; then
-            break
-        fi
-        echo ""
-        echo -e "  ${YELLOW}[!] Router not found.${NC}"
-        echo "      Plug the router into eth0 and press ${BOLD}r${NC} to retry"
-        echo "      or press ${BOLD}s${NC} to skip (you can do it later with: make router)"
-        read -rp "  [r/s] " router_choice
-        case "$router_choice" in
-            [Ss]) echo "  Skipping router setup."; break ;;
-            *)    echo "  Retrying..." ;;
-        esac
-    done
+    echo -e "${RED}[-] irc-bridge binary not found!${NC}"
+    echo "    Cross-compile on your laptop: cd irc-bridge-go && make build-bridge"
+    echo "    Or copy a pre-built binary to $INSTALL_DIR/irc-bridge-go/irc-bridge"
+    echo ""
+    echo -e "${RED}    Setup cannot continue without the bridge binary.${NC}"
+    exit 1
 fi
+
+# ---- Step 9: Generate hostapd config ----
+
+echo ""
+echo "[9/10] Generating hostapd config (WiFi AP with 802.11r fast roaming)..."
+
+WIFI_SSID_VAL=$(grep '^WIFI_SSID=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "Nightwatch")
+WIFI_PASSWORD_VAL=$(grep '^WIFI_PASSWORD=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "Nightwatch")
+AP_CHANNEL_VAL=$(grep '^AP_CHANNEL=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "6")
+AP_BSSID_VAL=$(grep '^AP_BSSID=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "02:00:4E:57:00:01")
+AP_IFACE_VAL=$(grep '^AP_IFACE=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "wlan2")
+
+mkdir -p "$INSTALL_DIR/hostapd"
+generate_hostapd_conf "$INSTALL_DIR/hostapd/hostapd.conf" \
+    "$AP_IFACE_VAL" "br0" \
+    "$WIFI_SSID_VAL" "$WIFI_PASSWORD_VAL" \
+    "$AP_CHANNEL_VAL" "$AP_BSSID_VAL"
+echo "[+] hostapd.conf generated (SSID: $WIFI_SSID_VAL, Channel: $AP_CHANNEL_VAL, BSSID: $AP_BSSID_VAL)"
 
 # ---- Step 10: Verify ----
 
@@ -336,7 +360,7 @@ echo ""
 echo "[10/10] Verifying installation..."
 
 ERRORS=0
-for f in .env scripts/mesh-fix.sh scripts/nodeconfig.sh scripts/node-discovery.sh scripts/setup-router.sh docker-compose.yml irc-bridge-go/Dockerfile html/index.html ngircd/ngircd.conf dnsmasq/dnsmasq.conf; do
+for f in .env scripts/mesh-fix.sh scripts/nodeconfig.sh scripts/node-discovery.sh irc-bridge-go/irc-bridge html/index.html ngircd/ngircd.conf dnsmasq/dnsmasq.conf hostapd/hostapd.conf nginx/nginx.conf; do
     if [ -f "$INSTALL_DIR/$f" ]; then
         echo -e "  ${GREEN}[OK]${NC} $f"
     else
@@ -345,7 +369,7 @@ for f in .env scripts/mesh-fix.sh scripts/nodeconfig.sh scripts/node-discovery.s
     fi
 done
 
-for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch-docker; do
+for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch-app nightwatch-led nightwatch-debug; do
     if systemctl is-enabled "$svc" >/dev/null 2>&1; then
         echo -e "  ${GREEN}[OK]${NC} $svc.service enabled"
     else
@@ -385,8 +409,12 @@ fi
 echo ""
 echo "  Node:     #$NODE_NUM ($NEW_HOSTNAME)"
 echo "  Mesh IP:  $MESH_IP"
-echo "  Gateway:  $IS_GATEWAY"
-echo "  Bridge:   br0 (bat0 + eth0 → GL.iNet router)"
+echo "  Mode:     $NODE_MODE"
+if [ "$NODE_MODE" = "sound-bridge" ]; then
+echo "  Bridge:   br0 (bat0 only) + eth0 → Mac Mini (10.0.0.1/24)"
+else
+echo "  Bridge:   br0 (bat0 + wlan2 → hostapd AP)"
+fi
 echo ""
 echo -e "  ${BOLD}Next steps:${NC}"
 echo "    sudo reboot"

@@ -9,7 +9,9 @@
 #   - Set username/password
 #   - Set WiFi (temporary — for first boot internet access to install packages)
 #
-# Node number is assigned dynamically on first boot by scanning the mesh network.
+# Node number is assigned at SD card preparation time (fixed ID).
+# If NODE=N is set (or --node N), that number is used.
+# Otherwise, the next free number is auto-picked from .node-registry.
 #
 # Usage:
 #   ./scripts/prepare-sdcard.sh <sdcard_path> [options]
@@ -43,6 +45,47 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 # shellcheck source=common.sh
 source "$SCRIPT_DIR/common.sh"
 
+# ---- Node registry ----
+# Tracks assigned node numbers to prevent duplicates across SD cards.
+REGISTRY_FILE="$PROJECT_DIR/.node-registry"
+
+registry_init() {
+    if [ ! -f "$REGISTRY_FILE" ]; then
+        printf '# Nightwatch Node Registry — tracks assigned node numbers\n# NODE  DATE        MODE        NOTES\n' > "$REGISTRY_FILE"
+    fi
+}
+
+registry_taken_numbers() {
+    [ -f "$REGISTRY_FILE" ] || return
+    grep -v '^#' "$REGISTRY_FILE" | grep -v '^$' | awk '{print $1}' | sort -n
+}
+
+registry_has() {
+    local num="$1"
+    registry_taken_numbers | grep -qw "$num"
+}
+
+registry_next_free() {
+    local taken
+    taken=$(registry_taken_numbers)
+    for i in $(seq 1 "$MAX_NODES"); do
+        if ! echo "$taken" | grep -qw "$i"; then
+            echo "$i"
+            return
+        fi
+    done
+    echo ""
+}
+
+registry_add() {
+    local num="$1" mode="$2" notes="${3:-}"
+    registry_init
+    if registry_has "$num"; then
+        return 1
+    fi
+    printf '%-6s  %s  %-12s  %s\n' "$num" "$(date +%Y-%m-%d)" "$mode" "$notes" >> "$REGISTRY_FILE"
+}
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -59,7 +102,9 @@ usage() {
     echo "  sdcard_path:  Block device (e.g. /dev/sdf) or mounted rootfs path"
     echo ""
     echo "Options:"
-    echo "  --gateway     Mark this node as the internet gateway"
+    echo "  --node N      Assign node number N (1-$MAX_NODES). Auto-picks if omitted."
+    echo "  --mode MODE   Set node mode: mesh (default), gateway, sound-bridge"
+    echo "  --gateway     Shorthand for --mode gateway"
     echo "  --yes         Skip confirmation prompts"
     echo ""
     echo "Examples (Linux):"
@@ -71,29 +116,42 @@ usage() {
     echo "  $0 /dev/disk4 --gateway"
     echo "  $0 /Volumes/rootfs"
     echo ""
-    echo "Node number is assigned dynamically on first boot by scanning the mesh."
+    echo "Node number is assigned at SD card prep time (tracked in .node-registry)."
+    echo "Set NODE=N or --node N, or let the script auto-pick the next free number."
     echo ""
     echo "Environment variables (optional — skips password prompts):"
     echo "  ROUTER_PASSWORD     GL.iNet router admin password"
     echo "  IRC_LINK_PASSWORD   IRC federation password (same on all nodes)"
     echo "  TAILSCALE_AUTH_KEY  Tailscale pre-auth key (from admin console)"
+    echo "  HF_TOKEN            Hugging Face API token"
     exit 1
 }
 
 GATEWAY_MODE=false
+NODE_MODE="mesh"
 SD_ROOT=""
 AUTO_YES=false
+NODE_NUM="${NODE:-}"
 
 # Parse args
 while [ $# -gt 0 ]; do
     case "$1" in
-        --gateway) GATEWAY_MODE=true ;;
-        --yes|-y)  AUTO_YES=true ;;
-        --help|-h) usage ;;
-        *)         SD_ROOT="$1" ;;
+        --node)       shift; NODE_NUM="${1:-}" ;;
+        --gateway)    NODE_MODE="gateway"; GATEWAY_MODE=true ;;
+        --mode)       shift; NODE_MODE="${1:-mesh}" ;;
+        --yes|-y)     AUTO_YES=true ;;
+        --help|-h)    usage ;;
+        *)            SD_ROOT="$1" ;;
     esac
     shift
 done
+
+# Validate mode
+case "$NODE_MODE" in
+    mesh|gateway|sound-bridge) ;;
+    *) echo -e "${RED}Error: invalid mode '$NODE_MODE' (valid: mesh, gateway, sound-bridge)${NC}"; exit 1 ;;
+esac
+GATEWAY_MODE=$( [ "$NODE_MODE" = "gateway" ] && echo true || echo false )
 
 # ---- Validate SD card path ----
 
@@ -122,6 +180,7 @@ RSYNC_EXCLUDES=(
     --exclude='node_modules'
     --exclude='.firstboot-done'
     --exclude='.node-number'
+    --exclude='.node-registry'
     --exclude='PiShrink'
 )
 
@@ -169,7 +228,7 @@ prepare_via_boot_partition() {
     echo -e "======================================${NC}"
     echo ""
     echo "  Mode:       macOS → boot partition staging"
-    echo "  Node:       (auto-assigned on first boot)"
+    echo "  Node:       $NODE_NUM (IP: $MESH_IP)"
     echo "  Gateway:    $GATEWAY_MODE"
     echo "  Tailscale:  $([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo 'yes (auth key set)' || echo 'no')"
     echo "  Boot part:  $boot_mount"
@@ -189,9 +248,9 @@ prepare_via_boot_partition() {
     echo ""
 
     # Step 1: Create project tarball on boot partition
-    echo "[1/4] Creating project tarball on boot partition..."
+    echo "[1/5] Creating project tarball on boot partition..."
     local staging_dir
-    staging_dir=$(mktemp -d)
+    staging_dir=$(umask 077 && mktemp -d)
     rsync -a "${RSYNC_EXCLUDES[@]}" "$PROJECT_DIR/" "$staging_dir/"
 
     # Remove any stale .env or .secrets from staging
@@ -201,24 +260,39 @@ prepare_via_boot_partition() {
     rm -rf "$staging_dir"
     echo "[+] nightwatch.tar.gz written to boot partition"
 
+    # Step 1b: Set ACT LED to heartbeat from power-on (before any script runs)
+    # Without this the LED is dark during early boot, making the Pi look powered off.
+    local config_txt="$boot_mount/config.txt"
+    if [ -f "$config_txt" ]; then
+        if ! grep -q 'act_led_trigger' "$config_txt"; then
+            printf '\n# Nightwatch: heartbeat LED from power-on\ndtparam=act_led_trigger=heartbeat\n' >> "$config_txt"
+            echo "[+] config.txt: ACT LED set to heartbeat"
+        fi
+    fi
+
     # Step 2: Write secrets
-    echo "[2/4] Writing secrets to boot partition..."
+    echo "[2/5] Writing secrets to boot partition..."
     local secrets_file="$boot_mount/nightwatch-secrets"
     printf '%s\n' '# Nightwatch secrets — baked by prepare-sdcard.sh' > "$secrets_file"
     printf '%s\n' '# nightwatch-stage.sh copies these on first boot' >> "$secrets_file"
     printf 'ROUTER_PASSWORD=%s\n' "$ROUTER_PASSWORD" >> "$secrets_file"
     printf 'IRC_LINK_PASSWORD=%s\n' "$IRC_LINK_PASSWORD" >> "$secrets_file"
     printf 'TAILSCALE_AUTH_KEY=%s\n' "${TAILSCALE_AUTH_KEY:-}" >> "$secrets_file"
-    if [ "$GATEWAY_MODE" = true ]; then
-        printf 'MESH_GATEWAY=true\n' >> "$secrets_file"
-    fi
+    printf 'HF_TOKEN=%s\n' "${HF_TOKEN:-}" >> "$secrets_file"
+    printf 'NODE_MODE=%s\n' "$NODE_MODE" >> "$secrets_file"
     echo "[+] Secrets staged"
     echo "    ROUTER_PASSWORD=***"
     echo "    IRC_LINK_PASSWORD=***"
     echo "    TAILSCALE_AUTH_KEY=$([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo '***' || echo '(empty)')"
+    echo "    HF_TOKEN=$([ -n "${HF_TOKEN:-}" ] && echo '***' || echo '(empty)')"
 
-    # Step 3: Write staging script (runs on the Pi to unpack from boot → rootfs)
-    echo "[3/4] Writing staging script..."
+    # Step 3: Write node ID to boot partition
+    echo "[3/5] Writing node ID ($NODE_NUM) to boot partition..."
+    printf '%s\n' "$NODE_NUM" > "$boot_mount/nightwatch-node-id"
+    echo "[+] nightwatch-node-id written"
+
+    # Step 4: Write staging script (runs on the Pi to unpack from boot → rootfs)
+    echo "[4/5] Writing staging script..."
     cat > "$boot_mount/nightwatch-stage.sh" << 'STAGEEOF'
 #!/bin/bash
 # Nightwatch — Unpack staged files from boot partition to rootfs
@@ -227,16 +301,47 @@ prepare_via_boot_partition() {
 # It may be called from firstrun.sh (traditional) or cloud-init runcmd.
 set -e
 
+# ---- LED error indicator ----
+LED_PATH=""
+for _led in /sys/class/leds/ACT /sys/class/leds/led0; do
+    [ -d "$_led" ] && LED_PATH="$_led" && break
+done
+
+stage_fail() {
+    echo "[-] nightwatch-stage FAILED: $1"
+    # Slow blink (500ms) = staging error
+    # Distinct from firstboot errors (100ms fast blink) so you can tell which stage failed
+    if [ -n "$LED_PATH" ]; then
+        echo "timer" > "$LED_PATH/trigger" 2>/dev/null || true
+        echo 500  > "$LED_PATH/delay_on"  2>/dev/null || true
+        echo 500  > "$LED_PATH/delay_off" 2>/dev/null || true
+    fi
+    exit 1
+}
+
+trap 'stage_fail "unexpected error at line $LINENO"' ERR
+
 # Detect boot partition mount (Bookworm: /boot/firmware, older: /boot)
 if [ -f /boot/firmware/nightwatch.tar.gz ]; then
     BOOT=/boot/firmware
 elif [ -f /boot/nightwatch.tar.gz ]; then
     BOOT=/boot
 else
-    echo "[-] nightwatch-stage: nightwatch.tar.gz not found on boot partition"
-    exit 1
+    stage_fail "nightwatch.tar.gz not found on boot partition"
 fi
 
+# Log to boot partition (readable on macOS for debugging)
+STAGE_LOG="$BOOT/nightwatch-firstboot.log"
+exec > >(tee -a "$STAGE_LOG") 2>&1
+
+# Show heartbeat so the LED is active during staging (not silent/default)
+[ -n "$LED_PATH" ] && echo "heartbeat" > "$LED_PATH/trigger" 2>/dev/null || true
+
+echo ""
+echo "======================================"
+echo "  Nightwatch Staging"
+echo "  $(date)"
+echo "======================================"
 echo "[+] nightwatch-stage: unpacking from $BOOT to /opt/nightwatch/"
 
 # Extract project
@@ -247,6 +352,14 @@ tar xzf "$BOOT/nightwatch.tar.gz" -C /opt/nightwatch/
 if [ -f "$BOOT/nightwatch-secrets" ]; then
     mv "$BOOT/nightwatch-secrets" /opt/nightwatch/.secrets
     chmod 600 /opt/nightwatch/.secrets
+fi
+
+# Copy fixed node ID (assigned at SD card prep time)
+if [ -f "$BOOT/nightwatch-node-id" ]; then
+    NODE_ID=$(cat "$BOOT/nightwatch-node-id")
+    printf '%s\nFIXED\n' "$NODE_ID" > /opt/nightwatch/.node-number
+    rm -f "$BOOT/nightwatch-node-id"
+    echo "[+] nightwatch-stage: node ID set to $NODE_ID (FIXED)"
 fi
 
 # Write nightwatch.conf
@@ -309,23 +422,29 @@ NMEOF
 fi
 
 # Clean up staged files from boot partition
-rm -f "$BOOT/nightwatch.tar.gz" "$BOOT/nightwatch-secrets" "$BOOT/nightwatch-stage.sh"
+rm -f "$BOOT/nightwatch.tar.gz" "$BOOT/nightwatch-secrets" "$BOOT/nightwatch-node-id" "$BOOT/nightwatch-stage.sh"
 
-# If running from cloud-init runcmd (not firstrun.sh), firstrun.sh won't reboot
-# for us. Schedule a reboot so the firstboot service starts.
-if [ ! -f "$BOOT/firstrun.sh" ]; then
-    echo "[+] nightwatch-stage: scheduling reboot for firstboot service"
-    shutdown -r +1 "Nightwatch: rebooting to start firstboot setup" &
+# Remove systemd.run from cmdline.txt so the next boot uses normal multi-user.target.
+# Without this, systemd.unit=kernel-command-line.target stays in cmdline.txt and
+# the Pi boots into a minimal target with no networking or services.
+CMDLINE="$BOOT/cmdline.txt"
+if [ -f "$CMDLINE" ] && grep -q 'systemd\.run=' "$CMDLINE"; then
+    sed -i 's| systemd\.run=[^ ]*||g; s| systemd\.run_success_action=[^ ]*||g; s| systemd\.unit=kernel-command-line\.target||g' "$CMDLINE"
+    echo "[+] nightwatch-stage: cleaned systemd.run from cmdline.txt"
 fi
+
+# Schedule a reboot so the firstboot service starts.
+echo "[+] nightwatch-stage: scheduling reboot for firstboot service"
+shutdown -r +1 "Nightwatch: rebooting to start firstboot setup" &
 
 echo "[+] nightwatch-stage: done — firstboot service will run after reboot"
 STAGEEOF
     chmod +x "$boot_mount/nightwatch-stage.sh"
 
-    # Step 4: Configure first-boot trigger
+    # Step 5: Configure first-boot trigger
     # Newer Pi Imager uses cloud-init (user-data) instead of firstrun.sh.
     # Detect which mechanism is in use and inject accordingly.
-    echo "[4/4] Configuring first-boot trigger..."
+    echo "[5/5] Configuring first-boot trigger..."
     local firstrun="$boot_mount/firstrun.sh"
     local userdata="$boot_mount/user-data"
     local cmdline="$boot_mount/cmdline.txt"
@@ -359,15 +478,16 @@ STAGEEOF
             echo "[+] Staging command added to cloud-init user-data"
         fi
 
-        # Fix broken cmdline.txt → firstrun.sh reference (Pi Imager bug on cloud-init images).
-        # Pi Imager sets systemd.run=/boot/firmware/firstrun.sh but doesn't create the file,
-        # which causes the boot to HANG. Remove the directives — cloud-init handles first boot.
-        if [ -f "$cmdline" ] && grep -q 'systemd.run=' "$cmdline"; then
+        # Replace any existing systemd.run (e.g. Pi Imager's broken firstrun.sh reference)
+        # with our staging script. This ensures staging runs even if cloud-init runcmd
+        # fails (which happens on some Bookworm images).
+        if [ -f "$cmdline" ]; then
             local clean_cmdline
-            clean_cmdline=$(cat "$cmdline" | sed 's| systemd\.run=[^ ]*||g' | sed 's| systemd\.run_success_action=[^ ]*||g' | sed 's| systemd\.unit=kernel-command-line\.target||g')
-            echo "$clean_cmdline" > "$cmdline"
+            clean_cmdline=$(tr -d '\n' < "$cmdline" | sed 's| systemd\.run=[^ ]*||g; s| systemd\.run_success_action=[^ ]*||g; s| systemd\.unit=kernel-command-line\.target||g' | sed 's/[[:space:]]*$//')
+            printf '%s systemd.run=/boot/firmware/nightwatch-stage.sh systemd.run_success_action=reboot systemd.unit=kernel-command-line.target\n' \
+                "$clean_cmdline" > "$cmdline"
             rm -f "$firstrun" 2>/dev/null
-            echo "[+] Removed broken firstrun.sh references from cmdline.txt"
+            echo "[+] cmdline.txt: systemd.run set to nightwatch-stage.sh (belt-and-suspenders with cloud-init)"
         fi
 
     elif [ -f "$firstrun" ]; then
@@ -431,7 +551,7 @@ FIRSTEOF
     echo ""
     echo "[+] Verifying boot partition files..."
     local errors=0
-    for f in nightwatch.tar.gz nightwatch-secrets nightwatch-stage.sh; do
+    for f in nightwatch.tar.gz nightwatch-secrets nightwatch-node-id nightwatch-stage.sh; do
         if [ ! -f "$boot_mount/$f" ]; then
             echo -e "  ${RED}[MISS] $f${NC}"
             ((errors++)) || true
@@ -449,7 +569,7 @@ FIRSTEOF
     echo "  SD Card Ready! (boot-partition staging)"
     echo "======================================${NC}"
     echo ""
-    echo "  Node:       (auto-assigned on first boot)"
+    echo "  Node:       $NODE_NUM (IP: $MESH_IP)"
     echo "  Gateway:    $GATEWAY_MODE"
     echo "  Tailscale:  $([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo 'yes' || echo 'no')"
     echo ""
@@ -470,11 +590,16 @@ FIRSTEOF
     echo ""
     echo "  After first boot completes, the Pi will:"
     echo "  - Start the mesh network automatically on every boot"
-    echo "  - Start Docker services (IRC, bridge, web UI)"
+    echo "  - Start app services (IRC, bridge, web UI)"
     echo "  - Broadcast WiFi hotspot '${WIFI_SSID:-Nightwatch}'"
     if [ -n "${TAILSCALE_AUTH_KEY:-}" ]; then
     echo "  - Be accessible remotely via Tailscale"
     fi
+    echo ""
+
+    # Register this node
+    registry_add "$NODE_NUM" "$NODE_MODE" || true
+    echo -e "  ${GREEN}Node $NODE_NUM registered in .node-registry${NC}"
     echo ""
 }
 
@@ -555,6 +680,7 @@ fi
 _SAVE_ROUTER_PASSWORD="${ROUTER_PASSWORD:-}"
 _SAVE_IRC_LINK_PASSWORD="${IRC_LINK_PASSWORD:-}"
 _SAVE_TAILSCALE_AUTH_KEY="${TAILSCALE_AUTH_KEY:-}"
+_SAVE_HF_TOKEN="${HF_TOKEN:-}"
 
 load_env "$ENV_TEMPLATE"
 
@@ -562,7 +688,45 @@ load_env "$ENV_TEMPLATE"
 [ -n "$_SAVE_ROUTER_PASSWORD" ] && ROUTER_PASSWORD="$_SAVE_ROUTER_PASSWORD"
 [ -n "$_SAVE_IRC_LINK_PASSWORD" ] && IRC_LINK_PASSWORD="$_SAVE_IRC_LINK_PASSWORD"
 [ -n "$_SAVE_TAILSCALE_AUTH_KEY" ] && TAILSCALE_AUTH_KEY="$_SAVE_TAILSCALE_AUTH_KEY"
+[ -n "$_SAVE_HF_TOKEN" ] && HF_TOKEN="$_SAVE_HF_TOKEN"
 
+
+# ---- Resolve node number ----
+
+registry_init
+
+if [ -n "$NODE_NUM" ]; then
+    # Explicit node number from --node or NODE env var
+    if ! [[ "$NODE_NUM" =~ ^[0-9]+$ ]] || [ "$NODE_NUM" -lt 1 ] || [ "$NODE_NUM" -gt "$MAX_NODES" ]; then
+        echo -e "${RED}Error: invalid node number '$NODE_NUM' (must be 1-$MAX_NODES)${NC}"
+        exit 1
+    fi
+    if registry_has "$NODE_NUM"; then
+        echo -e "${YELLOW}Warning: node $NODE_NUM is already assigned in .node-registry${NC}"
+        echo ""
+        echo "Current assignments:"
+        cat "$REGISTRY_FILE"
+        echo ""
+        read -r -p "Re-use node $NODE_NUM anyway? [y/N] " _confirm
+        if [[ ! "$_confirm" =~ ^[Yy]$ ]]; then
+            echo "Aborted."
+            exit 1
+        fi
+        _NODE_REUSE=true
+    fi
+else
+    # Auto-pick next free number
+    NODE_NUM=$(registry_next_free)
+    if [ -z "$NODE_NUM" ]; then
+        echo -e "${RED}Error: all node numbers (1-$MAX_NODES) are taken${NC}"
+        echo "Remove old entries from .node-registry to free up numbers."
+        exit 1
+    fi
+    echo "[+] Auto-assigned node number: $NODE_NUM"
+fi
+
+MESH_IP="192.168.199.$((100 + NODE_NUM))"
+echo "[+] Node $NODE_NUM — IP will be $MESH_IP"
 
 # ---- Prompt for secrets ----
 
@@ -611,7 +775,7 @@ echo -e "${BOLD}${CYAN}======================================"
 echo "  Nightwatch SD Card Preparation"
 echo -e "======================================${NC}"
 echo ""
-echo "  Node:       (auto-assigned on first boot)"
+echo "  Node:       $NODE_NUM (IP: $MESH_IP)"
 echo "  Gateway:    $GATEWAY_MODE"
 echo "  Tailscale:  $([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo 'yes (auth key set)' || echo 'no')"
 echo "  SD card:    $SD_ROOT"
@@ -631,7 +795,7 @@ echo ""
 
 # ---- Step 1: Copy project ----
 
-echo "[1/5] Copying project to SD card..."
+echo "[1/6] Copying project to SD card..."
 DEST="$SD_ROOT/opt/nightwatch"
 sudo mkdir -p "$DEST"
 
@@ -642,7 +806,7 @@ echo "[+] Project copied to $DEST"
 
 # ---- Step 2: Save secrets ----
 
-echo "[2/5] Saving secrets (nodeconfig generates .env on first boot)..."
+echo "[2/6] Saving secrets (nodeconfig generates .env on first boot)..."
 
 SECRETS_DEST="$DEST/.secrets"
 # Write secrets using printf to safely handle special characters in passwords
@@ -651,11 +815,10 @@ sudo bash -c "printf '%s\n' '# nodeconfig.sh injects these into .env on first bo
 printf 'ROUTER_PASSWORD=%s\n' "$ROUTER_PASSWORD" | sudo tee -a "$SECRETS_DEST" > /dev/null
 printf 'IRC_LINK_PASSWORD=%s\n' "$IRC_LINK_PASSWORD" | sudo tee -a "$SECRETS_DEST" > /dev/null
 printf 'TAILSCALE_AUTH_KEY=%s\n' "${TAILSCALE_AUTH_KEY:-}" | sudo tee -a "$SECRETS_DEST" > /dev/null
+printf 'HF_TOKEN=%s\n' "${HF_TOKEN:-}" | sudo tee -a "$SECRETS_DEST" > /dev/null
 sudo chmod 600 "$SECRETS_DEST"
 
-if [ "$GATEWAY_MODE" = true ]; then
-    echo "MESH_GATEWAY=true" | sudo tee -a "$SECRETS_DEST" > /dev/null
-fi
+printf 'NODE_MODE=%s\n' "$NODE_MODE" | sudo tee -a "$SECRETS_DEST" > /dev/null
 
 # Remove any .env so nodeconfig generates a fresh one
 sudo rm -f "$DEST/.env"
@@ -664,16 +827,17 @@ echo "[+] Secrets saved"
 echo "    ROUTER_PASSWORD=***"
 echo "    IRC_LINK_PASSWORD=***"
 echo "    TAILSCALE_AUTH_KEY=$([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo '***' || echo '(empty)')"
+echo "    HF_TOKEN=$([ -n "${HF_TOKEN:-}" ] && echo '***' || echo '(empty)')"
 
 # ---- Step 3: Write /etc/nightwatch.conf ----
 
-echo "[3/5] Writing nightwatch.conf..."
+echo "[3/6] Writing nightwatch.conf..."
 echo "NIGHTWATCH_DIR=/opt/nightwatch" | sudo tee "$SD_ROOT/etc/nightwatch.conf" > /dev/null
 echo "[+] /etc/nightwatch.conf written"
 
 # ---- Step 4: Install firstboot service ----
 
-echo "[4/5] Installing firstboot service..."
+echo "[4/6] Installing firstboot service..."
 sudo chmod +x "$DEST/scripts/firstboot.sh"
 sudo chmod +x "$DEST/scripts/mesh-fix.sh"
 sudo chmod +x "$DEST/scripts/setup-rpi.sh"
@@ -693,12 +857,18 @@ sudo ln -sf /etc/systemd/system/nightwatch-firstboot.service \
 
 echo "[+] Firstboot service installed and enabled"
 
-# ---- Step 5: Verify ----
+# ---- Step 5: Write fixed node ID ----
 
-echo "[5/5] Verifying..."
+echo "[5/6] Writing node ID ($NODE_NUM) to SD card..."
+printf '%s\nFIXED\n' "$NODE_NUM" | sudo tee "$DEST/.node-number" > /dev/null
+echo "[+] .node-number written (FIXED)"
+
+# ---- Step 6: Verify ----
+
+echo "[6/6] Verifying..."
 
 ERRORS=0
-for f in .env.example .secrets scripts/firstboot.sh scripts/mesh-fix.sh scripts/nodeconfig.sh scripts/node-discovery.sh scripts/setup-distributed-irc.sh docker-compose.yml irc-bridge-go/Dockerfile html/index.html; do
+for f in .env.example .secrets .node-number scripts/firstboot.sh scripts/mesh-fix.sh scripts/nodeconfig.sh scripts/node-discovery.sh scripts/setup-distributed-irc.sh irc-bridge-go/irc-bridge html/index.html; do
     if [ ! -f "$DEST/$f" ]; then
         echo -e "  ${RED}[MISS] $f${NC}"
         ((ERRORS++))
@@ -728,7 +898,7 @@ echo -e "${GREEN}${BOLD}======================================"
 echo "  SD Card Ready!"
 echo "======================================${NC}"
 echo ""
-echo "  Node:       (auto-assigned on first boot)"
+echo "  Node:       $NODE_NUM (IP: $MESH_IP)"
 echo "  Gateway:    $GATEWAY_MODE"
 echo "  Tailscale:  $([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo 'yes' || echo 'no')"
 echo ""
@@ -745,9 +915,14 @@ echo "     tail -f /var/log/nightwatch-firstboot.log"
 echo ""
 echo "  After first boot completes, the Pi will:"
 echo "  - Start the mesh network automatically on every boot"
-echo "  - Start Docker services (IRC, bridge, web UI)"
+echo "  - Start app services (IRC, bridge, web UI)"
 echo "  - Broadcast WiFi hotspot '${WIFI_SSID:-Nightwatch}'"
 if [ -n "${TAILSCALE_AUTH_KEY:-}" ]; then
 echo "  - Be accessible remotely via Tailscale"
 fi
+echo ""
+
+# Register this node
+registry_add "$NODE_NUM" "$NODE_MODE" || true
+echo -e "  ${GREEN}Node $NODE_NUM registered in .node-registry${NC}"
 echo ""

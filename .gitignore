@@ -1,35 +1,35 @@
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-*.pyc
-*.pyo
-*.pyd
-*.pdb
-*.egg-info/
-.eggs/
-dist/
-build/
-*.egg
-
-# Environment
+# Environment & secrets
 .env
 !.env.example
 *.env
 *.envrc
 .secrets
 .node-number
-
-# Docker
-*.tar
-*.tar.gz
-docker-compose.override.yml
+.node-registry
 
 # Generated configs (contain secrets or node-specific settings)
 ngircd/ngircd.conf
 dnsmasq/dnsmasq.conf
+hostapd/hostapd.conf
 arp-entries.conf
+html/debug.json
+
+# TLS certs (generated per-node)
+nginx/certs/
+
+# Compiled Go binary
+irc-bridge-go/irc-bridge
+
+# PiShrink (downloaded separately)
+PiShrink
+PiShrink/
+pishrink.sh
+
+# SD card images
+nightwatch.img*
+nightwatch-optimized.tar.gz
+*.tar
+*.tar.gz
 
 # Logs
 *.log
@@ -44,16 +44,19 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
-
-# Shell script artifacts
 *.bak
-*.swp
 
-# Misc
-nightwatch-optimized.tar.gz
+# Python (legacy)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
 
-# Ignore compiled Go binaries
-irc-bridge-go/irc-bridge
-
-# Ignore node_modules if any
+# Node
 node_modules/
+
+# Claude Code project-local config
+.claude/

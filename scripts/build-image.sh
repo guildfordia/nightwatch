@@ -16,10 +16,18 @@
 #
 # Usage: sudo ./scripts/build-image.sh
 #
-# The resulting image includes all packages, Docker images, and services
+# The resulting image includes all packages and services
 # pre-installed — clones don't need internet on first boot.
 
 set -euo pipefail
+
+# Safety check: refuse to run on non-Pi hardware (clears history + removes node config)
+if ! grep -qi "raspberry pi\|BCM2" /proc/cpuinfo 2>/dev/null; then
+    echo -e "\033[0;31mERROR: This doesn't look like a Raspberry Pi!\033[0m"
+    echo "This script clears history and removes node config — don't run on your laptop."
+    read -rp "Continue anyway? [y/N] " confirm
+    [[ ! "${confirm:-}" =~ ^[Yy]$ ]] && { echo "Aborted."; exit 1; }
+fi
 
 # Read project path from /etc/nightwatch.conf (written by setup-rpi.sh)
 if [ -f /etc/nightwatch.conf ]; then
@@ -42,8 +50,6 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/common.sh
 source "$NIGHTWATCH_DIR/scripts/common.sh"
-
-detect_docker_compose
 
 echo ""
 echo -e "${BOLD}======================================"
@@ -74,25 +80,32 @@ fi
 # ---- Step 1: Stop services ----
 
 echo "[1/7] Stopping services..."
-$DC --env-file .env down 2>/dev/null || true
+systemctl stop nightwatch-app.service 2>/dev/null || true
 systemctl stop nightwatch-discovery.service 2>/dev/null || true
 systemctl stop nightwatch-mesh.service 2>/dev/null || true
 echo "[+] Services stopped"
 
-# ---- Step 2: Pre-build Docker images ----
+# ---- Step 2: Verify irc-bridge binary ----
 
 echo ""
-echo "[2/7] Pre-building Docker images (so clones don't need internet)..."
-$DC --env-file .env build
-echo "[+] Docker images built and cached"
+echo "[2/7] Checking irc-bridge binary..."
+if [ -x "$NIGHTWATCH_DIR/irc-bridge-go/irc-bridge" ]; then
+    echo "[+] irc-bridge binary present ($(ls -lh "$NIGHTWATCH_DIR/irc-bridge-go/irc-bridge" | awk '{print $5}'))"
+else
+    echo -e "${RED}[!] irc-bridge binary missing — cross-compile on laptop first: make build-bridge${NC}"
+fi
 
-# ---- Step 3: Pre-pull base images ----
+# ---- Step 3: Verify native services ----
 
 echo ""
-echo "[3/7] Pre-pulling base images..."
-docker pull linuxserver/ngircd:latest
-docker pull nginx:alpine
-echo "[+] Base images cached"
+echo "[3/7] Checking native service installations..."
+for pkg in ngircd nginx; do
+    if dpkg -l "$pkg" 2>/dev/null | grep -q '^ii'; then
+        echo "  [+] $pkg installed"
+    else
+        echo -e "  ${RED}[!] $pkg not installed${NC}"
+    fi
+done
 
 # ---- Step 4: Logout Tailscale ----
 
@@ -123,7 +136,7 @@ if [ -f "$NIGHTWATCH_DIR/.env" ]; then
     echo "# These get injected into .env by nodeconfig.sh on boot" >> "$SECRETS_FILE"
     # Strip surrounding quotes from values so nodeconfig's set_env_value
     # doesn't double-quote them (e.g. KEY='$val' → KEY=$val in .secrets)
-    grep -E '^(ROUTER_PASSWORD|IRC_LINK_PASSWORD|TAILSCALE_AUTH_KEY)=' "$NIGHTWATCH_DIR/.env" \
+    grep -E '^(IRC_LINK_PASSWORD|TAILSCALE_AUTH_KEY)=' "$NIGHTWATCH_DIR/.env" \
         | sed "s/='\(.*\)'$/=\1/; s/=\"\(.*\)\"$/=\1/" \
         >> "$SECRETS_FILE" 2>/dev/null || true
     chmod 600 "$SECRETS_FILE"
@@ -145,6 +158,10 @@ echo "  Removed ngircd.conf"
 # Remove generated dnsmasq config
 rm -f "$NIGHTWATCH_DIR/dnsmasq/dnsmasq.conf"
 echo "  Removed dnsmasq.conf"
+
+# Remove generated hostapd config (regenerated per-node on boot)
+rm -f "$NIGHTWATCH_DIR/hostapd/hostapd.conf"
+echo "  Removed hostapd.conf"
 
 # Remove firstboot stamp if present
 rm -f "$NIGHTWATCH_DIR/.firstboot-done"
@@ -231,7 +248,7 @@ echo "     → Choose OS → Use custom → select nightwatch.img.xz"
 echo "     → Choose storage → Flash"
 echo "     No configuration needed — each Pi auto-assigns its node number."
 echo ""
-echo -e "  ${YELLOW}Note: This golden image has all packages and Docker images pre-installed.${NC}"
+echo -e "  ${YELLOW}Note: This golden image has all packages and services pre-installed.${NC}"
 echo -e "  ${YELLOW}Clones do NOT need internet on first boot — they just auto-configure.${NC}"
 echo ""
 echo "  That's it. Flash → boot → auto-configures → joins the mesh."

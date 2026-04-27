@@ -3,17 +3,13 @@
 #
 # Runs on every boot BEFORE the mesh service.
 # Determines this node's number by:
-#   1. Scanning the mesh for existing nodes
-#   2. If we have a saved number and it's not taken, keep it
-#   3. Otherwise, pick the lowest available number
+#   1. If .node-number has FIXED marker (set at SD card prep), use it as-is
+#   2. Otherwise, scan the mesh for existing nodes
+#   3. If we have a saved number and it's not taken, keep it
+#   4. Otherwise, pick the lowest available number
 #
-# This ensures no conflicts even when multiple clones boot from the
-# same golden image. Each node always verifies its number is unique.
-#
+# Fixed IDs (from prepare-sdcard.sh --node N) are never reassigned.
 # Generates .env and ngircd.conf based on the node number.
-#
-# This enables the "flash and forget" workflow:
-#   Flash golden image → boot → auto-picks unique node number → joins mesh
 
 set -euo pipefail
 
@@ -54,7 +50,7 @@ fi
 # ---- Sync service files to systemd ----
 # Ensures golden image clones and updates always have the latest service files
 SERVICES_UPDATED=false
-for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch-docker nightwatch-watchdog; do
+for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch-app nightwatch-bridge nightwatch-led nightwatch-debug; do
     SRC="$NIGHTWATCH_DIR/scripts/${svc}.service"
     DST="/etc/systemd/system/${svc}.service"
     if [ -f "$SRC" ]; then
@@ -67,32 +63,22 @@ for svc in nightwatch-nodeconfig nightwatch-mesh nightwatch-discovery nightwatch
         fi
     fi
 done
-# Sync watchdog timer
-TIMER_SRC="$NIGHTWATCH_DIR/scripts/nightwatch-watchdog.timer"
-TIMER_DST="/etc/systemd/system/nightwatch-watchdog.timer"
-if [ -f "$TIMER_SRC" ]; then
-    if [ ! -f "$TIMER_DST" ] || ! diff -q "$TIMER_SRC" "$TIMER_DST" >/dev/null 2>&1; then
-        cp "$TIMER_SRC" "$TIMER_DST"
-        SERVICES_UPDATED=true
-        log "Updated nightwatch-watchdog.timer"
-    fi
+# Migrate legacy nightwatch-docker.service → nightwatch-app.service
+if [ -f /etc/systemd/system/nightwatch-docker.service ]; then
+    systemctl stop nightwatch-docker.service 2>/dev/null || true
+    systemctl disable nightwatch-docker.service 2>/dev/null || true
+    rm -f /etc/systemd/system/nightwatch-docker.service
+    SERVICES_UPDATED=true
+    log "Migrated nightwatch-docker → nightwatch-app"
 fi
+
 if [ "$SERVICES_UPDATED" = true ]; then
     systemctl daemon-reload
     log "systemd reloaded"
 fi
-# Ensure watchdog timer is enabled
-if ! systemctl is-enabled --quiet nightwatch-watchdog.timer 2>/dev/null; then
-    systemctl enable --now nightwatch-watchdog.timer 2>/dev/null || true
-    log "Watchdog timer enabled"
-fi
 
-# Ensure Docker DNS is configured
-if [ ! -f /etc/docker/daemon.json ]; then
-    mkdir -p /etc/docker
-    echo '{"dns":["8.8.8.8","1.1.1.1"]}' > /etc/docker/daemon.json
-    log "Docker DNS configured"
-fi
+# Ensure irc-bridge data directory exists
+mkdir -p "$NIGHTWATCH_DIR/irc-bridge-go/data" 2>/dev/null || true
 
 # Load mesh config defaults from template
 MESH_IFACE="wlan1"
@@ -123,10 +109,10 @@ scan_mesh() {
         mkdir -p /etc/NetworkManager/conf.d
         cat > "$NM_UNMANAGED_CONF" << NMEOF
 [keyfile]
-unmanaged-devices=interface-name:${MESH_IFACE}
+unmanaged-devices=interface-name:${MESH_IFACE};interface-name:wlan2
 NMEOF
         nmcli general reload 2>/dev/null || true
-        log "NetworkManager: $MESH_IFACE permanently set to unmanaged"
+        log "NetworkManager: $MESH_IFACE and wlan2 permanently set to unmanaged"
     fi
 
     # Release interface from NetworkManager (immediate effect)
@@ -137,6 +123,22 @@ NMEOF
     if pgrep -f "wpa_supplicant.*$MESH_IFACE" >/dev/null 2>&1; then
         pkill -9 -f "wpa_supplicant.*$MESH_IFACE" 2>/dev/null || true
         sleep 1
+    fi
+
+    # Wait for the dongle to appear (it may not be ready immediately after boot).
+    # Give it up to 30s — if still missing, abort the scan rather than hanging.
+    DONGLE_TIMEOUT=30
+    DONGLE_WAIT=0
+    while [ ! -d "/sys/class/net/$MESH_IFACE" ] && [ "$DONGLE_WAIT" -lt "$DONGLE_TIMEOUT" ]; do
+        if [ "$DONGLE_WAIT" -eq 0 ]; then
+            log "Waiting for $MESH_IFACE to appear (up to ${DONGLE_TIMEOUT}s)..."
+        fi
+        sleep 2
+        DONGLE_WAIT=$((DONGLE_WAIT + 2))
+    done
+    if [ ! -d "/sys/class/net/$MESH_IFACE" ]; then
+        log "Error: $MESH_IFACE not found after ${DONGLE_TIMEOUT}s — skipping mesh scan"
+        return
     fi
 
     # Check if the dongle is responsive; if not, try a USB reset
@@ -163,14 +165,19 @@ NMEOF
                 log "Warning: could not reset USB device for $MESH_IFACE"
             fi
         fi
+        # Final check after reset — abort if still not working
+        if ! iw dev "$MESH_IFACE" info >/dev/null 2>&1; then
+            log "Error: $MESH_IFACE still not responding after USB reset — skipping mesh scan"
+            return
+        fi
     fi
 
     # Load batman-adv
     modprobe batman-adv 2>/dev/null || true
 
-    # Set up mesh interface
+    # Set up mesh interface (timeout protects against driver hangs)
     ip link set "$MESH_IFACE" down 2>/dev/null || true
-    if iw dev "$MESH_IFACE" set type mesh 2>/dev/null; then
+    if timeout 10 iw dev "$MESH_IFACE" set type mesh 2>/dev/null; then
         ip link set "$MESH_IFACE" up
         sleep 1
         iw dev "$MESH_IFACE" mesh join "$MESH_ID" freq "$FREQ" 2>/dev/null || true
@@ -184,16 +191,24 @@ NMEOF
 
         # Wait for batman-adv to converge and neighbor count to stabilize.
         # All nodes must see the same set of neighbors for MAC-based assignment
-        # to be consistent. Pi Zeros take ~45-60s to boot, so we wait 60s
-        # minimum, then check that the neighbor count is stable.
+        # to be consistent. Uses adaptive detection: check every 5s, consider
+        # converged after 3 consecutive stable checks (15s of stability).
+        # Initial 15s grace period lets other nodes boot. Max 90s timeout.
         # This only runs on first boot (no .node-number file) — subsequent
         # boots use the saved number and skip the scan.
-        log "Temporary mesh is up, waiting 60s for all nodes to boot..."
-        sleep 60
-        log "Checking neighbor convergence..."
+        CONVERGE_INTERVAL=5
+        CONVERGE_STABLE_NEEDED=3
+        CONVERGE_MAX=90
+        CONVERGE_GRACE=15
+
+        log "Temporary mesh is up, waiting ${CONVERGE_GRACE}s grace period..."
+        sleep "$CONVERGE_GRACE"
+
+        log "Checking neighbor convergence (every ${CONVERGE_INTERVAL}s, need ${CONVERGE_STABLE_NEEDED} stable, max ${CONVERGE_MAX}s)..."
         PREV_COUNT=-1
         STABLE_FOR=0
-        for attempt in $(seq 1 20); do
+        ELAPSED=$CONVERGE_GRACE
+        while [ "$ELAPSED" -lt "$CONVERGE_MAX" ]; do
             # Count neighbors — skip header lines (first 2 lines of batctl output)
             CUR_COUNT=$(batctl meshif bat0 n 2>/dev/null | tail -n +3 | grep -c "$MESH_IFACE" || true)
             CUR_COUNT=${CUR_COUNT:-0}
@@ -203,13 +218,17 @@ NMEOF
                 STABLE_FOR=0
                 PREV_COUNT=$CUR_COUNT
             fi
-            log "  convergence check $attempt: $CUR_COUNT neighbor(s) (stable for ${STABLE_FOR})"
-            # Consider stable after 5 consecutive identical counts (15s)
-            if [ "$STABLE_FOR" -ge 5 ]; then
+            log "  convergence ${ELAPSED}s/${CONVERGE_MAX}s: $CUR_COUNT neighbor(s) (stable for ${STABLE_FOR}/${CONVERGE_STABLE_NEEDED})"
+            if [ "$STABLE_FOR" -ge "$CONVERGE_STABLE_NEEDED" ]; then
+                log "Mesh converged after ${ELAPSED}s"
                 break
             fi
-            sleep 3
+            sleep "$CONVERGE_INTERVAL"
+            ELAPSED=$((ELAPSED + CONVERGE_INTERVAL))
         done
+        if [ "$ELAPSED" -ge "$CONVERGE_MAX" ]; then
+            log "Warning: convergence timeout after ${CONVERGE_MAX}s — proceeding with $CUR_COUNT neighbor(s)"
+        fi
         log "Scanning with $CUR_COUNT neighbor(s)..."
     else
         log "Warning: could not set $MESH_IFACE to mesh mode"
@@ -237,7 +256,7 @@ NMEOF
 
         if [ -n "$NEIGHBOR_MACS" ] && [ "$MESH_PEER_COUNT" -gt 0 ]; then
             # Build sorted list of all MACs (ours + neighbors)
-            ALL_MACS=$(printf '%s\n%s' "$OUR_MAC" "$NEIGHBOR_MACS" | sort)
+            ALL_MACS=$(printf '%s\n%s\n' "$OUR_MAC" "$NEIGHBOR_MACS" | sort -u)
             # Our position in the sorted list is our node number
             OUR_POSITION=1
             while IFS= read -r mac; do
@@ -281,19 +300,31 @@ CURRENT_HOSTNAME=$(hostname)
 log "Hostname: $CURRENT_HOSTNAME"
 
 IS_GATEWAY=false
+NODE_MODE="mesh"
 
-# Check for gateway hostname (matches nightwatch-gw-3, nightwatch-gw, nightwatch-gateway)
+# Detect mode from hostname
 if [[ "$CURRENT_HOSTNAME" =~ -gw(-|$) ]] || [[ "$CURRENT_HOSTNAME" =~ -gateway(-|$) ]]; then
+    NODE_MODE="gateway"
     IS_GATEWAY=true
-    log "Gateway mode detected"
+    log "Gateway mode detected from hostname"
+elif [[ "$CURRENT_HOSTNAME" =~ -sb(-|$) ]] || [[ "$CURRENT_HOSTNAME" =~ -sound(-|$) ]]; then
+    NODE_MODE="sound-bridge"
+    log "Sound-bridge mode detected from hostname"
 fi
 
-# Check gateway flag in .secrets
+# Check mode/gateway flag in .secrets
 SECRETS_FILE="$NIGHTWATCH_DIR/.secrets"
-if [ -f "$SECRETS_FILE" ] && grep -q '^MESH_GATEWAY=true' "$SECRETS_FILE" 2>/dev/null; then
-    IS_GATEWAY=true
-    log "Gateway mode from .secrets"
+if [ -f "$SECRETS_FILE" ]; then
+    SECRETS_MODE=$(grep '^NODE_MODE=' "$SECRETS_FILE" 2>/dev/null | cut -d= -f2 || true)
+    if [ -n "$SECRETS_MODE" ]; then
+        NODE_MODE="$SECRETS_MODE"
+        log "Node mode from .secrets: $NODE_MODE"
+    elif grep -q '^MESH_GATEWAY=true' "$SECRETS_FILE" 2>/dev/null; then
+        NODE_MODE="gateway"
+        log "Gateway mode from .secrets (legacy MESH_GATEWAY)"
+    fi
 fi
+IS_GATEWAY=$( [ "$NODE_MODE" = "gateway" ] && echo true || echo false )
 
 # Ensure temporary mesh is torn down on exit (e.g., if script crashes mid-scan)
 trap 'teardown_mesh' EXIT
@@ -303,11 +334,42 @@ trap 'teardown_mesh' EXIT
 # can crash the dongle, leaving wlan1 missing when the mesh service starts.
 # Only scan on first boot (no saved number) to avoid this.
 NODE_NUM=""
+IS_FIXED=false
 if [ -f "$NODE_NUM_FILE" ]; then
-    SAVED_NUM=$(cat "$NODE_NUM_FILE")
+    SAVED_NUM=$(head -1 "$NODE_NUM_FILE")
+    # Check for FIXED marker (second line) — set at SD card prep time
+    if sed -n '2p' "$NODE_NUM_FILE" 2>/dev/null | grep -q '^FIXED$'; then
+        IS_FIXED=true
+    fi
     if [[ "$SAVED_NUM" =~ ^[0-9]+$ ]] && [ "$SAVED_NUM" -ge 1 ] && [ "$SAVED_NUM" -le "$MAX_NODES" ]; then
         NODE_NUM="$SAVED_NUM"
-        log "Using saved node number: $NODE_NUM (from $NODE_NUM_FILE)"
+        if [ "$IS_FIXED" = true ]; then
+            log "Using FIXED node number: $NODE_NUM (assigned at SD card prep)"
+        else
+            log "Using saved node number: $NODE_NUM (from $NODE_NUM_FILE)"
+        fi
+
+        # Lightweight conflict check: if bat0 is already up (mesh service running),
+        # verify our saved number matches our MAC position. This catches the case
+        # where firstboot assigned #1 while solo, but now other nodes are on the mesh.
+        # Skip this check for FIXED nodes — their number was assigned at SD card
+        # prep time and tracked in the registry, so conflicts shouldn't happen.
+        if [ "$IS_FIXED" = false ] && [ -d /sys/class/net/bat0 ]; then
+            OUR_MAC=$(cat "/sys/class/net/$MESH_IFACE/address" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
+            NEIGHBOR_MACS=$(batctl meshif bat0 n 2>/dev/null | tail -n +3 | awk '{print $2}' | tr '[:upper:]' '[:lower:]' | sort || true)
+            if [ -n "$OUR_MAC" ] && [ -n "$NEIGHBOR_MACS" ]; then
+                ALL_MACS=$(printf '%s\n%s\n' "$OUR_MAC" "$NEIGHBOR_MACS" | sort -u)
+                CORRECT_POS=1
+                while IFS= read -r mac; do
+                    [ "$mac" = "$OUR_MAC" ] && break
+                    CORRECT_POS=$((CORRECT_POS + 1))
+                done <<< "$ALL_MACS"
+                if [ "$CORRECT_POS" != "$NODE_NUM" ]; then
+                    log "Conflict: saved #$NODE_NUM but MAC sort says #$CORRECT_POS — reassigning"
+                    NODE_NUM="$CORRECT_POS"
+                fi
+            fi
+        fi
     fi
 fi
 
@@ -336,14 +398,21 @@ teardown_mesh
 
 # Save node number for next boot
 echo "$NODE_NUM" > "$NODE_NUM_FILE"
+sync
 log "Node number: $NODE_NUM (saved to $NODE_NUM_FILE)"
 
-# Set hostname to match the assigned number
-if [ "$IS_GATEWAY" = true ]; then
-    NEW_HOSTNAME="nightwatch-gw-${NODE_NUM}"
-else
+# Set hostname to match the assigned number and mode
+case "$NODE_MODE" in
+    gateway)      NEW_HOSTNAME="nightwatch-gw-${NODE_NUM}" ;;
+    sound-bridge) NEW_HOSTNAME="nightwatch-sb-${NODE_NUM}" ;;
+    *)            NEW_HOSTNAME="nightwatch-${NODE_NUM}" ;;
+esac
+# Validate hostname (only alphanumeric and hyphens allowed)
+if ! [[ "$NEW_HOSTNAME" =~ ^[a-zA-Z0-9-]+$ ]]; then
+    log "Warning: invalid hostname chars in '$NEW_HOSTNAME', falling back to nightwatch-${NODE_NUM}"
     NEW_HOSTNAME="nightwatch-${NODE_NUM}"
 fi
+
 if [ "$CURRENT_HOSTNAME" != "$NEW_HOSTNAME" ]; then
     hostnamectl set-hostname "$NEW_HOSTNAME" 2>/dev/null || echo "$NEW_HOSTNAME" > /etc/hostname
     sed -i "s/^127\.0\.1\.1[[:space:]]\+[^#]*/127.0.1.1\t$NEW_HOSTNAME /" /etc/hosts 2>/dev/null || true
@@ -356,15 +425,65 @@ if [ "$CURRENT_HOSTNAME" != "$NEW_HOSTNAME" ]; then
     else
         log "Warning: hostname change to $NEW_HOSTNAME may not have taken effect (got: $ACTUAL_HOSTNAME)"
     fi
-    # Restart Avahi so the new hostname is advertised via mDNS (.local)
-    if systemctl is-active --quiet avahi-daemon 2>/dev/null; then
-        systemctl restart avahi-daemon
-        log "Restarted avahi-daemon to advertise $NEW_HOSTNAME.local"
+fi
+
+# ---- Configure avahi (hostname + interface scoping) ----
+# Always apply, even when hostname is unchanged, so code updates to the
+# interface-scoping policy land on existing nodes without needing a
+# hostname change to trigger the update.
+#
+# Interface scoping prevents mDNS collisions that suppress A records:
+# each Pi has 4+ interfaces (wlan0 home LAN, wlan1 mesh, wlan2 AP, eth0,
+# bat0, br0) and avahi's default (publish on all) means one Pi announces
+# nightwatch-N from multiple MACs. Combined with batman-adv's L2 mDNS
+# reflection across the mesh, avahi's collision detector trips and
+# suppresses the A record — symptom: `_workstation._tcp` advertisement
+# still visible but `nightwatch-N.local` fails to resolve.
+#
+# Policy: publish only on client-facing LAN interfaces. Mesh-facing
+# interfaces (wlan1, bat0) and the bridge that carries mesh traffic (br0)
+# are excluded. AP clients use IP/fixed config, not mDNS, so they don't
+# need .local resolution.
+AVAHI_CONF=/etc/avahi/avahi-daemon.conf
+AVAHI_ALLOW_IFACES="wlan0,eth0"
+AVAHI_CHANGED=false
+if [ -f "$AVAHI_CONF" ]; then
+    # host-name
+    if grep -q '^host-name=' "$AVAHI_CONF" 2>/dev/null; then
+        if ! grep -qx "host-name=$NEW_HOSTNAME" "$AVAHI_CONF"; then
+            sed -i "s/^host-name=.*/host-name=$NEW_HOSTNAME/" "$AVAHI_CONF"
+            AVAHI_CHANGED=true
+        fi
+    elif grep -q '^#host-name=' "$AVAHI_CONF" 2>/dev/null; then
+        sed -i "s/^#host-name=.*/host-name=$NEW_HOSTNAME/" "$AVAHI_CONF"
+        AVAHI_CHANGED=true
+    else
+        sed -i "/^\[server\]/a host-name=$NEW_HOSTNAME" "$AVAHI_CONF"
+        AVAHI_CHANGED=true
+    fi
+    # allow-interfaces
+    if grep -q '^allow-interfaces=' "$AVAHI_CONF" 2>/dev/null; then
+        if ! grep -qx "allow-interfaces=$AVAHI_ALLOW_IFACES" "$AVAHI_CONF"; then
+            sed -i "s/^allow-interfaces=.*/allow-interfaces=$AVAHI_ALLOW_IFACES/" "$AVAHI_CONF"
+            AVAHI_CHANGED=true
+        fi
+    elif grep -q '^#allow-interfaces=' "$AVAHI_CONF" 2>/dev/null; then
+        sed -i "s|^#allow-interfaces=.*|allow-interfaces=$AVAHI_ALLOW_IFACES|" "$AVAHI_CONF"
+        AVAHI_CHANGED=true
+    else
+        sed -i "/^\[server\]/a allow-interfaces=$AVAHI_ALLOW_IFACES" "$AVAHI_CONF"
+        AVAHI_CHANGED=true
     fi
 fi
 
+if [ "$AVAHI_CHANGED" = true ] && systemctl is-active --quiet avahi-daemon 2>/dev/null; then
+    systemctl stop avahi-daemon 2>/dev/null || true
+    systemctl start avahi-daemon
+    log "Restarted avahi-daemon ($NEW_HOSTNAME.local on: $AVAHI_ALLOW_IFACES)"
+fi
+
 # ---- Ensure eth0 doesn't steal the default route from wlan0 ----
-# eth0 connects to the GL.iNet router (local AP, no internet). If DHCP on eth0
+# wlan2 is the hostapd WiFi AP interface. eth0 is unused in mesh mode.
 # sets a default route, it shadows wlan0 (which has actual internet) and breaks
 # package installs during firstboot. Fix this early, before anything needs internet.
 AP_IFACE="${AP_IFACE:-eth0}"
@@ -401,7 +520,7 @@ if [ -f "$ENV_FILE" ]; then
     fi
     log "Node number changed ($EXISTING_NUM → $NODE_NUM) — regenerating config"
     # Restart services that depend on the node number/IP
-    # mesh-fix.sh configures br0 with MESH_IP, Docker services bind to it
+    # mesh-fix.sh configures br0 with MESH_IP, app services bind to it
     RESTART_SERVICES=true
 fi
 
@@ -410,6 +529,7 @@ fi
 log "Generating .env for node $NODE_NUM..."
 
 cp "$ENV_TEMPLATE" "$ENV_FILE"
+chmod 600 "$ENV_FILE"
 
 # Calculate mesh IP: 192.168.199.(100 + node_number)
 if ! MESH_IP="$(mesh_ip_for_node "$NODE_NUM")"; then
@@ -421,16 +541,19 @@ fi
 set_env_value "$ENV_FILE" "PI_NUMBER" "$NODE_NUM"
 set_env_value "$ENV_FILE" "MESH_IP" "$MESH_IP"
 
-# Gateway config
-if [ "$IS_GATEWAY" = true ]; then
-    set_env_value "$ENV_FILE" "MESH_GATEWAY" "true"
-    set_env_value "$ENV_FILE" "INET_IFACE" "eth0"
-    log "Gateway mode enabled"
+# Node mode
+set_env_value "$ENV_FILE" "NODE_MODE" "$NODE_MODE"
+if [ "$NODE_MODE" = "gateway" ]; then
+    set_env_value "$ENV_FILE" "INET_IFACE" "wlan0"
 fi
+log "Node mode: $NODE_MODE"
 
 # Inject secrets from .secrets file (preserved by build-image.sh)
 if [ -f "$SECRETS_FILE" ]; then
     log "Injecting secrets from .secrets..."
+    # Whitelist of allowed secret keys — prevents .secrets from injecting
+    # arbitrary env vars into the node config (defense in depth)
+    ALLOWED_KEYS="ROUTER_PASSWORD IRC_LINK_PASSWORD TAILSCALE_AUTH_KEY HF_TOKEN WIFI_SSID WIFI_PASSWORD"
     while IFS= read -r line; do
         # Skip comments and empty lines
         [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
@@ -440,14 +563,24 @@ if [ -f "$SECRETS_FILE" ]; then
         key="${line%%=*}"
         value="${line#*=}"
         [[ -z "$key" ]] && continue
-        [[ "$key" = "MESH_GATEWAY" ]] && continue
+        # Only inject whitelisted keys
+        allowed=false
+        for k in $ALLOWED_KEYS; do
+            [[ "$key" = "$k" ]] && { allowed=true; break; }
+        done
+        if [ "$allowed" = false ]; then
+            log "Skipping unknown secret key: $key"
+            continue
+        fi
         # Use set_env_value — no escaping needed
-        set_env_value "$ENV_FILE" "$key" "$value"
+        if ! set_env_value "$ENV_FILE" "$key" "$value"; then
+            log "ERROR: Failed to inject secret key $key"
+        fi
     done < "$SECRETS_FILE"
     log "Secrets injected"
 fi
 
-log "Config: PI_NUMBER=$NODE_NUM MESH_IP=$MESH_IP GATEWAY=$IS_GATEWAY"
+log "Config: PI_NUMBER=$NODE_NUM MESH_IP=$MESH_IP MODE=$NODE_MODE"
 
 # ---- Tailscale setup (if auth key present and not yet connected) ----
 
@@ -488,13 +621,18 @@ else
     log "Warning: setup-distributed-irc.sh not found"
 fi
 
+# ---- Regenerate dnsmasq config (DHCP pool depends on node number) ----
+
+log "Generating dnsmasq.conf for node $NODE_NUM..."
+generate_dnsmasq_conf "$NIGHTWATCH_DIR/dnsmasq/dnsmasq.conf" "$NODE_NUM" "$MESH_IP"
+
 # ---- Restart services if node number changed ----
 
 if [ "$RESTART_SERVICES" = true ]; then
-    log "Node number changed — restarting mesh and Docker services..."
+    log "Node number changed — restarting mesh and app services..."
     systemctl restart nightwatch-mesh.service 2>/dev/null || true
     sleep 5
-    systemctl restart nightwatch-docker.service 2>/dev/null || true
+    systemctl restart nightwatch-app.service 2>/dev/null || true
     log "Services restarted with new config"
 fi
 

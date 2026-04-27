@@ -8,14 +8,14 @@
 # What it does:
 #   1. Wait for network (to apt install)
 #   2. Install all system dependencies
-#   3. Install Docker + Docker Compose
-#   4. Load batman-adv, disable system hostapd/dnsmasq
+#   3. Install app services (ngircd, nginx)
+#   4. Load batman-adv, disable system hostapd/dnsmasq (mesh-fix.sh manages them)
 #   5. Configure dhcpcd + DNS (resolv.conf locked)
 #   6. Install Tailscale (if TAILSCALE_AUTH_KEY set)
 #   7. Setup distributed IRC config
 #   8. Generate dnsmasq config
-#   9. Install all systemd services (nodeconfig, mesh, discovery, docker)
-#  10. Build Docker images
+#   9. Install all systemd services (nodeconfig, mesh, discovery, app)
+#  10. Verify irc-bridge binary
 #  11. Start everything
 #  11b. Resolve node number conflicts (MAC-based reassignment)
 #  12. Disable this firstboot service
@@ -36,8 +36,21 @@ NIGHTWATCH_DIR="${NIGHTWATCH_DIR:-/opt/nightwatch}"
 LOG_FILE="/var/log/nightwatch-firstboot.log"
 STAMP_FILE="$NIGHTWATCH_DIR/.firstboot-done"
 
-# Redirect all output to log + console
-exec > >(tee -a "$LOG_FILE") 2>&1
+# Boot-partition log — readable on macOS (FAT32) for debugging
+BOOT_LOG=""
+for _bdir in /boot/firmware /boot; do
+    if [ -d "$_bdir" ] && mount | grep -q "$_bdir.*vfat"; then
+        BOOT_LOG="$_bdir/nightwatch-firstboot.log"
+        break
+    fi
+done
+
+# Redirect all output to log + console (+ boot partition if available)
+if [ -n "$BOOT_LOG" ]; then
+    exec > >(tee -a "$LOG_FILE" "$BOOT_LOG") 2>&1
+else
+    exec > >(tee -a "$LOG_FILE") 2>&1
+fi
 
 echo ""
 echo "======================================"
@@ -46,6 +59,47 @@ echo "  $(date)"
 echo "======================================"
 echo ""
 
+# Find onboard LED for status indication
+LED_PATH=""
+for led in /sys/class/leds/ACT /sys/class/leds/led0; do
+    if [ -d "$led" ]; then
+        LED_PATH="$led"
+        echo "heartbeat" > "$led/trigger" 2>/dev/null || true
+        break
+    fi
+done
+
+# On any error: set LED to fast blink and log the failure.
+# IMPORTANT: always mark firstboot as done (even on failure) so the service
+# is disabled and never blocks boot again. The node can be fixed manually.
+firstboot_fail() {
+    echo ""
+    echo "[-] FIRSTBOOT FAILED: $1"
+    echo "[-] Check log: $LOG_FILE"
+    [ -n "$BOOT_LOG" ] && echo "[-] Boot partition log: $BOOT_LOG"
+    # Mark as done to prevent boot loops — a failed firstboot that blocks
+    # every boot is worse than a failed firstboot you can fix via SSH.
+    date > "$STAMP_FILE" 2>/dev/null || true
+    echo "FAILED: $1" >> "$STAMP_FILE" 2>/dev/null || true
+    systemctl disable nightwatch-firstboot.service 2>/dev/null || true
+    if [ -n "$LED_PATH" ]; then
+        echo "timer" > "$LED_PATH/trigger" 2>/dev/null || true
+        echo 100 > "$LED_PATH/delay_on" 2>/dev/null || true
+        echo 100 > "$LED_PATH/delay_off" 2>/dev/null || true
+    fi
+    exit 1
+}
+trap 'firstboot_fail "unexpected error at line $LINENO"' ERR
+
+# Global timeout: if firstboot takes more than 15 minutes, something is
+# seriously wrong. Kill it so the system can finish booting. The failure
+# handler will mark it as done to prevent infinite boot loops.
+FIRSTBOOT_TIMEOUT=900
+( sleep "$FIRSTBOOT_TIMEOUT"; echo "[-] TIMEOUT: firstboot exceeded ${FIRSTBOOT_TIMEOUT}s"; kill -TERM $$ 2>/dev/null ) &
+TIMEOUT_PID=$!
+trap 'kill "$TIMEOUT_PID" 2>/dev/null || true; firstboot_fail "unexpected error at line $LINENO"' ERR
+trap 'kill "$TIMEOUT_PID" 2>/dev/null || true' EXIT
+
 # Skip if already completed
 if [ -f "$STAMP_FILE" ]; then
     echo "[+] First boot already completed. Skipping."
@@ -53,9 +107,7 @@ if [ -f "$STAMP_FILE" ]; then
 fi
 
 if [ ! -d "$NIGHTWATCH_DIR" ]; then
-    echo "[-] Error: $NIGHTWATCH_DIR not found"
-    echo "[-] The project must be copied to $NIGHTWATCH_DIR before first boot"
-    exit 1
+    firstboot_fail "$NIGHTWATCH_DIR not found — project must be copied before first boot"
 fi
 
 cd "$NIGHTWATCH_DIR"
@@ -65,18 +117,15 @@ if [ ! -f ".env" ]; then
     echo "[+] No .env found — running nodeconfig for dynamic node assignment..."
     if [ -x scripts/nodeconfig.sh ]; then
         if ! scripts/nodeconfig.sh; then
-            echo "[-] Error: nodeconfig.sh failed"
-            exit 1
+            firstboot_fail "nodeconfig.sh failed"
         fi
     else
-        echo "[-] Error: .env not found and nodeconfig.sh not available"
-        exit 1
+        firstboot_fail ".env not found and nodeconfig.sh not available"
     fi
 fi
 
 if [ ! -f ".env" ]; then
-    echo "[-] Error: .env still not found after nodeconfig"
-    exit 1
+    firstboot_fail ".env still not found after nodeconfig"
 fi
 
 # shellcheck source=scripts/common.sh
@@ -142,19 +191,33 @@ fi
 # ---- Step 1: Wait for network ----
 
 echo "[1/12] Waiting for network..."
+# Check if key packages are already installed — if so, internet is optional
+PKGS_INSTALLED=true
+for pkg in ngircd nginx batctl dnsmasq socat; do
+    if ! command -v "$pkg" >/dev/null 2>&1 && ! dpkg -s "$pkg" >/dev/null 2>&1; then
+        PKGS_INSTALLED=false
+        break
+    fi
+done
+
 TRIES=0
 MAX_TRIES=30
 while ! ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; do
     TRIES=$((TRIES + 1))
     if [ "$TRIES" -ge "$MAX_TRIES" ]; then
-        echo "[-] No internet after ${MAX_TRIES} attempts."
-        echo "[-] Connect Ethernet or configure WiFi, then run: sudo systemctl start nightwatch-firstboot"
-        exit 1
+        if $PKGS_INSTALLED; then
+            echo "[!] No internet after ${MAX_TRIES} attempts — but packages already installed, continuing"
+            break
+        else
+            firstboot_fail "No internet after ${MAX_TRIES} attempts (150s). Connect Ethernet or fix WiFi, then: sudo systemctl start nightwatch-firstboot"
+        fi
     fi
     echo "  Waiting... ($TRIES/$MAX_TRIES)"
     sleep 5
 done
-echo "[+] Network is up"
+if [ "$TRIES" -lt "$MAX_TRIES" ]; then
+    echo "[+] Network is up"
+fi
 
 # ---- Step 1b: Sync clock (Pi has no hardware RTC) ----
 
@@ -172,10 +235,16 @@ if command -v timedatectl >/dev/null 2>&1; then
 fi
 # Fallback: fetch time from HTTP header if NTP didn't work
 # Check if clock is behind the build date of this script (Pi has no RTC)
-SCRIPT_YEAR=$(date -r "$NIGHTWATCH_DIR/scripts/firstboot.sh" +%Y 2>/dev/null || echo "2025")
+SCRIPT_YEAR=$(date -r "$NIGHTWATCH_DIR/scripts/firstboot.sh" +%Y 2>/dev/null \
+    || stat -c %Y "$NIGHTWATCH_DIR/scripts/firstboot.sh" 2>/dev/null | xargs -I{} date -d @{} +%Y 2>/dev/null \
+    || echo "2099")
 if [ "$(date +%Y)" -lt "$SCRIPT_YEAR" ]; then
-    HTTP_DATE=$(curl -sI http://deb.debian.org 2>/dev/null | grep -i "^date:" | sed 's/^[Dd]ate: //')
-    if [ -n "$HTTP_DATE" ] && date -d "$HTTP_DATE" >/dev/null 2>&1; then
+    HTTP_DATE=$(curl -sI --max-time 10 http://deb.debian.org 2>/dev/null | grep -i "^date:" | sed 's/^[Dd]ate: //' | tr -d '\r')
+    # Validate: must look like an HTTP-date (e.g. "Mon, 17 Mar 2025 12:00:00 GMT")
+    # Reject empty, overly long, or non-date strings to prevent injection
+    if [ -n "$HTTP_DATE" ] && [ "${#HTTP_DATE}" -lt 80 ] && \
+       [[ "$HTTP_DATE" =~ ^[A-Za-z]{3},\ [0-9]{2}\ [A-Za-z]{3}\ [0-9]{4}\ [0-9]{2}:[0-9]{2}:[0-9]{2}\ GMT$ ]] && \
+       date -d "$HTTP_DATE" >/dev/null 2>&1; then
         date -s "$HTTP_DATE" 2>/dev/null || true
         echo "[+] Clock set from HTTP: $(date)"
     else
@@ -207,8 +276,9 @@ for attempt in 1 2 3; do
     sleep "$APT_DELAY"
     APT_DELAY=$((APT_DELAY * 2))
 done
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    docker.io \
+if ! DEBIAN_FRONTEND=noninteractive timeout 600 apt-get install -y -qq \
+    ngircd \
+    nginx \
     batctl \
     bridge-utils \
     dnsmasq \
@@ -224,48 +294,67 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     netcat-openbsd \
     socat \
     sshpass \
-    firmware-atheros
+    usbutils \
+    firmware-atheros \
+    hostapd; then
+    firstboot_fail "apt-get install failed or timed out (10 min limit)"
+fi
 echo "[+] System packages installed"
 
 # Disable system dnsmasq — we start our own instance on br0 via mesh-fix.sh
 systemctl disable dnsmasq 2>/dev/null || true
 systemctl stop dnsmasq 2>/dev/null || true
 
-# ---- Step 3: Install Docker Compose ----
+# ---- Step 3: Configure native services ----
 
 echo ""
-echo "[3/12] Installing Docker Compose..."
-if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
-    ARCH=$(uname -m)
-    case "$ARCH" in
-        aarch64|arm64) COMPOSE_ARCH="linux-aarch64" ;;
-        armv7l|armhf)  COMPOSE_ARCH="linux-armv7" ;;
-        x86_64)        COMPOSE_ARCH="linux-x86_64" ;;
-        *)             echo "[-] Unsupported arch: $ARCH"; exit 1 ;;
-    esac
-    COMPOSE_VERSION="v2.24.6"
-    curl -SL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-${COMPOSE_ARCH}" \
-        -o /usr/local/bin/docker-compose
-    chmod +x /usr/local/bin/docker-compose
-    echo "[+] Docker Compose $COMPOSE_VERSION installed"
-else
-    echo "[+] Docker Compose already available"
+echo "[3/12] Configuring native services..."
+
+# Stop and disable default services (nightwatch-app starts them)
+systemctl stop ngircd 2>/dev/null || true
+systemctl disable ngircd 2>/dev/null || true
+systemctl stop nginx 2>/dev/null || true
+systemctl disable nginx 2>/dev/null || true
+
+# Override ngircd to always restart (default is on-failure which misses SIGTERM exits)
+mkdir -p /etc/systemd/system/ngircd.service.d
+cat > /etc/systemd/system/ngircd.service.d/restart.conf <<'OVERRIDE'
+[Service]
+Restart=always
+RestartSec=5
+OVERRIDE
+systemctl daemon-reload
+
+# Remove default nginx config
+rm -f /etc/nginx/sites-enabled/default
+
+# Symlink Nightwatch configs
+ln -sf "$NIGHTWATCH_DIR/nginx/nginx.conf" /etc/nginx/conf.d/nightwatch.conf
+rm -rf /usr/share/nginx/html
+ln -sf "$NIGHTWATCH_DIR/html" /usr/share/nginx/html
+# Generate self-signed certs for captive portal HTTPS redirect (if missing)
+CERT_DIR="$NIGHTWATCH_DIR/nginx/certs"
+if [ ! -f "$CERT_DIR/captive.crt" ] || [ ! -f "$CERT_DIR/captive.key" ]; then
+    mkdir -p "$CERT_DIR"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+        -keyout "$CERT_DIR/captive.key" \
+        -out "$CERT_DIR/captive.crt" \
+        -subj "/CN=nightwatch.local" 2>/dev/null
+    echo "[+] Self-signed TLS cert generated for captive portal"
+fi
+ln -sf "$CERT_DIR" /etc/nginx/certs
+ln -sf "$NIGHTWATCH_DIR/ngircd/ngircd.conf" /etc/ngircd/ngircd.conf
+
+# Create data directory for irc-bridge
+mkdir -p "$NIGHTWATCH_DIR/irc-bridge-go/data"
+chown "$REAL_USER:$REAL_USER" "$NIGHTWATCH_DIR/irc-bridge-go/data"
+
+# Make irc-bridge binary executable
+if [ -f "$NIGHTWATCH_DIR/irc-bridge-go/irc-bridge" ]; then
+    chmod +x "$NIGHTWATCH_DIR/irc-bridge-go/irc-bridge"
 fi
 
-# Configure Docker DNS (containers can't resolve without this)
-mkdir -p /etc/docker
-echo '{"dns":["8.8.8.8","1.1.1.1"]}' > /etc/docker/daemon.json
-echo "[+] Docker DNS configured (8.8.8.8, 1.1.1.1)"
-
-# Enable Docker to start on boot
-systemctl enable docker
-systemctl start docker
-
-# Add default user to docker group
-if [ -n "$REAL_USER" ]; then
-    usermod -aG docker "$REAL_USER"
-    echo "[+] Added $REAL_USER to docker group"
-fi
+echo "[+] Native services configured"
 
 # ---- Step 4: Setup batman-adv ----
 
@@ -277,7 +366,7 @@ if ! grep -q "^batman-adv" /etc/modules 2>/dev/null; then
 fi
 echo "[+] batman-adv version: $(cat /sys/module/batman_adv/version 2>/dev/null || echo 'loads on boot')"
 
-# Disable system services we don't need
+# Disable system hostapd — mesh-fix.sh starts hostapd manually with our config
 systemctl disable hostapd 2>/dev/null || true
 systemctl stop hostapd 2>/dev/null || true
 
@@ -340,9 +429,27 @@ echo ""
 echo "[8/12] Generating dnsmasq config..."
 NODE_NUM="${PI_NUMBER:-1}"
 generate_dnsmasq_conf "$NIGHTWATCH_DIR/dnsmasq/dnsmasq.conf" "$NODE_NUM" "$MESH_IP"
-DHCP_START=$((200 + (NODE_NUM - 1) * 2 + 1))
-DHCP_END=$((200 + (NODE_NUM - 1) * 2 + 2))
+DHCP_START=$((200 + (NODE_NUM - 1) * 5 + 1))
+DHCP_END=$((200 + (NODE_NUM - 1) * 5 + 5))
+[ "$DHCP_START" -gt 254 ] && DHCP_START=254
+[ "$DHCP_END" -gt 254 ] && DHCP_END=254
 echo "[+] dnsmasq.conf generated (DHCP: .${DHCP_START}-.${DHCP_END})"
+
+# ---- Step 8b: Generate hostapd config ----
+
+echo ""
+echo "[8b/12] Generating hostapd config (WiFi AP with 802.11r)..."
+mkdir -p "$NIGHTWATCH_DIR/hostapd"
+AP_IFACE_VAL=$(grep '^AP_IFACE=' "$NIGHTWATCH_DIR/.env" 2>/dev/null | cut -d= -f2- || echo "wlan2")
+AP_CHANNEL_VAL=$(grep '^AP_CHANNEL=' "$NIGHTWATCH_DIR/.env" 2>/dev/null | cut -d= -f2- || echo "6")
+AP_BSSID_VAL=$(grep '^AP_BSSID=' "$NIGHTWATCH_DIR/.env" 2>/dev/null | cut -d= -f2- || echo "02:00:4E:57:00:01")
+WIFI_SSID_VAL=$(grep '^WIFI_SSID=' "$NIGHTWATCH_DIR/.env" 2>/dev/null | cut -d= -f2- || echo "Nightwatch")
+WIFI_PASSWORD_VAL=$(grep '^WIFI_PASSWORD=' "$NIGHTWATCH_DIR/.env" 2>/dev/null | cut -d= -f2- || echo "Nightwatch")
+generate_hostapd_conf "$NIGHTWATCH_DIR/hostapd/hostapd.conf" \
+    "$AP_IFACE_VAL" "br0" \
+    "$WIFI_SSID_VAL" "$WIFI_PASSWORD_VAL" \
+    "$AP_CHANNEL_VAL" "$AP_BSSID_VAL"
+echo "[+] hostapd.conf generated (SSID: $WIFI_SSID_VAL, ch $AP_CHANNEL_VAL)"
 
 # ---- Step 9: Install systemd services ----
 
@@ -355,101 +462,34 @@ echo "[+] Services installed and enabled:"
 echo "    - nightwatch-nodeconfig (generates config from hostname)"
 echo "    - nightwatch-mesh (802.11s + batman-adv + bridge)"
 echo "    - nightwatch-discovery (UDP broadcast node discovery)"
-echo "    - nightwatch-docker (IRC + bridge + nginx)"
+echo "    - nightwatch-app (IRC + bridge + nginx orchestrator)"
+echo "    - nightwatch-led (green LED readiness indicator)"
+echo "    - nightwatch-debug (debug info collector)"
 
-# ---- Step 10: Build Docker images ----
+# ---- Step 10: Verify irc-bridge binary ----
 
 echo ""
-echo "[10/12] Building Docker images (this may take a few minutes)..."
+echo "[10/12] Verifying irc-bridge binary..."
 cd "$NIGHTWATCH_DIR"
-detect_docker_compose
-for attempt in 1 2 3; do
-    if timeout 1200 $DC --env-file .env build; then
-        break
-    fi
-    if [ "$attempt" -eq 3 ]; then
-        echo "[-] Docker build failed after 3 attempts"
-        exit 1
-    fi
-    echo "[!] Docker build failed (attempt $attempt/3), retrying in 10s..."
-    sleep 10
-done
-echo "[+] Docker images built"
-
-# ---- Step 11: Start everything ----
-
-echo ""
-echo "[11/12] Starting mesh network..."
-systemctl start nightwatch-mesh.service
-sleep 5
-
-echo "[+] Starting node discovery..."
-systemctl start nightwatch-discovery.service 2>/dev/null || true
-
-echo "[+] Starting Docker services..."
-$DC --env-file .env up -d
-sleep 3
-echo "[+] Services started"
-
-# ---- Step 11b: Resolve node number conflicts ----
-# On first boot, nodeconfig runs before other nodes have their mesh up,
-# so every node picks #1. Now that mesh is live, use deterministic
-# MAC-based sorting to assign unique numbers (same algorithm as
-# nodeconfig.sh scan_mesh).
-
-echo ""
-echo "[11b/12] Checking for node number conflicts..."
-
-PEER_WAIT=0
-PEER_COUNT=0
-while [ "$PEER_WAIT" -lt 120 ]; do
-    PEER_COUNT=$(batctl meshif bat0 n 2>/dev/null | tail -n +3 | grep -c . || true)
-    PEER_COUNT=${PEER_COUNT:-0}
-    if [ "$PEER_COUNT" -gt 0 ]; then
-        break
-    fi
-    sleep 10
-    PEER_WAIT=$((PEER_WAIT + 10))
-done
-
-if [ "$PEER_COUNT" -gt 0 ]; then
-    echo "[+] Mesh has $PEER_COUNT neighbor(s) — verifying node assignment..."
-
-    # Determine correct node number using MAC-based sorting
-    OUR_MAC=$(cat "/sys/class/net/${MESH_IFACE:-wlan1}/address" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
-    NEIGHBOR_MACS=$(batctl meshif bat0 n 2>/dev/null | tail -n +3 | awk '{print $2}' | tr '[:upper:]' '[:lower:]' | sort || true)
-
-    if [ -n "$OUR_MAC" ] && [ -n "$NEIGHBOR_MACS" ]; then
-        ALL_MACS=$(printf '%s\n%s' "$OUR_MAC" "$NEIGHBOR_MACS" | sort)
-        OUR_POSITION=1
-        while IFS= read -r mac; do
-            if [ "$mac" = "$OUR_MAC" ]; then
-                break
-            fi
-            OUR_POSITION=$((OUR_POSITION + 1))
-        done <<< "$ALL_MACS"
-
-        CURRENT_NUM="${PI_NUMBER:-1}"
-        if [ "$OUR_POSITION" != "$CURRENT_NUM" ]; then
-            echo "[!] Conflict: currently #$CURRENT_NUM, should be #$OUR_POSITION (MAC sort)"
-            echo "[+] Reassigning to node #$OUR_POSITION..."
-            # Pre-generate dnsmasq config so mesh restart picks it up
-            NEW_MESH_IP=$(mesh_ip_for_node "$OUR_POSITION")
-            generate_dnsmasq_conf "$NIGHTWATCH_DIR/dnsmasq/dnsmasq.conf" "$OUR_POSITION" "$NEW_MESH_IP"
-            # Write correct number — nodeconfig detects the change and
-            # regenerates .env, ngircd.conf, hostname, restarts services
-            echo "$OUR_POSITION" > "$NIGHTWATCH_DIR/.node-number"
-            "$NIGHTWATCH_DIR/scripts/nodeconfig.sh"
-            # Reload .env so stamp file and summary use updated values
-            load_env "$NIGHTWATCH_DIR/.env"
-            echo "[+] Reassigned to Pi #${PI_NUMBER} (${MESH_IP})"
-        else
-            echo "[+] Node #$CURRENT_NUM confirmed — no conflict"
-        fi
-    fi
+if [ -f "$NIGHTWATCH_DIR/irc-bridge-go/irc-bridge" ]; then
+    echo "[+] irc-bridge binary found"
 else
-    echo "[+] Solo node (no mesh peers yet) — keeping node #${PI_NUMBER:-1}"
+    echo "[!] Warning: irc-bridge binary not found at $NIGHTWATCH_DIR/irc-bridge-go/irc-bridge"
+    echo "[!] The binary needs to be cross-compiled for ARM before deployment"
 fi
+
+# ---- Step 11: Services will start after firstboot completes ----
+# NOTE: Do NOT use 'systemctl start' here. Firstboot runs as a oneshot
+# service during boot. Starting other services synchronously creates a
+# deadlock: those services wait for multi-user.target, which waits for
+# firstboot to finish. All services are already enabled (step 9) and
+# will start automatically when firstboot completes and systemd reaches
+# multi-user.target.
+
+echo ""
+echo "[11/12] Services are enabled — they will start after firstboot completes"
+echo "    Enabled: nightwatch-mesh, nightwatch-app, nightwatch-discovery,"
+echo "             nightwatch-bridge, nightwatch-led, nightwatch-debug"
 
 # ---- Step 12: Mark complete & disable firstboot ----
 
@@ -482,3 +522,9 @@ echo ""
 echo "  Web UI:     http://${MESH_IP%/*}"
 echo "  Log:        $LOG_FILE"
 echo "======================================"
+
+# Reboot so all enabled services start cleanly.
+# Without this the Pi sits idle after firstboot with no visual feedback.
+echo ""
+echo "[+] Rebooting to start Nightwatch services..."
+shutdown -r +1 "Nightwatch: firstboot complete — rebooting to start services" &

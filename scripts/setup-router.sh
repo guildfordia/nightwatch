@@ -158,9 +158,9 @@ fi
 
 if [ "$SSH_PASSWORD" != "$ROUTER_PASSWORD" ]; then
     echo "[+] Setting admin password..."
-    # Use chpasswd for safer password setting (no shell expansion of password chars)
+    # Use chpasswd via stdin to avoid exposing the password in ps output
     SSHPASS="$SSH_PASSWORD" sshpass -e ssh $SSH_OPTS root@"$FOUND_IP" \
-        "echo 'root:${ROUTER_PASSWORD}' | chpasswd" 2>/dev/null
+        "chpasswd" <<< "root:${ROUTER_PASSWORD}" 2>/dev/null
     SSH_PASSWORD="$ROUTER_PASSWORD"
     echo -e "  ${GREEN}Password set${NC}"
 fi
@@ -182,6 +182,10 @@ uci set wireless.@wifi-iface[0].encryption='psk2'
 uci set wireless.@wifi-iface[0].key='__WIFI_PASSWORD__'
 uci set wireless.@wifi-iface[0].network='lan'
 uci set wireless.@wifi-iface[0].mode='ap'
+# Force same BSSID on all routers for seamless client roaming.
+# Clients see one AP regardless of which physical router they're near,
+# so WiFi handoff is transparent (no re-authentication needed).
+uci set wireless.@wifi-iface[0].macaddr='AA:BB:CC:DD:EE:01'
 
 echo "  [2/6] Setting timezone..."
 uci set system.@system[0].timezone='CET-1CEST,M3.5.0,M10.5.0/3'
