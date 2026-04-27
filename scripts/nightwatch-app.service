@@ -1,0 +1,17 @@
+[Unit]
+Description=Nightwatch App Services (ngircd, irc-bridge, nginx)
+After=nightwatch-mesh.service
+Requires=nightwatch-mesh.service
+PartOf=nightwatch-mesh.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'systemctl start ngircd; systemctl start nightwatch-bridge; systemctl start nginx'
+ExecStop=/bin/bash -c 'systemctl stop nginx; systemctl stop nightwatch-bridge; systemctl stop ngircd'
+TimeoutStartSec=60
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

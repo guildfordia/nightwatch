@@ -1,0 +1,14 @@
+[Unit]
+Description=Nightwatch Debug Info Collector
+After=nightwatch-mesh.service
+Wants=nightwatch-mesh.service
+
+[Service]
+Type=simple
+ExecStart=/opt/nightwatch/scripts/nightwatch-debug.sh start
+ExecStop=/opt/nightwatch/scripts/nightwatch-debug.sh stop
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

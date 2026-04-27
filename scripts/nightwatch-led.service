@@ -1,0 +1,15 @@
+[Unit]
+Description=Nightwatch LED Readiness Indicator
+After=nightwatch-mesh.service
+Wants=nightwatch-mesh.service nightwatch-app.service
+
+[Service]
+Type=simple
+ExecStart=/opt/nightwatch/scripts/nightwatch-led.sh start
+ExecStop=/opt/nightwatch/scripts/nightwatch-led.sh stop
+ExecStopPost=/opt/nightwatch/scripts/nightwatch-led.sh stop
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

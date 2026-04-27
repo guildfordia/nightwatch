@@ -1,0 +1,22 @@
+[Unit]
+Description=Nightwatch IRC Bridge (WebSocket to IRC)
+After=nightwatch-mesh.service ngircd.service
+Requires=ngircd.service
+PartOf=nightwatch-mesh.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/nightwatch/irc-bridge-go
+ExecStart=/opt/nightwatch/irc-bridge-go/irc-bridge
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Bridge connects to local ngircd
+Environment=IRC_SERVER=127.0.0.1:6667
+# Bridge data directory for nick counter persistence
+Environment=DATA_DIR=/opt/nightwatch/irc-bridge-go/data
+
+[Install]
+WantedBy=multi-user.target
