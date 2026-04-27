@@ -2,8 +2,12 @@
 
 ENV_FILE := .env
 
-.PHONY: install run stop test scan update status logs sdlogs clean monitor blink image sdcard info router build-bridge help
+.PHONY: install run stop test scan update status logs sdlogs clean monitor blink image sdcard info router build-bridge help \
+        fleet-status fleet-deploy fleet-deploy-dry fleet-restart-mesh fleet-restart-discovery fleet-test
 .DEFAULT_GOAL := help
+
+# Default fleet for the fleet-* targets. Override with NIGHTWATCH_NODES="3 5 7"
+NIGHTWATCH_NODES ?= 2 3 4 5 6 7
 
 help:
 	@echo "Nightwatch — mesh chat on Raspberry Pi"
@@ -25,6 +29,16 @@ help:
 	@echo "  make image        Prepare Pi for SD card cloning"
 	@echo "  make sdcard SD=X [NODE=N]  Prepare SD card (auto-picks node if omitted)"
 	@echo "  make build-bridge Cross-compile irc-bridge (laptop)"
+	@echo ""
+	@echo "Fleet operations (run on station, not on a Pi):"
+	@echo "  make fleet-status                         Show mesh-doctor table"
+	@echo "  make fleet-deploy FILES=\"x.sh\" [RESTART=nightwatch-mesh]"
+	@echo "                                            Deploy file(s) to all nodes"
+	@echo "  make fleet-deploy-dry FILES=\"x.sh\"        Validate without shipping"
+	@echo "  make fleet-restart-mesh                   Restart nightwatch-mesh on all"
+	@echo "  make fleet-restart-discovery              Restart node-discovery on all"
+	@echo "  make fleet-test                           Run test-services.sh on all"
+	@echo "  Override fleet:  NIGHTWATCH_NODES=\"3 5 7\" make fleet-status"
 	@echo ""
 	@echo "First time:  make install && make run && make test"
 
@@ -194,6 +208,47 @@ build-bridge:
 	@if ! command -v go >/dev/null 2>&1; then echo "Error: Go not installed"; exit 1; fi
 	cd irc-bridge-go && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o irc-bridge .
 	@echo "[+] Built irc-bridge-go/irc-bridge ($$(ls -lh irc-bridge-go/irc-bridge | awk '{print $$5}'))"
+
+# ─── Fleet operations (run on station, not on a Pi) ─────────────────────────
+# These wrap scripts/deploy-fleet.sh and mesh-doctor for common tasks.
+
+fleet-status:
+	@~/mesh-doctor/bin/mesh-doctor status
+
+fleet-deploy:
+	@if [ -z "$(FILES)" ]; then echo "Usage: make fleet-deploy FILES=\"scripts/x.sh scripts/y.sh\" [RESTART=nightwatch-mesh]"; exit 2; fi
+	@scripts/deploy-fleet.sh \
+		--nodes "$(NIGHTWATCH_NODES)" \
+		$(if $(RESTART),--restart $(RESTART)) \
+		$(FILES)
+
+fleet-deploy-dry:
+	@if [ -z "$(FILES)" ]; then echo "Usage: make fleet-deploy-dry FILES=\"scripts/x.sh\""; exit 2; fi
+	@scripts/deploy-fleet.sh --dry-run --nodes "$(NIGHTWATCH_NODES)" $(FILES)
+
+fleet-restart-mesh:
+	@for n in $(NIGHTWATCH_NODES); do \
+		host=$$(if [ "$$n" = "2" ]; then echo nightwatch-2.local; else echo 192.168.199.10$$n; fi); \
+		jump=$$(if [ "$$n" = "2" ]; then echo ""; else echo "-J nightwatch-2.local"; fi); \
+		echo "=== node $$n ==="; \
+		ssh $$jump user@$$host "sudo -n systemctl restart nightwatch-mesh && sudo -n systemctl is-active nightwatch-mesh" 2>&1 | tail -2; \
+	done
+
+fleet-restart-discovery:
+	@for n in $(NIGHTWATCH_NODES); do \
+		host=$$(if [ "$$n" = "2" ]; then echo nightwatch-2.local; else echo 192.168.199.10$$n; fi); \
+		jump=$$(if [ "$$n" = "2" ]; then echo ""; else echo "-J nightwatch-2.local"; fi); \
+		echo "=== node $$n ==="; \
+		ssh $$jump user@$$host "sudo -n systemctl restart nightwatch-discovery && sudo -n systemctl is-active nightwatch-discovery" 2>&1 | tail -2; \
+	done
+
+fleet-test:
+	@for n in $(NIGHTWATCH_NODES); do \
+		host=$$(if [ "$$n" = "2" ]; then echo nightwatch-2.local; else echo 192.168.199.10$$n; fi); \
+		jump=$$(if [ "$$n" = "2" ]; then echo ""; else echo "-J nightwatch-2.local"; fi); \
+		echo "=== node $$n ==="; \
+		ssh $$jump user@$$host 'sudo -n /opt/nightwatch/scripts/test-services.sh' 2>&1 | tail -10; \
+	done
 
 sdcard:
 	@if [ -z "$(SD)" ]; then \
