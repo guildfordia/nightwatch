@@ -8,7 +8,7 @@
 #   UDP broadcast on port 4919 over bat0, every BEACON_INTERVAL seconds
 #   Payload: NIGHTWATCH|<node_num>|<mesh_ip>|<server_name>|<timestamp>
 #
-# Peer file: /tmp/nightwatch-peers (one line per peer, same format)
+# Peer file: /run/nightwatch-peers (one line per peer, same format)
 # Peers expire after PEER_TIMEOUT seconds of no beacon.
 #
 # Network: 192.168.199.101-120 (max 20 nodes)
