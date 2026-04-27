@@ -1,0 +1,4 @@
+# Site-specific configs may contain secrets (MESH_SAE_PASSWORD).
+# Only the default.env is checked in.
+*.env
+!default.env
