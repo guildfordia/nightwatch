@@ -35,7 +35,7 @@
 # Secrets:
 #   The script prompts for passwords and Tailscale auth key, then bakes them
 #   into .secrets on the SD card. You can also set them via environment:
-#     ROUTER_PASSWORD=xxx IRC_LINK_PASSWORD=yyy TAILSCALE_AUTH_KEY=zzz ./scripts/prepare-sdcard.sh /path/to/rootfs
+#     IRC_LINK_PASSWORD=yyy TAILSCALE_AUTH_KEY=zzz ./scripts/prepare-sdcard.sh /path/to/rootfs
 
 set -euo pipefail
 
@@ -120,7 +120,6 @@ usage() {
     echo "Set NODE=N or --node N, or let the script auto-pick the next free number."
     echo ""
     echo "Environment variables (optional — skips password prompts):"
-    echo "  ROUTER_PASSWORD     GL.iNet router admin password"
     echo "  IRC_LINK_PASSWORD   IRC federation password (same on all nodes)"
     echo "  TAILSCALE_AUTH_KEY  Tailscale pre-auth key (from admin console)"
     echo "  HF_TOKEN            Hugging Face API token"
@@ -275,13 +274,11 @@ prepare_via_boot_partition() {
     local secrets_file="$boot_mount/nightwatch-secrets"
     printf '%s\n' '# Nightwatch secrets — baked by prepare-sdcard.sh' > "$secrets_file"
     printf '%s\n' '# nightwatch-stage.sh copies these on first boot' >> "$secrets_file"
-    printf 'ROUTER_PASSWORD=%s\n' "$ROUTER_PASSWORD" >> "$secrets_file"
     printf 'IRC_LINK_PASSWORD=%s\n' "$IRC_LINK_PASSWORD" >> "$secrets_file"
     printf 'TAILSCALE_AUTH_KEY=%s\n' "${TAILSCALE_AUTH_KEY:-}" >> "$secrets_file"
     printf 'HF_TOKEN=%s\n' "${HF_TOKEN:-}" >> "$secrets_file"
     printf 'NODE_MODE=%s\n' "$NODE_MODE" >> "$secrets_file"
     echo "[+] Secrets staged"
-    echo "    ROUTER_PASSWORD=***"
     echo "    IRC_LINK_PASSWORD=***"
     echo "    TAILSCALE_AUTH_KEY=$([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo '***' || echo '(empty)')"
     echo "    HF_TOKEN=$([ -n "${HF_TOKEN:-}" ] && echo '***' || echo '(empty)')"
@@ -677,7 +674,6 @@ if [ ! -f "$ENV_TEMPLATE" ]; then
 fi
 
 # Save caller-provided secrets BEFORE load_env overwrites them
-_SAVE_ROUTER_PASSWORD="${ROUTER_PASSWORD:-}"
 _SAVE_IRC_LINK_PASSWORD="${IRC_LINK_PASSWORD:-}"
 _SAVE_TAILSCALE_AUTH_KEY="${TAILSCALE_AUTH_KEY:-}"
 _SAVE_HF_TOKEN="${HF_TOKEN:-}"
@@ -685,7 +681,6 @@ _SAVE_HF_TOKEN="${HF_TOKEN:-}"
 load_env "$ENV_TEMPLATE"
 
 # Restore caller-provided secrets (load_env clobbers them with .env.example defaults)
-[ -n "$_SAVE_ROUTER_PASSWORD" ] && ROUTER_PASSWORD="$_SAVE_ROUTER_PASSWORD"
 [ -n "$_SAVE_IRC_LINK_PASSWORD" ] && IRC_LINK_PASSWORD="$_SAVE_IRC_LINK_PASSWORD"
 [ -n "$_SAVE_TAILSCALE_AUTH_KEY" ] && TAILSCALE_AUTH_KEY="$_SAVE_TAILSCALE_AUTH_KEY"
 [ -n "$_SAVE_HF_TOKEN" ] && HF_TOKEN="$_SAVE_HF_TOKEN"
@@ -730,27 +725,17 @@ echo "[+] Node $NODE_NUM — IP will be $MESH_IP"
 
 # ---- Prompt for secrets ----
 
-# Router password
-if [ -z "${ROUTER_PASSWORD:-}" ] || [ "$ROUTER_PASSWORD" = "CHANGE_ME_BEFORE_DEPLOY" ]; then
-    if [ "$AUTO_YES" = true ]; then
-        echo -e "${RED}Error: ROUTER_PASSWORD not set. Provide via environment or run without --yes.${NC}"
-        exit 1
-    fi
-    echo ""
-    echo -e "${BOLD}Set passwords for this deployment:${NC}"
-    echo -e "${YELLOW}(These are baked into the SD card — same values for all nodes)${NC}"
-    echo ""
-    read -rsp "  GL.iNet router admin password: " ROUTER_PASSWORD
-    echo ""
-fi
-
 # IRC link password
 if [ -z "${IRC_LINK_PASSWORD:-}" ] || [ "$IRC_LINK_PASSWORD" = "CHANGE_ME_BEFORE_DEPLOY" ]; then
     if [ "$AUTO_YES" = true ]; then
         echo -e "${RED}Error: IRC_LINK_PASSWORD not set. Provide via environment or run without --yes.${NC}"
         exit 1
     fi
-    read -rsp "  IRC federation password (same on ALL nodes): " IRC_LINK_PASSWORD
+    echo ""
+    echo -e "${BOLD}Set IRC federation password (must match on every node):${NC}"
+    echo -e "${YELLOW}(This is baked into the SD card — same value for all nodes)${NC}"
+    echo ""
+    read -rsp "  IRC link password: " IRC_LINK_PASSWORD
     echo ""
 fi
 
@@ -812,7 +797,6 @@ SECRETS_DEST="$DEST/.secrets"
 # Write secrets using printf to safely handle special characters in passwords
 sudo bash -c "printf '%s\n' '# Nightwatch secrets — baked by prepare-sdcard.sh' > '$SECRETS_DEST'"
 sudo bash -c "printf '%s\n' '# nodeconfig.sh injects these into .env on first boot' >> '$SECRETS_DEST'"
-printf 'ROUTER_PASSWORD=%s\n' "$ROUTER_PASSWORD" | sudo tee -a "$SECRETS_DEST" > /dev/null
 printf 'IRC_LINK_PASSWORD=%s\n' "$IRC_LINK_PASSWORD" | sudo tee -a "$SECRETS_DEST" > /dev/null
 printf 'TAILSCALE_AUTH_KEY=%s\n' "${TAILSCALE_AUTH_KEY:-}" | sudo tee -a "$SECRETS_DEST" > /dev/null
 printf 'HF_TOKEN=%s\n' "${HF_TOKEN:-}" | sudo tee -a "$SECRETS_DEST" > /dev/null
@@ -824,7 +808,6 @@ printf 'NODE_MODE=%s\n' "$NODE_MODE" | sudo tee -a "$SECRETS_DEST" > /dev/null
 sudo rm -f "$DEST/.env"
 
 echo "[+] Secrets saved"
-echo "    ROUTER_PASSWORD=***"
 echo "    IRC_LINK_PASSWORD=***"
 echo "    TAILSCALE_AUTH_KEY=$([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo '***' || echo '(empty)')"
 echo "    HF_TOKEN=$([ -n "${HF_TOKEN:-}" ] && echo '***' || echo '(empty)')"

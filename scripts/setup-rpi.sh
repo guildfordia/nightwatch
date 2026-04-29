@@ -277,16 +277,13 @@ if [ "$NODE_MODE" = "gateway" ]; then
     set_env_value "$ENV_FILE" "INET_IFACE" "wlan0"
 fi
 
-# Set router password (prompt if not already in .env from a previous install)
+# Set IRC federation password (prompt if not already in .env from a previous install)
 if grep -q "CHANGE_ME_BEFORE_DEPLOY" "$ENV_FILE"; then
     echo ""
-    echo -e "  ${BOLD}Set passwords for IRC and router:${NC}"
-    read -rsp "  Router admin password: " ROUTER_PWD
-    echo ""
+    echo -e "  ${BOLD}Set IRC federation password (must match on every node):${NC}"
     read -rsp "  IRC link password: " IRC_PWD
     echo ""
     # Use set_env_value for safe password injection (no sed escaping issues)
-    set_env_value "$ENV_FILE" "ROUTER_PASSWORD" "$ROUTER_PWD"
     set_env_value "$ENV_FILE" "IRC_LINK_PASSWORD" "$IRC_PWD"
 fi
 

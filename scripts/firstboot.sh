@@ -8,7 +8,7 @@
 # What it does:
 #   1. Wait for network (to apt install)
 #   2. Install all system dependencies
-#   3. Install app services (ngircd, nginx)
+#   3. Install app services (ngircd, nginx, irc-bridge)
 #   4. Load batman-adv, disable system hostapd/dnsmasq (mesh-fix.sh manages them)
 #   5. Configure dhcpcd + DNS (resolv.conf locked)
 #   6. Install Tailscale (if TAILSCALE_AUTH_KEY set)

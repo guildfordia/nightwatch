@@ -166,7 +166,9 @@ DNSEOF
 
 # generate_hostapd_conf <conf_path> <ap_iface> <br_iface> <ssid> <password> <channel> <bssid>
 # Writes the hostapd.conf for WiFi AP with 802.11r (Fast Transition).
-# All nodes share the same BSSID so clients roam seamlessly.
+# Each node uses its dongle's hardware BSSID (unique per node), all with the
+# same SSID — phones see multiple "Nightwatch" APs and switch to the strongest.
+# The <bssid> arg is currently unused (the bssid= line is commented out below).
 generate_hostapd_conf() {
     local conf_path="$1"
     local ap_iface="$2"
@@ -197,9 +199,12 @@ channel=$channel
 hw_mode=g
 ieee80211n=1
 
-# Shared BSSID: all nodes look like one AP to the phone. The WiFi driver
-# handles the transition at Layer 1 — no disconnect/reconnect needed.
-# With unique BSSIDs, Samsung refuses to auto-connect to a different BSSID.
+# Each node broadcasts the same SSID with its dongle's own hardware BSSID
+# (unique per node). Phones see multiple APs and pick the strongest.
+# A shared BSSID was tried (one virtual AP across the fleet, seamless L1
+# handover) but Samsung refused to auto-connect when the BSSID differed
+# from the original association. Leaving bssid= commented lets hostapd use
+# the dongle MAC, which is what we ship.
 # bssid=$bssid
 
 # WPA2-PSK + 802.11r Fast Transition
@@ -497,6 +502,10 @@ install_systemd_services() {
     systemctl enable nightwatch-led.service
     systemctl enable nightwatch-debug.service
     systemctl enable nightwatch-watchdog.timer
+    # nightwatch-roamer.service is intentionally NOT enabled here.
+    # The 802.11v steering daemon is experimental — opt in per node with:
+    #   sudo systemctl enable --now nightwatch-roamer.service
+    # See the header comment in scripts/nightwatch-roamer.service for details.
 
     echo "[+] Systemd services installed and enabled"
 }

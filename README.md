@@ -212,7 +212,7 @@ xz -9 -T0 nightwatch.img        # Creates nightwatch.img.xz (~60-70% smaller)
 git clone https://github.com/guildfordia/nightwatch.git
 cd nightwatch
 
-# 2. Install (installs hostapd, dnsmasq, configures mesh + AP, sets up services)
+# 2. Install (installs hostapd, dnsmasq, ngircd, nginx; configures mesh + AP; wires native systemd units)
 make install
 
 # 3. Start mesh + services
@@ -275,9 +275,11 @@ make install      # First-time setup (run once per Pi)
 make run          # Start mesh + services
 make stop         # Stop everything
 make test         # Full integration test (mesh, services, cross-node IRC)
+make scan         # Advanced mesh network scan (all nodes, link quality, hop count)
 make update       # Pull latest code, restart
 make status       # Show mesh and service status
-make logs         # Follow service logs
+make logs         # Follow service logs (journalctl on ngircd, nightwatch-bridge, nginx)
+make sdlogs SD=X  # Read firstboot logs from a powered-off SD card (debugfs, no mount)
 make monitor      # Live dashboard (refreshes every 5s)
 make blink        # Blink onboard LED to identify this Pi (CLI version)
 make sdcard       # Prepare SD card for a new node (run on laptop, Linux/macOS)
@@ -463,14 +465,13 @@ Each node uses its own BSSID (unique MAC) but the same SSID "Nightwatch." When n
 ### Medium Priority
 
 - [ ] **Migration script for existing nodes** — Nodes upgrading from the old GL.iNet router setup have stale `.env` values (e.g., `AP_IFACE=eth0`). Build a script that updates `.env` for the hostapd architecture
-- [ ] **802.11v automatic steering** — Build a daemon that monitors client signal strength and sends BSS Transition Management requests when a client would be better served by another node
+- [ ] **Stabilize the 802.11v steering daemon (`nightwatch-roamer`)** — A first cut lives in `scripts/nightwatch-roamer.{py,service}`. It broadcasts per-node `hostapd_cli all_sta` snapshots over UDP on `bat0`, builds a fleet-wide MAC→signal map, and issues BSS Transition Management requests when a peer AP has a significantly better signal. Currently committed but **not enabled by default** (opt in with `sudo systemctl enable --now nightwatch-roamer.service`). Defaults to `NIGHTWATCH_ROAMER_DRYRUN=true`. To-dos: validate decisions across 3+ nodes, tune thresholds (`SIGNAL_THRESHOLD`, `SIGNAL_BETTER_BY`, `HYSTERESIS_COUNT`), include neighbor BSSID in BTM requests (currently target-less), then flip to enabled-by-default in `install_systemd_services`.
 - [ ] **Test 3+ node chain** — Multi-hop mesh (A→B→C) is the real deployment model. Verify IRC federation, roaming, and message sync across a chain where no single node reaches every other node
 - [ ] **Test 802.11r with non-Samsung devices** — FT-PSK may work on iPhones, Pixels, and other Android phones. Test and document compatibility
 - [ ] **Harden `nodeconfig.sh` against mid-operation renumbering** — The non-FIXED conflict check runs only when `bat0` is up, which is usually false at boot (nodeconfig runs `Before=nightwatch-mesh.service`), so the saved number survives. But if `nodeconfig.sh` is ever re-run while the mesh is up (manual invocation, maintenance scripts, service-ordering changes), it silently reassigns based on current MAC sort position. When the new number collides with a peer, avahi kicks into auto-rename and peers cascade through `nightwatch-N-2`, `-3`, … up to triple-digit suffixes across the mesh. Fix: gate the conflict check behind an explicit flag (first boot only), persist the FIXED marker by default after a successful first assignment, or add a stabilization window that rejects renumbering within N seconds of a peer's claim.
 - [ ] **Add an `_nightwatch._tcp` avahi service with stable instance names** — Hostname-based discovery (`nightwatch-N.local`) relies on node numbers being globally unique. A custom mDNS service with MAC-suffixed instance names (e.g. `Nightwatch Node 2 [2ccf67b41b79]`) would be collision-proof by construction and carry TXT records (node num, mode, bridge port, MAC) for richer client discovery. Complements the avahi interface-scoping already in place.
 - [ ] **Split repo into `chat/` and `network/` domains** — Refactor so chat services (`ngircd`, `irc-bridge-go`, `html`, nginx chat proxy) and network services (mesh, hostapd, dnsmasq, batman-adv) are independently buildable and deployable. Each domain gets its own Makefile target, systemd unit group, and install path. Goal: run chat on separate hardware (or skip it entirely) without flashing a full mesh node
 - [ ] **Auto-detect node role from plugged-in interfaces** — Drop the `NODE_MODE=mesh|gateway|sound-bridge` variable and all install-time prompts around it. At boot, detect present interfaces and activate roles independently: `eth0` present → sound-bridge subnet (10.0.0.1/24), `wlan1` present → mesh (802.11s + batman-adv), `wlan2` present → hostapd AP. Update `nodeconfig.sh`, systemd units, `dnsmasq`/`hostapd` config generators, `.env.example`, `prepare-sdcard.sh`
-- [ ] **Remove GL.iNet router leftovers** — Delete `scripts/setup-router.sh`, drop `ROUTER_PASSWORD` from `.env.example`, `prepare-sdcard.sh` prompts, `.secrets` injection, and `nodeconfig.sh` allowed-keys list. Remove references from README and comments. GL.iNet path is no longer used
 
 ### Low Priority
 

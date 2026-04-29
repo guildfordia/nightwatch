@@ -2,7 +2,7 @@
 
 ENV_FILE := .env
 
-.PHONY: install run stop test scan update status logs sdlogs clean monitor blink image sdcard info router build-bridge help
+.PHONY: install run stop test scan update status logs sdlogs clean monitor blink image sdcard info build-bridge help
 .DEFAULT_GOAL := help
 
 help:
@@ -21,7 +21,6 @@ help:
 	@echo "  make info      Show detailed node info"
 	@echo "  make scan      Advanced mesh network scan (all nodes)"
 	@echo ""
-	@echo "  make router       Configure GL.iNet router"
 	@echo "  make image        Prepare Pi for SD card cloning"
 	@echo "  make sdcard SD=X [NODE=N]  Prepare SD card (auto-picks node if omitted)"
 	@echo "  make build-bridge Cross-compile irc-bridge (laptop)"
@@ -186,9 +185,6 @@ monitor:
 
 image:
 	@sudo scripts/build-image.sh
-
-router:
-	@sudo scripts/setup-router.sh
 
 build-bridge:
 	@if ! command -v go >/dev/null 2>&1; then echo "Error: Go not installed"; exit 1; fi
