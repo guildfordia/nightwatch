@@ -85,17 +85,45 @@ Escalating recovery (after consecutive failures):
 - **IRC federation** — linked servers across nodes, messages sync everywhere
 - **Self-healing** — routes around failed nodes in seconds
 - **Auto-recovery watchdog** — detects dongle crashes, reboots if needed
-- **Gateway support** — one node can share internet to the whole mesh
-- **Sound-bridge mode** — eth0 hosts a Mac Mini on a separate subnet for audio
+- **Anchor service IP** — fleet-wide shared MAC on `192.168.199.1` so the chat WebSocket stays radio-local after roaming (no mesh trombone)
+- **Uniform node role** — every Pi runs mesh + AP. Plugging eth0 in additionally activates the sound-bridge subnet (10.0.0.0/24) for a Mac Mini. No `NODE_MODE` switch, no gateway role
 - **Captive portal** — DNS hijacking + RFC 8908/8910 API for Android 11+
 - **DoT interception** — port 853 redirected to local DNS
-- **dnsmasq DHCP** — Pi serves DHCP to WiFi clients on br0
+- **dnsmasq DHCP** — Pi serves DHCP to WiFi clients from the anchor IP
 - **Terminal-style web UI** — clean, fast, works on any device
 - **In-chat `/blink` command** — blink LEDs on all mesh nodes to identify which Pi is near you
 - **Persistent nicknames** — saved in localStorage, reclaimed on reconnect
 - **Integration test suite** — `make test` verifies mesh, services, and cross-node IRC
 - **Golden image cloning** — set up one Pi, clone to all others
-- **Scales to 20 nodes**
+- **Scales to 20 nodes** (see Capacity Specifications below — practical user ceiling depends on dongle and layout)
+
+## Capacity Specifications
+
+Realistic concurrent-user ceiling with the default **AR9271** dongles (single-band 2.4 GHz, ath9k_htc).
+
+**Committed design baseline** (final project specification — every node runs this stack):
+- Single uniform node role: **mesh + AP always**, sound-bridge subnet (10.0.0.0/24) layered on top **whenever eth0 is linked**. No `gateway` role. No `NODE_MODE` switch.
+- **Anchor service IP** — fleet-wide shared MAC bound to `192.168.199.1` via `macvlan0` on every node, gratuitous ARP on roaming, ebtables-isolated from `bat0`. Eliminates the post-roaming trombone.
+- DHCP plan widened (no longer caps at 55 baux).
+- AP channels distributed across 1/6/11 by `(PI_NUMBER - 1) % 3`.
+- `max_num_sta=8` explicit per AP (clean refusal instead of firmware crash).
+- `nightwatch-roamer` enabled by default with central coordination + per-AP cap.
+
+The numbers below assume this baseline is in place. Without it, the practical ceiling is ~30 even on a large site.
+
+| Deployment | Target concurrent users | Notes |
+|---|---|---|
+| 1 node, isolated | **6–8** | Per-AP design cap (AR9271 firmware crashes climb sharply above ~12) |
+| 3 nodes, dense single venue (~30 m) | **20** | 2 channels usable for APs (mesh takes 1), so co-channel beyond 3 APs |
+| 4–5 nodes, medium space, channels 1/6/11 distributed | **30** | First channel reuse starts here; throughput per client drops |
+| 8–10 nodes, large site, geographic separation ≥40 m between same-channel APs | **50–60** | Mesh hop count grows, batman-adv broadcast overhead becomes visible |
+| 100 simultaneous users | **stretch goal, not SLA** | Requires ≥10 well-placed nodes, MT7612U on wlan2 strongly recommended; AR9271-only deployments will see frequent watchdog restarts under sustained load |
+
+**Why the AR9271 caps at ~8 per AP design:** firmware crashes under sustained load above 12–15 clients (the watchdog handles recovery via USB reset, but each cycle is a ~30 s service interruption). Mono-band 2.4 GHz means wlan1 (mesh) and wlan2 (AP) compete for spectrum on the same node — at >3 co-located nodes, channel reuse is forced.
+
+**Single biggest unlock without changing dongles:** apply the high-priority TODOs below (DHCP, channel distribution, anchor MAC). Without them the practical ceiling is ~30 even on a large site, because DHCP exhausts at 55 baux total and one overloaded AP crashes in a loop.
+
+**Single biggest unlock with hardware:** swap wlan2 (AP-side only) to **MT7612U** (~€35/dongle). wlan1 (mesh) can stay AR9271. This roughly doubles per-AP capacity (25–30 reliable) and removes the firmware-crash failure mode. Same-venue 100-user is realistic in this configuration.
 
 ## Hardware Requirements
 
@@ -460,18 +488,27 @@ Each node uses its own BSSID (unique MAC) but the same SSID "Nightwatch." When n
 
 - [ ] **Fix Android captive portal** — Samsung Android 16 refuses to stay on Nightwatch when competing networks (cellular, home WiFi) exist. HTTPS connectivity check fails (self-signed cert). Investigate local ACME cert, custom connectivity check response, or Android-specific workarounds
 - [ ] **Fix 802.11r (FT-PSK) on Samsung** — Fast Transition would give sub-second roaming, but Samsung rejects the connection when FT-PSK is advertised. Test with `FT-SAE`, different hostapd settings, or different Samsung firmware versions
-- [ ] **Service node follows WiFi AP after roaming** — After 802.11v transition, the WebSocket stays on the original node via mesh (phone's ARP cache points to old node's MAC). Needs bridge-level solution (ebtables MAC rewrite, shared br0 MAC with BLA, or DHCP force-renew)
+- [ ] **Service node follows WiFi AP after roaming (anchor service IP)** — Committed design feature for the final project. After 802.11v transition, the WebSocket stays on the original node via mesh (phone's ARP cache points to old node's MAC), causing a needless trombone (B → mesh → A → ngircd) that wastes air time on every hop. Plan: introduce a globally-shared "anchor MAC" (locally-administered, e.g. `02:4E:57:00:00:01`) bound to a `macvlan` interface on top of `br0` on **every node** (every Pi runs the mesh + AP stack — there is no longer a `gateway` or pure `sound-bridge` mode; sound-bridge is just an additional behavior triggered by an active eth0 link, layered on top of mesh). The mesh service IP `192.168.199.1` answers ARP with the anchor MAC. On `AP-STA-CONNECTED` (hostapd ctrl_interface event), the new node sends a gratuitous ARP so the client's cache updates immediately. ebtables rules: (a) rewrite source MAC to anchor MAC on egress toward the AP-side ports only, (b) drop frames sourced from anchor MAC on `bat0` so two nodes never advertise it on the mesh simultaneously (otherwise batman-adv DAT/BLA flap). DHCP server (`dnsmasq`) is moved from `br0` to `macvlan0` so leases are issued from the anchor IP. No new hardware, no new service. Combined with `nightwatch-roamer` central coordination, this is the main capacity unlock for ≥40 simultaneous users. Depends on the "Auto-detect node role from plugged-in interfaces" item below being landed first (otherwise the legacy `NODE_MODE=sound-bridge` branch would skip the anchor setup).
+
+- [ ] **Reach the Capacity Specifications target (≥50 users on AR9271)** — Tracking parent for the spec table in the README. Subtasks listed below as separate items.
+
+- [ ] **Widen DHCP allocation** — Current plan in `scripts/common.sh:113` gives each node 5 IPs (`200 + (n-1)*5 + 1 .. +5`) and the loop refuses any node above 11 (start would exceed `.254` in the `/24`). Total ceiling: 55 baux across the fleet, regardless of MAX_NODES. Two acceptable fixes: (a) keep `/24` and reduce `MAX_NODES` to 8, give each 25 IPs (`(n-1)*25+1 .. n*25`, `.201–.254` distributed), or (b) move to `192.168.198.0/23` and allow 20 nodes × 20 IPs = 400 baux. Option (b) is more invasive (touches `nodeconfig.sh`, `mesh-fix.sh`, `dnsmasq.conf` template, `.env.example`, every `192.168.199.x` literal in scripts). Also fix the misleading comment "20 nodes × 5 = .201-.240+" which is arithmetically wrong.
+
+- [ ] **Distribute AP channels across 1/6/11** — All nodes currently broadcast on `AP_CHANNEL=6` (`.env` default). With ≥2 co-located nodes this guarantees co-channel interference and halves usable air time. Change `nodeconfig.sh` (or the hostapd config generator) to pick `AP_CHANNEL` from `[1, 6, 11]` indexed by `(PI_NUMBER - 1) % 3`. Mesh on wlan1 should stay on a single fleet-wide channel (currently 2412 MHz / channel 1 — note this collides with AP channel 1, consider moving mesh to channel 11 and APs to 1/6 only, or document the trade-off).
+
+- [ ] **Cap `max_num_sta` in hostapd** — No explicit limit today; default lets AR9271 firmware crash at 13–15 clients. Add `max_num_sta=8` to `generate_hostapd_conf` in `scripts/common.sh` so excess clients are refused cleanly with `802.11 reason 17` (too many STA) instead of crashing the dongle and triggering a watchdog USB reset that takes the AP offline for ~30 s.
+
+- [ ] **Drop `NODE_MODE` — uniform node role with auto-detected sound-bridge** — Final-project commitment: every Pi runs the same stack (mesh + AP), and the sound-bridge subnet (`10.0.0.0/24` on eth0) activates automatically whenever an eth0 link is detected. No more `mesh | gateway | sound-bridge` switch, no more dedicated gateway role. Touches `scripts/common.sh:287` (`resolve_node_mode`), `scripts/nodeconfig.sh:303-407` (mode detection + hostname suffixes `-gw-` / `-sb-`), `scripts/mesh-fix.sh` (mode-conditional branches in `start_dnsmasq` / `start_hostapd`), `scripts/nightwatch-debug.sh:61`, `scripts/nightwatch-info.sh:148`, `.env.example`. Hostnames become uniform `nightwatch-N` (no `-gw-` / `-sb-` suffix). `IS_GATEWAY` and `MESH_GATEWAY` references removed. **Must land before the anchor service IP work** — otherwise the sound-bridge code path skips bridge/AP setup and the anchor would be missing on those nodes.
 
 ### Medium Priority
 
-- [ ] **Migration script for existing nodes** — Nodes upgrading from the old GL.iNet router setup have stale `.env` values (e.g., `AP_IFACE=eth0`). Build a script that updates `.env` for the hostapd architecture
-- [ ] **Stabilize the 802.11v steering daemon (`nightwatch-roamer`)** — A first cut lives in `scripts/nightwatch-roamer.{py,service}`. It broadcasts per-node `hostapd_cli all_sta` snapshots over UDP on `bat0`, builds a fleet-wide MAC→signal map, and issues BSS Transition Management requests when a peer AP has a significantly better signal. Currently committed but **not enabled by default** (opt in with `sudo systemctl enable --now nightwatch-roamer.service`). Defaults to `NIGHTWATCH_ROAMER_DRYRUN=true`. To-dos: validate decisions across 3+ nodes, tune thresholds (`SIGNAL_THRESHOLD`, `SIGNAL_BETTER_BY`, `HYSTERESIS_COUNT`), include neighbor BSSID in BTM requests (currently target-less), then flip to enabled-by-default in `install_systemd_services`.
+- [ ] **Stabilize the 802.11v steering daemon (`nightwatch-roamer`)** — A first cut lives in `scripts/nightwatch-roamer.{py,service}`. It broadcasts per-node `hostapd_cli all_sta` snapshots over UDP on `bat0`, builds a fleet-wide MAC→signal map, and issues BSS Transition Management requests when a peer AP has a significantly better signal. Currently committed but **not enabled by default** (opt in with `sudo systemctl enable --now nightwatch-roamer.service`). Defaults to `NIGHTWATCH_ROAMER_DRYRUN=true`. To-dos: validate decisions across 3+ nodes, tune thresholds (`SIGNAL_THRESHOLD`, `SIGNAL_BETTER_BY`, `HYSTERESIS_COUNT`), include neighbor BSSID in BTM requests (currently target-less), add a per-AP cap (refuse steering toward an AP already at `max_num_sta`), then flip to enabled-by-default in `install_systemd_services`.
 - [ ] **Test 3+ node chain** — Multi-hop mesh (A→B→C) is the real deployment model. Verify IRC federation, roaming, and message sync across a chain where no single node reaches every other node
 - [ ] **Test 802.11r with non-Samsung devices** — FT-PSK may work on iPhones, Pixels, and other Android phones. Test and document compatibility
 - [ ] **Harden `nodeconfig.sh` against mid-operation renumbering** — The non-FIXED conflict check runs only when `bat0` is up, which is usually false at boot (nodeconfig runs `Before=nightwatch-mesh.service`), so the saved number survives. But if `nodeconfig.sh` is ever re-run while the mesh is up (manual invocation, maintenance scripts, service-ordering changes), it silently reassigns based on current MAC sort position. When the new number collides with a peer, avahi kicks into auto-rename and peers cascade through `nightwatch-N-2`, `-3`, … up to triple-digit suffixes across the mesh. Fix: gate the conflict check behind an explicit flag (first boot only), persist the FIXED marker by default after a successful first assignment, or add a stabilization window that rejects renumbering within N seconds of a peer's claim.
 - [ ] **Add an `_nightwatch._tcp` avahi service with stable instance names** — Hostname-based discovery (`nightwatch-N.local`) relies on node numbers being globally unique. A custom mDNS service with MAC-suffixed instance names (e.g. `Nightwatch Node 2 [2ccf67b41b79]`) would be collision-proof by construction and carry TXT records (node num, mode, bridge port, MAC) for richer client discovery. Complements the avahi interface-scoping already in place.
 - [ ] **Split repo into `chat/` and `network/` domains** — Refactor so chat services (`ngircd`, `irc-bridge-go`, `html`, nginx chat proxy) and network services (mesh, hostapd, dnsmasq, batman-adv) are independently buildable and deployable. Each domain gets its own Makefile target, systemd unit group, and install path. Goal: run chat on separate hardware (or skip it entirely) without flashing a full mesh node
-- [ ] **Auto-detect node role from plugged-in interfaces** — Drop the `NODE_MODE=mesh|gateway|sound-bridge` variable and all install-time prompts around it. At boot, detect present interfaces and activate roles independently: `eth0` present → sound-bridge subnet (10.0.0.1/24), `wlan1` present → mesh (802.11s + batman-adv), `wlan2` present → hostapd AP. Update `nodeconfig.sh`, systemd units, `dnsmasq`/`hostapd` config generators, `.env.example`, `prepare-sdcard.sh`
+- [ ] *(Promoted to High Priority above as "Drop `NODE_MODE` — uniform node role with auto-detected sound-bridge")*
 
 ### Low Priority
 
