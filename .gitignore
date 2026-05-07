@@ -57,3 +57,8 @@ build/
 
 # Node
 node_modules/
+
+# Documents internes (hors livraison client)
+docs/_hors-perimetre-prive.md
+docs/_handoff-*.md
+docs/cahier-des-charges.md
