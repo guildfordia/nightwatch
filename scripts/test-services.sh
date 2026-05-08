@@ -231,6 +231,90 @@ else
 fi
 
 # ============================================================
+# 8. CdC §3.4 #11 — max_num_sta=8 cap
+# ============================================================
+
+section "8. AP cap (CdC §3.4 #11)"
+
+AP_IFACE_VAL=$(grep '^AP_IFACE=' /opt/nightwatch/.env 2>/dev/null | cut -d= -f2 || echo "wlan2")
+if command -v hostapd_cli >/dev/null 2>&1; then
+    HOSTAPD_CFG=$(hostapd_cli -i "$AP_IFACE_VAL" get_config 2>/dev/null || echo "")
+    if echo "$HOSTAPD_CFG" | grep -q "^max_num_sta=8$"; then
+        pass "hostapd_cli get_config reports max_num_sta=8"
+    elif [ -z "$HOSTAPD_CFG" ]; then
+        skip "hostapd_cli unreachable (AP may be down or running in sound-bridge mode)"
+    else
+        fail "hostapd reports a different max_num_sta value"
+    fi
+else
+    skip "hostapd_cli not installed"
+fi
+
+# ============================================================
+# 9. CdC §3.4 #14 — captive portal probes
+# ============================================================
+
+section "9. Captive portal (CdC §3.4 #14)"
+
+for probe in /generate_204 /gen_204; do
+    code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost${probe}" 2>/dev/null || echo "000")
+    if [ "$code" = "204" ]; then
+        pass "nginx ${probe} returns 204"
+    else
+        fail "nginx ${probe} returned HTTP $code (expected 204)"
+    fi
+done
+
+CAPTIVE_JSON=$(curl -sf --max-time 3 http://localhost/api/captive 2>/dev/null || echo "")
+if echo "$CAPTIVE_JSON" | grep -q '"captive": *true'; then
+    pass "/api/captive advertises captive=true (RFC 8908)"
+else
+    fail "/api/captive missing or malformed"
+fi
+
+# ============================================================
+# 10. CdC §3.4 #12, #13 — /api/config + diagnostic gating
+# ============================================================
+
+section "10. Exposition mode (CdC §3.4 #12, #13)"
+
+CONFIG_JSON=$(curl -sf --max-time 3 http://localhost/api/config 2>/dev/null || echo "")
+MODE_VAL=$(echo "$CONFIG_JSON" | grep -o '"mode":"[^"]*"' | cut -d\" -f4 || echo "")
+EMAIL_VAL=$(echo "$CONFIG_JSON" | grep -o '"signalement_email":"[^"]*"' | cut -d\" -f4 || echo "")
+if [ -n "$MODE_VAL" ]; then
+    pass "/api/config returns mode=$MODE_VAL"
+else
+    fail "/api/config missing or malformed (got: $CONFIG_JSON)"
+fi
+if [ -n "$EMAIL_VAL" ]; then
+    if [ "$EMAIL_VAL" = "NON_DEFINI@nightwatch.local" ]; then
+        skip "SIGNALEMENT_EMAIL still at placeholder — operator must set it before exposition"
+    else
+        pass "/api/config exposes a SIGNALEMENT_EMAIL"
+    fi
+else
+    fail "/api/config missing signalement_email"
+fi
+
+# Diagnostic endpoint gating
+for endpoint in /api/blink /api/debug /api/bridge-status; do
+    code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost${endpoint}" 2>/dev/null || echo "000")
+    if [ "$MODE_VAL" = "production" ]; then
+        if [ "$code" = "403" ]; then
+            pass "production: ${endpoint} → 403"
+        else
+            fail "production: ${endpoint} returned $code (expected 403)"
+        fi
+    elif [ "$MODE_VAL" = "debug" ]; then
+        if [ "$code" = "200" ] || [ "$code" = "503" ]; then
+            pass "debug: ${endpoint} reachable (HTTP $code)"
+        else
+            fail "debug: ${endpoint} returned $code (expected 200/503)"
+        fi
+    fi
+done
+
+# ============================================================
 # Summary
 # ============================================================
 
