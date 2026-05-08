@@ -17,6 +17,8 @@ StandardError=journal
 Environment=IRC_SERVER=127.0.0.1:6667
 # Bridge data directory for nick counter persistence
 Environment=DATA_DIR=/opt/nightwatch/irc-bridge-go/data
+# Picks up NIGHTWATCH_MODE, SIGNALEMENT_EMAIL (CdC §3.4 #12, #13)
+EnvironmentFile=-/opt/nightwatch/.env
 
 [Install]
 WantedBy=multi-user.target

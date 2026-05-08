@@ -2,7 +2,7 @@
 
 ENV_FILE := .env
 
-.PHONY: install run stop test scan update status logs sdlogs clean monitor blink image sdcard info build-bridge help
+.PHONY: install run stop test scan update status logs sdlogs clean monitor blink image sdcard info build-bridge wipe-logs help
 .DEFAULT_GOAL := help
 
 help:
@@ -24,6 +24,7 @@ help:
 	@echo "  make image        Prepare Pi for SD card cloning"
 	@echo "  make sdcard SD=X [NODE=N]  Prepare SD card (auto-picks node if omitted)"
 	@echo "  make build-bridge Cross-compile irc-bridge (laptop)"
+	@echo "  make wipe-logs [USER=<user>]  Erase ngircd & hostapd logs on all nodes (CdC §9.2)"
 	@echo ""
 	@echo "First time:  make install && make run && make test"
 
@@ -193,15 +194,35 @@ build-bridge:
 
 sdcard:
 	@if [ -z "$(SD)" ]; then \
-		echo "Usage: make sdcard SD=/dev/sdX [NODE=N] [MODE=mesh|gateway|sound-bridge]"; exit 1; fi
+		echo "Usage: make sdcard SD=/dev/sdX [NODE=N]"; exit 1; fi
 	@if command -v go >/dev/null 2>&1; then \
 		echo "[+] Cross-compiling irc-bridge..."; \
 		cd irc-bridge-go && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o irc-bridge .; \
 	fi
-	@NODE=$(NODE) scripts/prepare-sdcard.sh $(SD) $(if $(NODE),--node $(NODE),) $(if $(MODE),--mode $(MODE),) $(if $(filter true,$(GATEWAY)),--gateway,)
+	@NODE=$(NODE) scripts/prepare-sdcard.sh $(SD) $(if $(NODE),--node $(NODE),)
 
 info:
 	@scripts/nightwatch-info.sh
 
 scan:
 	@sudo scripts/test-scan.sh $(ARGS)
+
+# CdC §9.2 — Iterate SSH on all mesh nodes (.101-.120) and erase ngircd/hostapd
+# logs at expo close. Override SSH user with USER=<user>; defaults to current.
+# Fallback if SSH fails: run locally on each Pi:
+#   sudo rm -f /var/log/ngircd.log /var/log/hostapd.log*
+wipe-logs:
+	@SSH_USER=$${USER:-$$(id -un)}; \
+	echo "[+] Wiping ngircd & hostapd logs on nodes .101-.120 as $$SSH_USER..."; \
+	for i in $$(seq 101 120); do \
+		ip="192.168.199.$$i"; \
+		if ssh -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new -o BatchMode=yes \
+			"$$SSH_USER@$$ip" \
+			'sudo rm -f /var/log/ngircd.log /var/log/hostapd.log*' 2>/dev/null; then \
+			echo "  [+] $$ip wiped"; \
+		else \
+			echo "  [-] $$ip unreachable (skipped)"; \
+		fi; \
+	done; \
+	echo "[+] Wipe complete. Fallback for unreachable nodes: SSH in locally and run"; \
+	echo "    sudo rm -f /var/log/ngircd.log /var/log/hostapd.log*"

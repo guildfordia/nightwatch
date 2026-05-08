@@ -192,6 +192,23 @@
     .msg-delivered { color: var(--text-primary); }
     .msg-failed { color: var(--text-error); opacity: 0.7; }
 
+    /* CdC §3.4 #12 — RGPD/LCEN banner shown at chat open. Hard-coded in
+       template; the mailto: target is filled from /api/config at runtime. */
+    .rgpd-banner {
+      border-left: 3px solid var(--text-highlight, #ffaa00);
+      padding: 0.6em 1ch;
+      margin: 0.4em 0;
+      font-size: 0.85em;
+      line-height: 1.4;
+      color: var(--text-system);
+      background: rgba(255, 170, 0, 0.04);
+    }
+    .rgpd-banner p { margin: 0 0 0.4em; }
+    .rgpd-banner p:last-child { margin-bottom: 0; }
+    .rgpd-banner .rgpd-rule { opacity: 0.6; }
+    .rgpd-banner .rgpd-minors { font-style: italic; color: var(--text-highlight, #ffaa00); }
+    .rgpd-banner a { color: var(--text-highlight, #ffaa00); text-decoration: underline; }
+
     .input-bar {
       background: var(--bg-primary);
       color: var(--text-secondary);
@@ -253,7 +270,16 @@
     </div>
 
     <div class="main-content">
-      <div class="chat-area" id="chatArea"></div>
+      <div class="chat-area" id="chatArea"><!-- CdC §3.4 #12 — RGPD/LCEN banner. Hard-coded; the mailto target is filled
+             from /api/config (SIGNALEMENT_EMAIL of the node's .env) at runtime. -->
+        <div id="rgpdBanner" class="rgpd-banner" role="note" aria-label="Information RGPD et LCEN">
+          <p class="rgpd-rule">─── INFORMATION (RGPD / LCEN) ───</p>
+          <p>Ce chat est public et local au lieu d'exposition. Les messages ne sont pas publiés sur Internet. Lorsque la couche son est branchée, chaque message est transmis automatiquement à un service de traduction Google (États-Unis) pour normalisation en anglais avant analyse de sentiment et d'émotion. Ce transfert hors UE n'est pas encadré par un contrat art. 46 RGPD ; il est porté à votre connaissance afin que vous décidiez du contenu que vous saisissez.</p>
+          <p>Les messages reçus par la couche son peuvent être conservés à des fins de documentation de l'œuvre (10 ans maximum). Les journaux des nœuds (pseudos, adresses MAC) sont effacés à la fermeture de l'exposition.</p>
+          <p class="rgpd-minors">Tu as moins de 15 ans ? Demande à un adulte avant d'écrire — n'écris pas ton nom ni ton école.</p>
+          <p>Signaler un contenu illicite (LCEN art. 6-I-7) : <a id="rgpdSignalement" href="mailto:NON_DEFINI@nightwatch.local">signaler par email</a>. Réclamation : <a href="https://www.cnil.fr" target="_blank" rel="noopener noreferrer">CNIL — www.cnil.fr</a>.</p>
+          <p class="rgpd-rule">─────────────────────────────────</p>
+        </div></div>
       <div class="user-list" id="userList">
         <div class="user-list-header">Users</div>
       </div>
@@ -361,9 +387,53 @@
         this.debugData = null;
         this.bridgeData = null;
         this.knownPeers = new Set(); // track discovered peers for join/leave announcements
+        // CdC §3.4 #13 — exposition mode. Defaults to "production" until
+        // /api/config returns; debug commands stay disabled in the meantime.
+        this.nightwatchMode = 'production';
         this.initElements();
+        this.fetchRuntimeConfig();
+        this.installNetworkListeners();
         this.connect();
         this.startDebugPolling();
+      }
+
+      fetchRuntimeConfig() {
+        // CdC §3.4 #12, #13 — pull SIGNALEMENT_EMAIL + NIGHTWATCH_MODE from
+        // the bridge so the banner mailto link points at the operator-defined
+        // address and diagnostic commands stay hidden in production.
+        fetch('/api/config').then(r => r.ok ? r.json() : null).then(cfg => {
+          if (!cfg) return;
+          if (cfg.signalement_email) {
+            const link = document.getElementById('rgpdSignalement');
+            if (link) link.href = 'mailto:' + cfg.signalement_email;
+          }
+          if (cfg.mode) {
+            this.nightwatchMode = cfg.mode;
+          }
+        }).catch(() => { /* keep production defaults */ });
+      }
+
+      isDebugMode() { return this.nightwatchMode === 'debug'; }
+
+      installNetworkListeners() {
+        // Force a clean WS close as soon as the OS signals network loss —
+        // bypasses the TCP timeout limbo (up to 30-60s on idle sockets) that
+        // would otherwise gate the reconnect attempt during AP failover.
+        window.addEventListener('offline', () => {
+          if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+            try { this.ws.close(); } catch (e) {}
+          }
+        });
+        // When the OS reports network is back, cancel any pending backoff
+        // and reconnect immediately — don't wait out a 30s exponential delay
+        // when we know connectivity has just been restored.
+        window.addEventListener('online', () => {
+          if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+          this.reconnectDelay = 1000;
+          if (!this.ws || this.ws.readyState === WebSocket.CLOSED || this.ws.readyState === WebSocket.CLOSING) {
+            this.connect();
+          }
+        });
       }
 
       initElements() {
@@ -437,7 +507,7 @@
         } else {
           this.addSystemMessage('Welcome to NIGHTWATCH - Decentralized Mesh Network - Off-Grid conversation');
           this.addSystemMessage('Change your name: /nick YourName');
-          this.addSystemMessage('Type /help for commands, /debug for diagnostics');
+          this.addSystemMessage('Type /help for commands');
         }
         this.addSystemMessage('Connecting to IRC bridge...');
       }
@@ -550,12 +620,14 @@
 
         if (input === '/debug' || input === '/status') {
           this.inputField.value = '';
+          if (!this.isDebugMode()) { this.addSystemMessage('Command disabled (production mode)'); return; }
           this.showDebugInfo();
           return;
         }
 
         if (input === '/nodes' || input === '/mesh') {
           this.inputField.value = '';
+          if (!this.isDebugMode()) { this.addSystemMessage('Command disabled (production mode)'); return; }
           this.showNodesInfo();
           return;
         }
@@ -564,15 +636,18 @@
           this.inputField.value = '';
           this.addSystemMessage('Commands:');
           this.addSystemMessage('  /nick <name>  - Change your nickname');
-          this.addSystemMessage('  /blink        - Blink the LED on your current node');
-          this.addSystemMessage('  /nodes        - Show mesh network map');
-          this.addSystemMessage('  /debug        - Show full node diagnostics');
           this.addSystemMessage('  /help         - Show this help');
+          if (this.isDebugMode()) {
+            this.addSystemMessage('  /blink        - Blink the LED on your current node');
+            this.addSystemMessage('  /nodes        - Show mesh network map');
+            this.addSystemMessage('  /debug        - Show full node diagnostics');
+          }
           return;
         }
 
         if (input === '/blink') {
           this.inputField.value = '';
+          if (!this.isDebugMode()) { this.addSystemMessage('Command disabled (production mode)'); return; }
           this.addSystemMessage('Blinking LED on all mesh nodes...');
           fetch('/api/blink').then(r => {
             if (r.ok) this.addSystemMessage('LED blinking for 10 seconds');
@@ -910,13 +985,19 @@
           "║                                                                    ║",
           "║  Commands:                                                         ║",
           "║  /nick <name>  - Change your nickname                             ║",
-          "║  /nodes        - Show mesh network map                            ║",
-          "║  /debug        - Show full node diagnostics                       ║",
           "║  /help         - Show all commands                                ║",
+        ];
+        if (this.isDebugMode()) {
+          lines.push(
+            "║  /nodes        - Show mesh network map                            ║",
+            "║  /debug        - Show full node diagnostics                       ║"
+          );
+        }
+        lines.push(
           "║                                                                    ║",
           "║  Built with love for decentralized communication                  ║",
           "╚════════════════════════════════════════════════════════════════════╝"
-        ];
+        );
         lines.forEach(line => this.appendSystemLine(line));
         // Fetch node info and display
         fetch('/nodeinfo.json')
@@ -1136,6 +1217,9 @@
       }
 
       async fetchDebugData() {
+        // CdC §3.4 #13 — diagnostic endpoints return 403 in production.
+        // Skip polling there to avoid hammering the bridge for nothing.
+        if (!this.isDebugMode()) return;
         // Cancel any in-flight fetch from a previous poll cycle (prevents pile-up
         // on slow networks where a 15s fetch outlasts the 15s interval)
         if (this.debugAbort) this.debugAbort.abort();
