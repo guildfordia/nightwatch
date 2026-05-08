@@ -361,6 +361,20 @@ setup_client_bridge() {
     # Shared IP across all nodes — users can always type http://192.168.199.1
     ip addr add 192.168.199.1/32 dev "$BR_IFACE" 2>/dev/null || true
 
+    # Half-measure for §3.3 #9 (anchor service IP): each node owns
+    # 192.168.199.1 with its own br0 MAC, and nightwatch-arp-refresh sends
+    # a gratuitous ARP on every AP-STA-CONNECTED to refresh phone caches
+    # post-roaming. The frame must NOT leak onto bat0: it would corrupt
+    # peer nodes' STA caches (different MAC for the same IP) and trigger
+    # batman-adv DAT/BLA flap. Drop any ARP for 192.168.199.1 going out
+    # bat0. Idempotent: flush first to survive a service restart.
+    if command -v ebtables >/dev/null 2>&1; then
+        ebtables -t filter -D FORWARD -o "$BAT_IFACE" -p arp --arp-ip-src 192.168.199.1 -j DROP 2>/dev/null || true
+        ebtables -t filter -D FORWARD -o "$BAT_IFACE" -p arp --arp-ip-dst 192.168.199.1 -j DROP 2>/dev/null || true
+        ebtables -t filter -A FORWARD -o "$BAT_IFACE" -p arp --arp-ip-src 192.168.199.1 -j DROP 2>/dev/null || true
+        ebtables -t filter -A FORWARD -o "$BAT_IFACE" -p arp --arp-ip-dst 192.168.199.1 -j DROP 2>/dev/null || true
+    fi
+
     echo "[+] Bridge $BR_IFACE is up with IP ${MESH_IP%/*} + 192.168.199.1 (shared)"
     echo "[+] Ports: $BAT_IFACE (mesh) — $AP_IFACE will be added by hostapd"
 }
@@ -887,8 +901,16 @@ case "$1" in
         batctl meshif "$BAT_IFACE" if 2>/dev/null || batctl if 2>/dev/null || echo "  (none)"
         ;;
 
+    restart-dnsmasq)
+        # CdC §3.4 #3a — kill → restart < 60 s. Called by mesh-watchdog when
+        # dnsmasq has died but the rest of the mesh is healthy, to avoid a
+        # full mesh restart (which would also bounce hostapd and disconnect
+        # phones).
+        start_dnsmasq
+        ;;
+
     *)
-        echo "Usage: $0 {start|stop|status}"
+        echo "Usage: $0 {start|stop|status|restart-dnsmasq}"
         exit 1
         ;;
 esac

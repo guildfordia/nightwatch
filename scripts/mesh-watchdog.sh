@@ -99,6 +99,27 @@ if [ "$HEALTHY" = true ] && [ "$NODE_MODE" != "sound-bridge" ] && [ ! -d "/sys/c
     HEALTHY=false
 fi
 
+# ---- Check 5: dnsmasq is running (CdC §3.4 #3a) ----
+# dnsmasq is launched inline by mesh-fix.sh and has no systemd unit of its
+# own, so without this check a `kill` would leave clients without DHCP/DNS.
+# Skip in sound-bridge mode (no AP, no client DHCP needed).
+
+DNSMASQ_PID="/var/run/dnsmasq-nightwatch.pid"
+if [ "$HEALTHY" = true ] && [ "$NODE_MODE" != "sound-bridge" ]; then
+    if [ ! -f "$DNSMASQ_PID" ] || ! kill -0 "$(cat "$DNSMASQ_PID" 2>/dev/null)" 2>/dev/null; then
+        log "dnsmasq not running — restarting (the rest of the mesh is healthy)"
+        "$NIGHTWATCH_DIR/scripts/mesh-fix.sh" restart-dnsmasq 2>&1 | logger -t "$LOG_TAG" || true
+        # No mesh-level escalation: dnsmasq death doesn't reset the failure
+        # counter for hostapd/mesh, and a successful restart leaves us healthy.
+        if [ -f "$DNSMASQ_PID" ] && kill -0 "$(cat "$DNSMASQ_PID" 2>/dev/null)" 2>/dev/null; then
+            log "dnsmasq restarted successfully"
+            clear_fails
+            exit 0
+        fi
+        HEALTHY=false
+    fi
+fi
+
 # ---- All healthy — reset failure counter ----
 
 if [ "$HEALTHY" = true ]; then

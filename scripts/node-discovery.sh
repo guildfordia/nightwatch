@@ -34,7 +34,7 @@ load_env "$ENV_FILE"
 BAT_IFACE="${BAT_IFACE:-bat0}"
 DISCOVERY_PORT="${DISCOVERY_PORT:-4919}"
 BEACON_INTERVAL="${BEACON_INTERVAL:-30}"
-PEER_TIMEOUT="${PEER_TIMEOUT:-300}"
+PEER_TIMEOUT="${PEER_TIMEOUT:-90}"  # CdC §9.2 — peer expires 90s after last beacon (3× BEACON_INTERVAL)
 PEER_FILE="/run/nightwatch-peers"
 PID_FILE="/run/nightwatch-discovery.pid"
 LOCAL_IP="${MESH_IP%/*}"

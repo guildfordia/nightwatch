@@ -288,6 +288,8 @@ if ! DEBIAN_FRONTEND=noninteractive timeout 600 apt-get install -y -qq \
     net-tools \
     wpasupplicant \
     iptables \
+    ebtables \
+    iputils-arping \
     curl \
     git \
     fping \
@@ -316,9 +318,15 @@ systemctl disable ngircd 2>/dev/null || true
 systemctl stop nginx 2>/dev/null || true
 systemctl disable nginx 2>/dev/null || true
 
-# Override ngircd to always restart (default is on-failure which misses SIGTERM exits)
-mkdir -p /etc/systemd/system/ngircd.service.d
+# Override ngircd + nginx to always restart (default is on-failure which misses
+# clean SIGTERM exits — required by CdC §3.4 #3a: kill → restart < 60 s).
+mkdir -p /etc/systemd/system/ngircd.service.d /etc/systemd/system/nginx.service.d
 cat > /etc/systemd/system/ngircd.service.d/restart.conf <<'OVERRIDE'
+[Service]
+Restart=always
+RestartSec=5
+OVERRIDE
+cat > /etc/systemd/system/nginx.service.d/restart.conf <<'OVERRIDE'
 [Service]
 Restart=always
 RestartSec=5
@@ -441,7 +449,7 @@ echo ""
 echo "[8b/12] Generating hostapd config (WiFi AP with 802.11r)..."
 mkdir -p "$NIGHTWATCH_DIR/hostapd"
 AP_IFACE_VAL=$(grep '^AP_IFACE=' "$NIGHTWATCH_DIR/.env" 2>/dev/null | cut -d= -f2- || echo "wlan2")
-AP_CHANNEL_VAL=$(grep '^AP_CHANNEL=' "$NIGHTWATCH_DIR/.env" 2>/dev/null | cut -d= -f2- || echo "6")
+AP_CHANNEL_VAL=$(grep '^AP_CHANNEL=' "$NIGHTWATCH_DIR/.env" 2>/dev/null | cut -d= -f2- || echo "0")
 AP_BSSID_VAL=$(grep '^AP_BSSID=' "$NIGHTWATCH_DIR/.env" 2>/dev/null | cut -d= -f2- || echo "02:00:4E:57:00:01")
 WIFI_SSID_VAL=$(grep '^WIFI_SSID=' "$NIGHTWATCH_DIR/.env" 2>/dev/null | cut -d= -f2- || echo "Nightwatch")
 WIFI_PASSWORD_VAL=$(grep '^WIFI_PASSWORD=' "$NIGHTWATCH_DIR/.env" 2>/dev/null | cut -d= -f2- || echo "Nightwatch")

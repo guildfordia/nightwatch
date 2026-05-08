@@ -194,6 +194,21 @@ systemctl stop nginx 2>/dev/null || true
 systemctl disable ngircd 2>/dev/null || true
 systemctl disable nginx 2>/dev/null || true
 
+# Override ngircd + nginx to always restart (default is on-failure which
+# misses clean SIGTERM exits — required by CdC §3.4 #3a: kill → restart < 60 s).
+mkdir -p /etc/systemd/system/ngircd.service.d /etc/systemd/system/nginx.service.d
+cat > /etc/systemd/system/ngircd.service.d/restart.conf <<'OVERRIDE'
+[Service]
+Restart=always
+RestartSec=5
+OVERRIDE
+cat > /etc/systemd/system/nginx.service.d/restart.conf <<'OVERRIDE'
+[Service]
+Restart=always
+RestartSec=5
+OVERRIDE
+systemctl daemon-reload
+
 # Symlink nginx config
 rm -f /etc/nginx/sites-enabled/default
 ln -sf "$INSTALL_DIR/nginx/nginx.conf" /etc/nginx/conf.d/nightwatch.conf
@@ -340,7 +355,7 @@ echo "[9/10] Generating hostapd config (WiFi AP with 802.11r fast roaming)..."
 
 WIFI_SSID_VAL=$(grep '^WIFI_SSID=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "Nightwatch")
 WIFI_PASSWORD_VAL=$(grep '^WIFI_PASSWORD=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "Nightwatch")
-AP_CHANNEL_VAL=$(grep '^AP_CHANNEL=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "6")
+AP_CHANNEL_VAL=$(grep '^AP_CHANNEL=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "0")
 AP_BSSID_VAL=$(grep '^AP_BSSID=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "02:00:4E:57:00:01")
 AP_IFACE_VAL=$(grep '^AP_IFACE=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || echo "wlan2")
 

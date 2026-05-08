@@ -21,8 +21,8 @@ A resilient chat system for off-grid communication using 802.11s + batman-adv me
                        |           |                |             |
                     clients     clients          clients       clients
 
-   Optional: one node has wlan0 → internet (gateway mode)
-   Optional: sound-bridge mode — eth0 → Mac Mini on 10.0.0.1/24
+   Every node also serves a sound-bridge subnet on eth0 (10.0.0.0/24)
+   for plugging in a Mac running nightwatch-sound.
 ```
 
 Each Pi runs:
@@ -31,7 +31,7 @@ Each Pi runs:
 - **bat0** — batman-adv virtual interface, carries all mesh traffic
 - **br0** — Linux bridge joining bat0 + wlan2, holds the mesh IP
 - **wlan0** (onboard) — reserved for internet/Tailscale (not used by mesh)
-- **eth0** — unused in default mesh mode (used in sound-bridge mode for Mac Mini)
+- **eth0** — Mac sound-bridge subnet (10.0.0.0/24), DHCP always served
 - **Native systemd services** — ngircd (IRC), irc-bridge (Go WebSocket), nginx (web frontend)
 
 Users connect to "Nightwatch" WiFi and access the chat. Traffic routes through the mesh automatically via batman-adv.
@@ -64,8 +64,8 @@ A systemd timer runs `mesh-watchdog.sh` every 30 seconds to detect and recover f
 | `nightwatch-mesh.service` is active | Restart mesh service |
 | `wlan1` exists and in mesh mode | Restart mesh service |
 | `wlan1` is in batman-adv | Restart mesh service |
-| `hostapd` is running (skipped in sound-bridge mode) | Restart mesh service |
-| `wlan2` exists (skipped in sound-bridge mode) | Restart mesh service |
+| `hostapd` is running | Restart mesh service |
+| `wlan2` exists | Restart mesh service |
 
 Escalating recovery (after consecutive failures):
 1. **Failures 1-2**: `systemctl restart nightwatch-mesh`
@@ -86,7 +86,7 @@ Escalating recovery (after consecutive failures):
 - **Self-healing** — routes around failed nodes in seconds
 - **Auto-recovery watchdog** — detects dongle crashes, reboots if needed
 - **Anchor service IP** — fleet-wide shared MAC on `192.168.199.1` so the chat WebSocket stays radio-local after roaming (no mesh trombone)
-- **Uniform node role** — every Pi runs mesh + AP. Plugging eth0 in additionally activates the sound-bridge subnet (10.0.0.0/24) for a Mac Mini. No `NODE_MODE` switch, no gateway role
+- **Uniform stack** — every Pi runs mesh + AP + sound-bridge subnet (10.0.0.0/24 on eth0). Plug a Mac into any node, it gets DHCP. Nodes are physically interchangeable
 - **Captive portal** — DNS hijacking + RFC 8908/8910 API for Android 11+
 - **DoT interception** — port 853 redirected to local DNS
 - **dnsmasq DHCP** — Pi serves DHCP to WiFi clients from the anchor IP
@@ -102,7 +102,7 @@ Escalating recovery (after consecutive failures):
 Realistic concurrent-user ceiling with the default **AR9271** dongles (single-band 2.4 GHz, ath9k_htc).
 
 **Committed design baseline** (final project specification — every node runs this stack):
-- Single uniform node role: **mesh + AP always**, sound-bridge subnet (10.0.0.0/24) layered on top **whenever eth0 is linked**. No `gateway` role. No `NODE_MODE` switch.
+- Uniform stack: **mesh + AP + sound-bridge subnet (10.0.0.0/24 on eth0) always**.
 - **Anchor service IP** — fleet-wide shared MAC bound to `192.168.199.1` via `macvlan0` on every node, gratuitous ARP on roaming, ebtables-isolated from `bat0`. Eliminates the post-roaming trombone.
 - DHCP plan widened (no longer caps at 55 baux).
 - AP channels distributed across 1/6/11 by `(PI_NUMBER - 1) % 3`.
@@ -144,13 +144,10 @@ The numbers below assume this baseline is in place. Without it, the practical ce
 
 Verify mesh + AP support: `iw phy phy1 info | grep -E "mesh point|AP"` (check for both modes)
 
-### Sound-Bridge Node (optional)
-- A Pi configured with `NODE_MODE=sound-bridge` connects to a Mac Mini via eth0 on `10.0.0.0/24`
-- The Mac Mini gets `10.0.0.1/24` as gateway, used for audio streaming
-- Sound-bridge nodes still participate in the mesh but don't broadcast a WiFi AP
-
-### Gateway Node (optional)
-- Internet connection via wlan0 or ethernet (for the gateway node)
+### Mac sound-bridge (optional add-on)
+- Plug a Mac into any node's eth0 — the node serves DHCP on `10.0.0.0/24` and routes to the mesh.
+- The Mac running `nightwatch-sound` reaches the chat bridge over the mesh subnet.
+- No special node configuration; eth0 is wired the same way on every Pi.
 
 ## Deployment
 
@@ -272,13 +269,6 @@ AP_BSSID=02:00:4E:57:00:01    # Currently unused (unique BSSIDs per node by defa
 WIFI_SSID=Nightwatch
 WIFI_PASSWORD=Nightwatch
 
-# ── Node Mode ──
-# mesh         (default) bat0 + hostapd AP bridged via br0
-# gateway      Same as mesh + batman-adv gw_mode server + NAT via INET_IFACE
-# sound-bridge eth0 on separate subnet (10.0.0.1/24) for Mac Mini, no AP
-NODE_MODE=mesh
-# INET_IFACE=wlan0
-
 # ── App Services ──
 IRC_PORT=6667
 NGINX_PORT=80
@@ -290,7 +280,7 @@ IRC_LINK_PASSWORD=<set-during-install>
 # ── Tailscale (optional remote SSH) ──
 TAILSCALE_AUTH_KEY=
 
-# ── Hugging Face (optional AI features) ──
+# ── Hugging Face (reserved for future use — currently unused) ──
 HF_TOKEN=
 ```
 
@@ -314,17 +304,28 @@ make sdcard       # Prepare SD card for a new node (run on laptop, Linux/macOS)
 make build-bridge # Cross-compile irc-bridge for ARM64 (run on laptop, auto in sdcard)
 make image        # Prepare this Pi for golden image capture
 make info         # Print detailed node information
+make wipe-logs    # Erase ngircd & hostapd logs on every node (CdC §9.2, expo close)
 ```
+
+> **`make wipe-logs`** iterates SSH on `192.168.199.101-120` and removes
+> `/var/log/ngircd.log` + `/var/log/hostapd.log*`. Override the SSH user with
+> `make wipe-logs USER=<user>`. For nodes the SSH probe can't reach, run on
+> the Pi locally: `sudo rm -f /var/log/ngircd.log /var/log/hostapd.log*`.
 
 ### In-chat commands (from any phone connected to Nightwatch WiFi)
 
-| Command | Action |
-|---------|--------|
-| `/nick <name>` | Change your nickname (saved in localStorage, persists across reconnects) |
-| `/blink` | Blink LEDs on all mesh nodes (10 seconds) — see which Pi is near you |
-| `/nodes` | Show mesh network map |
-| `/debug` | Show full node diagnostics |
-| `/help` | List commands |
+| Command | Action | Available in production? |
+|---------|--------|--------------------------|
+| `/nick <name>` | Change your nickname (saved in localStorage, persists across reconnects) | yes |
+| `/help` | List commands | yes |
+| `/blink` | Blink LEDs on all mesh nodes (10 seconds) — see which Pi is near you | only when `NIGHTWATCH_MODE=debug` |
+| `/nodes` | Show mesh network map | only when `NIGHTWATCH_MODE=debug` |
+| `/debug` | Show full node diagnostics | only when `NIGHTWATCH_MODE=debug` |
+
+CdC §3.4 #13 requires the diagnostic commands to be off by default. Set
+`NIGHTWATCH_MODE=debug` in `.env` only for development; the corresponding
+HTTP endpoints (`/api/blink`, `/api/debug`, `/api/bridge-status`) return
+`403` whenever the mode is anything other than `debug`.
 
 ## How the Mesh Works
 
@@ -417,7 +418,6 @@ sudo journalctl -t nightwatch-watchdog --no-pager -n 30
 Modern Android/Samsung's "Smart WiFi" switches away from networks without internet. The Nightwatch network is genuinely off-grid (no internet by design), so Android may avoid it when a network with internet is in range. Workarounds:
 - Disable "Intelligent Wi-Fi" / "Switch to mobile data" in Android settings
 - Forget the home WiFi temporarily (only for testing)
-- Enable **gateway mode** on one node — gives the mesh real internet, Android stays happily
 
 ### I can't SSH to `nightwatch-N.local` after first boot
 
@@ -470,7 +470,6 @@ Each node uses its own BSSID (unique MAC) but the same SSID "Nightwatch." When n
 - **Bridge MAC pinning** in `setup_client_bridge()` — fixes batman-adv DAT routing with hostapd
 - **Auto-recovery watchdog** with escalating recovery (restart → USB reset → reboot)
 - **Manual LED control** — no kernel triggers, LED never gets stuck in stale state
-- **Sound-bridge mode** properly handles eth0/Mac Mini in the new architecture
 - **Captive portal** improvements: RFC 8908/8910 API, DHCP option 114, DoT interception
 - **Always regenerate** `dnsmasq.conf` and `hostapd.conf` on mesh service start (prevents stale configs)
 - **Targeted dnsmasq kill** — only kills Nightwatch's instance, not other system dnsmasq
@@ -488,7 +487,9 @@ Each node uses its own BSSID (unique MAC) but the same SSID "Nightwatch." When n
 
 - [ ] **Fix Android captive portal** — Samsung Android 16 refuses to stay on Nightwatch when competing networks (cellular, home WiFi) exist. HTTPS connectivity check fails (self-signed cert). Investigate local ACME cert, custom connectivity check response, or Android-specific workarounds
 - [ ] **Fix 802.11r (FT-PSK) on Samsung** — Fast Transition would give sub-second roaming, but Samsung rejects the connection when FT-PSK is advertised. Test with `FT-SAE`, different hostapd settings, or different Samsung firmware versions
-- [ ] **Service node follows WiFi AP after roaming (anchor service IP)** — Committed design feature for the final project. After 802.11v transition, the WebSocket stays on the original node via mesh (phone's ARP cache points to old node's MAC), causing a needless trombone (B → mesh → A → ngircd) that wastes air time on every hop. Plan: introduce a globally-shared "anchor MAC" (locally-administered, e.g. `02:4E:57:00:00:01`) bound to a `macvlan` interface on top of `br0` on **every node** (every Pi runs the mesh + AP stack — there is no longer a `gateway` or pure `sound-bridge` mode; sound-bridge is just an additional behavior triggered by an active eth0 link, layered on top of mesh). The mesh service IP `192.168.199.1` answers ARP with the anchor MAC. On `AP-STA-CONNECTED` (hostapd ctrl_interface event), the new node sends a gratuitous ARP so the client's cache updates immediately. ebtables rules: (a) rewrite source MAC to anchor MAC on egress toward the AP-side ports only, (b) drop frames sourced from anchor MAC on `bat0` so two nodes never advertise it on the mesh simultaneously (otherwise batman-adv DAT/BLA flap). DHCP server (`dnsmasq`) is moved from `br0` to `macvlan0` so leases are issued from the anchor IP. No new hardware, no new service. Combined with `nightwatch-roamer` central coordination, this is the main capacity unlock for ≥40 simultaneous users. Depends on the "Auto-detect node role from plugged-in interfaces" item below being landed first (otherwise the legacy `NODE_MODE=sound-bridge` branch would skip the anchor setup).
+- [ ] **Service node follows WiFi AP after roaming (anchor service IP)** — Committed design feature for the final project. After 802.11v transition, the WebSocket stays on the original node via mesh (phone's ARP cache points to old node's MAC), causing a needless trombone (B → mesh → A → ngircd) that wastes air time on every hop. Plan: introduce a globally-shared "anchor MAC" (locally-administered, e.g. `02:4E:57:00:00:01`) bound to a `macvlan` interface on top of `br0` on **every node**. The mesh service IP `192.168.199.1` answers ARP with the anchor MAC. On `AP-STA-CONNECTED` (hostapd ctrl_interface event), the new node sends a gratuitous ARP so the client's cache updates immediately. ebtables rules: (a) rewrite source MAC to anchor MAC on egress toward the AP-side ports only, (b) drop frames sourced from anchor MAC on `bat0` so two nodes never advertise it on the mesh simultaneously (otherwise batman-adv DAT/BLA flap). DHCP server (`dnsmasq`) is moved from `br0` to `macvlan0` so leases are issued from the anchor IP. No new hardware, no new service. Combined with `nightwatch-roamer` central coordination, this is the main capacity unlock for ≥40 simultaneous users.
+
+  **Half-measure currently shipped** (`scripts/nightwatch-arp-refresh.{sh,service}` + ebtables rule in `scripts/mesh-fix.sh`): on every AP-STA-CONNECTED, the node broadcasts a gratuitous ARP for `192.168.199.1` with its own br0 MAC. An ebtables FORWARD rule on bat0 prevents the frame from leaking onto the mesh. This restores **post-roaming session continuity** (no 1–2 min black hole when a node goes offline and the phone re-associates) but does **not** eliminate trombones — packets from a roamed phone still cross the mesh until the phone receives the gratuitous ARP. The capacity unlock for 40+ users still requires the full anchor MAC implementation above.
 
 - [ ] **Reach the Capacity Specifications target (≥50 users on AR9271)** — Tracking parent for the spec table in the README. Subtasks listed below as separate items.
 
@@ -498,7 +499,7 @@ Each node uses its own BSSID (unique MAC) but the same SSID "Nightwatch." When n
 
 - [ ] **Cap `max_num_sta` in hostapd** — No explicit limit today; default lets AR9271 firmware crash at 13–15 clients. Add `max_num_sta=8` to `generate_hostapd_conf` in `scripts/common.sh` so excess clients are refused cleanly with `802.11 reason 17` (too many STA) instead of crashing the dongle and triggering a watchdog USB reset that takes the AP offline for ~30 s.
 
-- [ ] **Drop `NODE_MODE` — uniform node role with auto-detected sound-bridge** — Final-project commitment: every Pi runs the same stack (mesh + AP), and the sound-bridge subnet (`10.0.0.0/24` on eth0) activates automatically whenever an eth0 link is detected. No more `mesh | gateway | sound-bridge` switch, no more dedicated gateway role. Touches `scripts/common.sh:287` (`resolve_node_mode`), `scripts/nodeconfig.sh:303-407` (mode detection + hostname suffixes `-gw-` / `-sb-`), `scripts/mesh-fix.sh` (mode-conditional branches in `start_dnsmasq` / `start_hostapd`), `scripts/nightwatch-debug.sh:61`, `scripts/nightwatch-info.sh:148`, `.env.example`. Hostnames become uniform `nightwatch-N` (no `-gw-` / `-sb-` suffix). `IS_GATEWAY` and `MESH_GATEWAY` references removed. **Must land before the anchor service IP work** — otherwise the sound-bridge code path skips bridge/AP setup and the anchor would be missing on those nodes.
+- [ ] **Pre-bake apt packages into the SD image** — `scripts/firstboot.sh:268-302` does `apt-get update` + install of 17 packages (ngircd, nginx, hostapd, dnsmasq, batctl, …) on first boot. This is what stretches firstboot to 6–12 min (15 min worst case, see global timeout at `firstboot.sh:97`) and forces the operator to provide internet at the first deployment site. Plan: bundle the package install into `scripts/build-image.sh` so the SD ships ready-to-run; firstboot would then only generate configs, install systemd units, and reboot — bringing total time-to-mesh to ~3–5 min and dropping the internet-at-firstboot requirement entirely. Cahier des charges §3.3 #5 currently allows up to 15 min specifically because of this; tightening it to 5 min depends on this task landing.
 
 ### Medium Priority
 
@@ -508,7 +509,6 @@ Each node uses its own BSSID (unique MAC) but the same SSID "Nightwatch." When n
 - [ ] **Harden `nodeconfig.sh` against mid-operation renumbering** — The non-FIXED conflict check runs only when `bat0` is up, which is usually false at boot (nodeconfig runs `Before=nightwatch-mesh.service`), so the saved number survives. But if `nodeconfig.sh` is ever re-run while the mesh is up (manual invocation, maintenance scripts, service-ordering changes), it silently reassigns based on current MAC sort position. When the new number collides with a peer, avahi kicks into auto-rename and peers cascade through `nightwatch-N-2`, `-3`, … up to triple-digit suffixes across the mesh. Fix: gate the conflict check behind an explicit flag (first boot only), persist the FIXED marker by default after a successful first assignment, or add a stabilization window that rejects renumbering within N seconds of a peer's claim.
 - [ ] **Add an `_nightwatch._tcp` avahi service with stable instance names** — Hostname-based discovery (`nightwatch-N.local`) relies on node numbers being globally unique. A custom mDNS service with MAC-suffixed instance names (e.g. `Nightwatch Node 2 [2ccf67b41b79]`) would be collision-proof by construction and carry TXT records (node num, mode, bridge port, MAC) for richer client discovery. Complements the avahi interface-scoping already in place.
 - [ ] **Split repo into `chat/` and `network/` domains** — Refactor so chat services (`ngircd`, `irc-bridge-go`, `html`, nginx chat proxy) and network services (mesh, hostapd, dnsmasq, batman-adv) are independently buildable and deployable. Each domain gets its own Makefile target, systemd unit group, and install path. Goal: run chat on separate hardware (or skip it entirely) without flashing a full mesh node
-- [ ] *(Promoted to High Priority above as "Drop `NODE_MODE` — uniform node role with auto-detected sound-bridge")*
 
 ### Low Priority
 
