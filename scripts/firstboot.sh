@@ -191,7 +191,9 @@ fi
 # ---- Step 1: Wait for network ----
 
 echo "[1/12] Waiting for network..."
-# Check if key packages are already installed — if so, internet is optional
+# Check if key packages are already installed — if so, internet is optional.
+# Pre-baked golden images (build-image.sh) ship with everything; this path
+# can finish firstboot offline.
 PKGS_INSTALLED=true
 for pkg in ngircd nginx batctl dnsmasq socat; do
     if ! command -v "$pkg" >/dev/null 2>&1 && ! dpkg -s "$pkg" >/dev/null 2>&1; then
@@ -200,16 +202,25 @@ for pkg in ngircd nginx batctl dnsmasq socat; do
     fi
 done
 
+# When packages are pre-installed, internet is only useful for Tailscale auth
+# and HTTP clock sync — both quickly skippable. Cut the wait so cloned images
+# don't burn 2 min waiting for a network they don't need.
+if $PKGS_INSTALLED; then
+    MAX_TRIES=6   # 6 × 5s = 30s
+    echo "[+] Packages pre-baked — short network probe (30s) before going offline-friendly"
+else
+    MAX_TRIES=30  # 30 × 5s = 150s, the slow path
+fi
+
 TRIES=0
-MAX_TRIES=30
 while ! ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; do
     TRIES=$((TRIES + 1))
     if [ "$TRIES" -ge "$MAX_TRIES" ]; then
         if $PKGS_INSTALLED; then
-            echo "[!] No internet after ${MAX_TRIES} attempts — but packages already installed, continuing"
+            echo "[!] No internet after ${MAX_TRIES} attempts — packages pre-baked, continuing offline"
             break
         else
-            firstboot_fail "No internet after ${MAX_TRIES} attempts (150s). Connect Ethernet or fix WiFi, then: sudo systemctl start nightwatch-firstboot"
+            firstboot_fail "No internet after ${MAX_TRIES} attempts ($((MAX_TRIES * 5))s). Connect Ethernet or fix WiFi, then: sudo systemctl start nightwatch-firstboot"
         fi
     fi
     echo "  Waiting... ($TRIES/$MAX_TRIES)"
@@ -267,41 +278,45 @@ fi
 
 echo ""
 echo "[2/12] Installing system packages..."
-APT_DELAY=5
-for attempt in 1 2 3; do
-    if apt-get update -qq; then
-        break
+
+# Pre-baked golden images (built via scripts/build-image.sh) already have
+# every package installed; in that case skip the entire apt cycle. This
+# drops cold-boot time-to-mesh from 6-12 min to ~3 min and removes the
+# internet-at-firstboot requirement entirely on the cloned-image path
+# (CdC §3.4 #5: ≤ 15 min budget — we keep the headroom for the
+# prepare-sdcard.sh path that ships a vanilla Pi OS).
+REQUIRED_PKGS=(
+    ngircd nginx batctl bridge-utils dnsmasq iproute2 iw wireless-tools
+    net-tools wpasupplicant iptables ebtables iputils-arping curl git
+    fping netcat-openbsd socat sshpass usbutils firmware-atheros hostapd
+)
+
+MISSING_PKGS=()
+for pkg in "${REQUIRED_PKGS[@]}"; do
+    if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+        MISSING_PKGS+=("$pkg")
     fi
-    echo "[!] apt-get update failed (attempt $attempt/3), retrying in ${APT_DELAY}s..."
-    sleep "$APT_DELAY"
-    APT_DELAY=$((APT_DELAY * 2))
 done
-if ! DEBIAN_FRONTEND=noninteractive timeout 600 apt-get install -y -qq \
-    ngircd \
-    nginx \
-    batctl \
-    bridge-utils \
-    dnsmasq \
-    iproute2 \
-    iw \
-    wireless-tools \
-    net-tools \
-    wpasupplicant \
-    iptables \
-    ebtables \
-    iputils-arping \
-    curl \
-    git \
-    fping \
-    netcat-openbsd \
-    socat \
-    sshpass \
-    usbutils \
-    firmware-atheros \
-    hostapd; then
-    firstboot_fail "apt-get install failed or timed out (10 min limit)"
+
+if [ ${#MISSING_PKGS[@]} -eq 0 ]; then
+    echo "[+] All packages already present (pre-baked image) — skipping apt"
+else
+    echo "[+] Installing ${#MISSING_PKGS[@]} missing package(s): ${MISSING_PKGS[*]}"
+    APT_DELAY=5
+    for attempt in 1 2 3; do
+        if apt-get update -qq; then
+            break
+        fi
+        echo "[!] apt-get update failed (attempt $attempt/3), retrying in ${APT_DELAY}s..."
+        sleep "$APT_DELAY"
+        APT_DELAY=$((APT_DELAY * 2))
+    done
+    if ! DEBIAN_FRONTEND=noninteractive timeout 600 apt-get install -y -qq \
+        "${MISSING_PKGS[@]}"; then
+        firstboot_fail "apt-get install failed or timed out (10 min limit)"
+    fi
+    echo "[+] System packages installed"
 fi
-echo "[+] System packages installed"
 
 # Disable system dnsmasq — we start our own instance on br0 via mesh-fix.sh
 systemctl disable dnsmasq 2>/dev/null || true

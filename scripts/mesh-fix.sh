@@ -78,6 +78,35 @@ apply_regulatory_domain() {
     fi
 }
 
+# CdC §3.3 — APs use hostapd ACS on chanlist {1, 6}. When several Pis boot
+# simultaneously (fleet cold start), each one's ACS scan finishes within
+# ~1 s and sees no peer APs yet — they all pick the lowest-noise channel
+# (typically 1) and end up co-channel with each other. Stagger hostapd
+# start by 0–15 s based on the AP dongle MAC so later nodes' ACS sees
+# earlier ones and picks the alternate channel. Hashing on MAC keeps it
+# physical-layout-agnostic (PI_NUMBER doesn't reflect placement).
+acs_race_stagger() {
+    local AP_IF="$1"
+    # Skip if operator pinned an explicit channel (no ACS scan to race).
+    if [ "${AP_CHANNEL:-0}" != "0" ]; then
+        return
+    fi
+    if [ ! -d "/sys/class/net/$AP_IF" ]; then
+        return
+    fi
+    local mac
+    mac=$(cat "/sys/class/net/$AP_IF/address" 2>/dev/null | tr -d ':' | tr 'a-z' 'A-Z')
+    if [ -z "$mac" ] || [ ${#mac} -lt 2 ]; then
+        return
+    fi
+    local last_byte="${mac: -2}"
+    local delay=$(( 0x$last_byte % 16 ))
+    if [ "$delay" -gt 0 ]; then
+        echo "[+] ACS race stagger: ${delay}s (AP MAC ${mac: -8}) before hostapd"
+        sleep "$delay"
+    fi
+}
+
 # wait_for_ap_interface <iface>
 # Waits for the AP WiFi dongle (wlan2) to appear, with USB reset recovery.
 # IMPORTANT: Does NOT use modprobe -r ath9k_htc (would kill wlan1's mesh too).
@@ -674,6 +703,7 @@ case "$1" in
         done
 
         if [ "$AP_AVAILABLE" = true ]; then
+            acs_race_stagger "$AP_IFACE"
             start_hostapd
         fi
 
