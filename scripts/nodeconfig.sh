@@ -299,32 +299,11 @@ teardown_mesh() {
 CURRENT_HOSTNAME=$(hostname)
 log "Hostname: $CURRENT_HOSTNAME"
 
-IS_GATEWAY=false
-NODE_MODE="mesh"
-
-# Detect mode from hostname
-if [[ "$CURRENT_HOSTNAME" =~ -gw(-|$) ]] || [[ "$CURRENT_HOSTNAME" =~ -gateway(-|$) ]]; then
-    NODE_MODE="gateway"
-    IS_GATEWAY=true
-    log "Gateway mode detected from hostname"
-elif [[ "$CURRENT_HOSTNAME" =~ -sb(-|$) ]] || [[ "$CURRENT_HOSTNAME" =~ -sound(-|$) ]]; then
-    NODE_MODE="sound-bridge"
-    log "Sound-bridge mode detected from hostname"
-fi
-
-# Check mode/gateway flag in .secrets
+# CdC §3.4 #10 — uniform node role. NODE_MODE was dropped; every node
+# runs mesh + AP + eth0 sound-bridge subnet. The .secrets file may
+# carry legacy NODE_MODE/MESH_GATEWAY entries from older SD prep
+# runs — they are now ignored.
 SECRETS_FILE="$NIGHTWATCH_DIR/.secrets"
-if [ -f "$SECRETS_FILE" ]; then
-    SECRETS_MODE=$(grep '^NODE_MODE=' "$SECRETS_FILE" 2>/dev/null | cut -d= -f2 || true)
-    if [ -n "$SECRETS_MODE" ]; then
-        NODE_MODE="$SECRETS_MODE"
-        log "Node mode from .secrets: $NODE_MODE"
-    elif grep -q '^MESH_GATEWAY=true' "$SECRETS_FILE" 2>/dev/null; then
-        NODE_MODE="gateway"
-        log "Gateway mode from .secrets (legacy MESH_GATEWAY)"
-    fi
-fi
-IS_GATEWAY=$( [ "$NODE_MODE" = "gateway" ] && echo true || echo false )
 
 # Ensure temporary mesh is torn down on exit (e.g., if script crashes mid-scan)
 trap 'teardown_mesh' EXIT
@@ -401,17 +380,8 @@ echo "$NODE_NUM" > "$NODE_NUM_FILE"
 sync
 log "Node number: $NODE_NUM (saved to $NODE_NUM_FILE)"
 
-# Set hostname to match the assigned number and mode
-case "$NODE_MODE" in
-    gateway)      NEW_HOSTNAME="nightwatch-gw-${NODE_NUM}" ;;
-    sound-bridge) NEW_HOSTNAME="nightwatch-sb-${NODE_NUM}" ;;
-    *)            NEW_HOSTNAME="nightwatch-${NODE_NUM}" ;;
-esac
-# Validate hostname (only alphanumeric and hyphens allowed)
-if ! [[ "$NEW_HOSTNAME" =~ ^[a-zA-Z0-9-]+$ ]]; then
-    log "Warning: invalid hostname chars in '$NEW_HOSTNAME', falling back to nightwatch-${NODE_NUM}"
-    NEW_HOSTNAME="nightwatch-${NODE_NUM}"
-fi
+# Uniform hostname (CdC §3.4 #10) — no -gw-/-sb- suffix.
+NEW_HOSTNAME="nightwatch-${NODE_NUM}"
 
 if [ "$CURRENT_HOSTNAME" != "$NEW_HOSTNAME" ]; then
     hostnamectl set-hostname "$NEW_HOSTNAME" 2>/dev/null || echo "$NEW_HOSTNAME" > /etc/hostname
@@ -541,13 +511,6 @@ fi
 set_env_value "$ENV_FILE" "PI_NUMBER" "$NODE_NUM"
 set_env_value "$ENV_FILE" "MESH_IP" "$MESH_IP"
 
-# Node mode
-set_env_value "$ENV_FILE" "NODE_MODE" "$NODE_MODE"
-if [ "$NODE_MODE" = "gateway" ]; then
-    set_env_value "$ENV_FILE" "INET_IFACE" "wlan0"
-fi
-log "Node mode: $NODE_MODE"
-
 # Inject secrets from .secrets file (preserved by build-image.sh)
 if [ -f "$SECRETS_FILE" ]; then
     log "Injecting secrets from .secrets..."
@@ -580,7 +543,7 @@ if [ -f "$SECRETS_FILE" ]; then
     log "Secrets injected"
 fi
 
-log "Config: PI_NUMBER=$NODE_NUM MESH_IP=$MESH_IP MODE=$NODE_MODE"
+log "Config: PI_NUMBER=$NODE_NUM MESH_IP=$MESH_IP"
 
 # ---- Tailscale setup (if auth key present and not yet connected) ----
 

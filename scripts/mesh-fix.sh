@@ -21,7 +21,6 @@ ENV_FILE="$PROJECT_DIR/.env"
 source "$SCRIPT_DIR/common.sh"
 
 load_env "$ENV_FILE"
-resolve_node_mode
 
 # Defaults
 MESH_IFACE="${MESH_IFACE:-wlan1}"
@@ -379,32 +378,29 @@ setup_client_bridge() {
     echo "[+] Ports: $BAT_IFACE (mesh) — $AP_IFACE will be added by hostapd"
 }
 
-setup_sound_bridge() {
-    # Sound-bridge mode: eth0 connects to a Mac Mini running nightwatch-sound.
-    # eth0 is NOT added to the br0 bridge. Instead it gets its own subnet
-    # (10.0.0.1/24) so the Pi can route traffic between mesh and Mac Mini.
-    # Note: uses eth0 explicitly (not $AP_IFACE) since AP_IFACE is wlan2 in
-    # the hostapd-based architecture, and the Mac Mini is always on ethernet.
+setup_eth_subnet() {
+    # CdC §3.4 #4 + §3.4 #10 — every node serves the sound-bridge subnet
+    # on eth0 so a Mac running nightwatch-sound can be plugged into ANY
+    # Pi. eth0 is NOT in br0; it gets its own 10.0.0.1/24 + DHCP via
+    # dnsmasq. IP forwarding lets the Mac (10.0.0.x) reach the mesh
+    # (192.168.199.x). Idempotent: existing state is flushed first.
     local SOUND_IFACE="eth0"
-    echo "[+] Sound-bridge mode: configuring $SOUND_IFACE for Mac Mini (10.0.0.0/24)..."
 
-    # Create br0 with ONLY bat0 (no eth0, no wlan2)
-    ip link set "$BR_IFACE" down 2>/dev/null || true
-    ip link del "$BR_IFACE" 2>/dev/null || true
+    if [ ! -d "/sys/class/net/$SOUND_IFACE" ]; then
+        echo "[!] $SOUND_IFACE not present — skipping sound-bridge subnet"
+        return 0
+    fi
 
-    ip addr flush dev "$BAT_IFACE" 2>/dev/null || true
-    ip addr flush dev "$SOUND_IFACE" 2>/dev/null || true
+    echo "[+] Configuring $SOUND_IFACE sound-bridge subnet (10.0.0.0/24)..."
 
-    # Release any DHCP lease on eth0
+    # Release any DHCP lease left from firstboot (when eth0 was the
+    # internet uplink); we now own the subnet.
     if command -v dhcpcd >/dev/null 2>&1; then
         dhcpcd --release "$SOUND_IFACE" 2>/dev/null || true
     fi
-
-    # Remove eth0's default route (no internet on this link)
     ip route del default dev "$SOUND_IFACE" 2>/dev/null || true
-
-    # Tell NetworkManager to stop managing eth0
     if command -v nmcli >/dev/null 2>&1; then
+        local ETH_CON
         ETH_CON=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep "$SOUND_IFACE" | head -1 | cut -d: -f1 || true)
         if [ -n "$ETH_CON" ]; then
             nmcli con down "$ETH_CON" 2>/dev/null || true
@@ -412,30 +408,13 @@ setup_sound_bridge() {
         nmcli dev set "$SOUND_IFACE" managed no 2>/dev/null || true
     fi
 
-    # Bridge: only bat0 (mesh traffic), no eth0
-    ip link add name "$BR_IFACE" type bridge
-    ip link set "$BAT_IFACE" master "$BR_IFACE"
-
-    # Pin br0's MAC to bat0's so it stays unique across nodes
-    BRIDGE_MAC=$(cat /sys/class/net/"$BAT_IFACE"/address 2>/dev/null)
-    if [ -n "$BRIDGE_MAC" ]; then
-        ip link set "$BR_IFACE" address "$BRIDGE_MAC"
-    fi
-
-    ip link set "$BR_IFACE" up
-    ip addr add "$MESH_IP" dev "$BR_IFACE"
-
-    echo "[+] Bridge $BR_IFACE up with IP ${MESH_IP%/*} (bat0 only, no eth0)"
-
-    # eth0: static IP on a separate subnet for the Mac Mini
+    ip addr flush dev "$SOUND_IFACE" 2>/dev/null || true
     ip link set "$SOUND_IFACE" up
     ip addr add 10.0.0.1/24 dev "$SOUND_IFACE"
 
-    echo "[+] $SOUND_IFACE configured: 10.0.0.1/24 (Mac Mini subnet)"
-
-    # Enable IP forwarding so Mac Mini (10.0.0.x) can reach the mesh (192.168.199.x)
     sysctl -w net.ipv4.ip_forward=1 > /dev/null
-    echo "[+] IP forwarding enabled (mesh <-> Mac Mini routing)"
+
+    echo "[+] $SOUND_IFACE: 10.0.0.1/24 + IP forwarding (Mac Mini sound-bridge)"
 }
 
 start_dnsmasq() {
@@ -468,16 +447,8 @@ start_dnsmasq() {
     # after changing PI_NUMBER or MESH_IP without manually removing the file.
     local node_num="${PI_NUMBER:-1}"
     local mesh_ip="${MESH_IP%/*}"
-    local sb_flag=0
-    if [ "$NODE_MODE" = "sound-bridge" ]; then
-        sb_flag=1
-    fi
-    generate_dnsmasq_conf "$DNSMASQ_CONF" "$node_num" "$mesh_ip" "$sb_flag"
-    if [ "$sb_flag" = "1" ]; then
-        echo "[+] dnsmasq.conf regenerated for node $node_num (mesh $mesh_ip + eth0 10.0.0.0/24)"
-    else
-        echo "[+] dnsmasq.conf regenerated for node $node_num (mesh IP $mesh_ip)"
-    fi
+    generate_dnsmasq_conf "$DNSMASQ_CONF" "$node_num" "$mesh_ip"
+    echo "[+] dnsmasq.conf regenerated for node $node_num (mesh $mesh_ip + eth0 10.0.0.0/24)"
 
     if [ -f "$DNSMASQ_CONF" ]; then
         echo "[+] Starting dnsmasq (DHCP + captive portal DNS on $BR_IFACE)..."
@@ -590,31 +561,12 @@ start_hostapd() {
     fi
 }
 
-setup_gateway() {
-    if [ "$NODE_MODE" = "gateway" ]; then
-        echo "[+] Configuring this node as a mesh gateway..."
-        batctl meshif "$BAT_IFACE" gw_mode server 2>/dev/null || \
-            batctl gw_mode server 2>/dev/null || true
-
-        # Enable IP forwarding for internet sharing
-        sysctl -w net.ipv4.ip_forward=1 > /dev/null
-
-        # NAT for internet-bound traffic (wlan0 has internet via WiFi client)
-        local INET_IFACE="${INET_IFACE:-wlan0}"
-        # Only add rules if not already present (prevents duplicates on restart)
-        iptables -t nat -C POSTROUTING -o "$INET_IFACE" -j MASQUERADE 2>/dev/null || \
-            iptables -t nat -A POSTROUTING -o "$INET_IFACE" -j MASQUERADE 2>/dev/null || true
-        iptables -C FORWARD -i "$BR_IFACE" -o "$INET_IFACE" -j ACCEPT 2>/dev/null || \
-            iptables -A FORWARD -i "$BR_IFACE" -o "$INET_IFACE" -j ACCEPT 2>/dev/null || true
-        iptables -C FORWARD -i "$INET_IFACE" -o "$BR_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
-            iptables -A FORWARD -i "$INET_IFACE" -o "$BR_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-
-        echo "[+] Gateway mode enabled (NAT via $INET_IFACE)"
-    else
-        batctl meshif "$BAT_IFACE" gw_mode client 2>/dev/null || \
-            batctl gw_mode client 2>/dev/null || true
-        echo "[+] Gateway mode: client (will use mesh gateway if available)"
-    fi
+# Uniform node role (CdC §3.4 #10): no node serves as a NAT gateway —
+# the mesh is intentionally air-gapped from the WAN. Every node runs in
+# batman-adv `gw_mode client` so chat traffic stays radio-local.
+set_batman_client_mode() {
+    batctl meshif "$BAT_IFACE" gw_mode client 2>/dev/null || \
+        batctl gw_mode client 2>/dev/null || true
 }
 
 # ---- Main actions ----
@@ -684,63 +636,49 @@ case "$1" in
         # Clean up WPA config files on unexpected exit (contain SAE password)
         trap 'rm -f /run/nightwatch-mesh-wpa.* 2>/dev/null' EXIT
 
-        echo "[+] Node mode: $NODE_MODE"
+        # CdC §3.4 #10 — uniform node role: every Pi runs mesh + AP + the
+        # eth0 sound-bridge subnet. No NODE_MODE switch.
+        echo "[+] Node role: uniform (mesh + AP + eth0 sound-bridge subnet)"
 
         load_batman_module
         setup_mesh_interface
         setup_batman
 
-        # Wait for AP dongle (wlan2) — skip in sound-bridge mode (no AP needed)
         AP_AVAILABLE=false
-        if [ "$NODE_MODE" != "sound-bridge" ]; then
-            if wait_for_ap_interface "$AP_IFACE"; then
-                AP_AVAILABLE=true
-            fi
+        if wait_for_ap_interface "$AP_IFACE"; then
+            AP_AVAILABLE=true
         fi
 
-        if [ "$NODE_MODE" = "sound-bridge" ]; then
-            # Sound-bridge: eth0 on separate subnet, not bridged
-            setup_sound_bridge
-            # Start hostapd if AP dongle is available (WiFi clients still need AP)
-            if [ "$AP_AVAILABLE" = true ]; then
-                start_hostapd
+        for _attempt in 1 2 3; do
+            if setup_client_bridge; then
+                break
             fi
-            start_dnsmasq
-            # batman-adv gw_mode client (sound-bridge is not a gateway)
-            batctl meshif "$BAT_IFACE" gw_mode client 2>/dev/null || \
-                batctl gw_mode client 2>/dev/null || true
-        else
-            # mesh or gateway: bat0 bridged via br0, hostapd adds AP_IFACE
-            for _attempt in 1 2 3; do
-                if setup_client_bridge; then
-                    break
-                fi
-                if [ "$_attempt" -eq 3 ]; then
-                    echo "[!] Client bridge setup failed after 3 attempts — mesh still operational"
-                    break
-                fi
-                echo "[!] Bridge setup failed (attempt $_attempt/3), retrying in ${_attempt}s..."
-                sleep "$_attempt"
-            done
-            # Start hostapd (adds AP_IFACE to br0 via bridge= directive)
-            if [ "$AP_AVAILABLE" = true ]; then
-                start_hostapd
+            if [ "$_attempt" -eq 3 ]; then
+                echo "[!] Client bridge setup failed after 3 attempts — mesh still operational"
+                break
             fi
-            start_dnsmasq
-            setup_gateway
+            echo "[!] Bridge setup failed (attempt $_attempt/3), retrying in ${_attempt}s..."
+            sleep "$_attempt"
+        done
+
+        if [ "$AP_AVAILABLE" = true ]; then
+            start_hostapd
         fi
+
+        # eth0 sound-bridge subnet always on top of the bridge (CdC §3.4 #4).
+        setup_eth_subnet
+
+        start_dnsmasq
+
+        set_batman_client_mode
 
         echo ""
         echo "====================================="
         echo "  Mesh network is UP"
-        echo "  Mode:    $NODE_MODE"
+        echo "  Role:    uniform (mesh + AP + eth0 sound-bridge)"
         echo "  Mesh IP: ${MESH_IP%/*} (on $BR_IFACE)"
-        if [ "$NODE_MODE" = "sound-bridge" ]; then
-        echo "  Bridge:  $BAT_IFACE → $BR_IFACE (no eth0)"
-        echo "  eth0:    10.0.0.1/24 (Mac Mini)"
-        else
         echo "  Bridge:  $BAT_IFACE + $AP_IFACE → $BR_IFACE (hostapd)"
-        fi
+        echo "  eth0:    10.0.0.1/24 (sound-bridge subnet)"
         if [ "$AP_AVAILABLE" = true ]; then
         echo "  WiFi AP: $WIFI_SSID (BSSID $AP_BSSID, ch $AP_CHANNEL)"
         else
@@ -816,11 +754,13 @@ case "$1" in
         # Clean up legacy HTTP redirect rule if present from older versions
         iptables -t nat -D PREROUTING -i "$BR_IFACE" -p tcp --dport 80 ! -d "$LOCAL_IP" -j DNAT --to-destination "$LOCAL_IP":80 2>/dev/null || true
 
-        # Remove only the Nightwatch MASQUERADE rule (preserve Tailscale NAT)
-        INET_IFACE="${INET_IFACE:-wlan0}"
-        iptables -t nat -D POSTROUTING -o "$INET_IFACE" -j MASQUERADE 2>/dev/null || true
-        iptables -D FORWARD -i "$BR_IFACE" -o "$INET_IFACE" -j ACCEPT 2>/dev/null || true
-        iptables -D FORWARD -i "$INET_IFACE" -o "$BR_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+        # Clean up legacy gateway-mode NAT/forward rules (kept for upgrades
+        # from pre-uniform-role nodes). Defaults match the old INET_IFACE
+        # convention; the rules are no-ops on fresh installs.
+        local LEGACY_INET="wlan0"
+        iptables -t nat -D POSTROUTING -o "$LEGACY_INET" -j MASQUERADE 2>/dev/null || true
+        iptables -D FORWARD -i "$BR_IFACE" -o "$LEGACY_INET" -j ACCEPT 2>/dev/null || true
+        iptables -D FORWARD -i "$LEGACY_INET" -o "$BR_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 
         echo "[+] Mesh network stopped"
         ;;
@@ -830,7 +770,7 @@ case "$1" in
         echo "  Nightwatch Mesh Status"
         echo "==============================="
         echo ""
-        echo "  Node mode: $NODE_MODE"
+        echo "  Node role: uniform (mesh + AP + eth0 sound-bridge)"
         echo ""
 
         echo "== batman-adv =="

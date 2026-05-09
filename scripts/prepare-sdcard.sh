@@ -18,13 +18,17 @@
 #
 # Examples (Linux):
 #   ./scripts/prepare-sdcard.sh /dev/sdf
-#   ./scripts/prepare-sdcard.sh /dev/sdf --gateway
+#   ./scripts/prepare-sdcard.sh /dev/sdf --node 3
 #   ./scripts/prepare-sdcard.sh /run/media/$USER/rootfs
 #
 # Examples (macOS):
 #   ./scripts/prepare-sdcard.sh /dev/disk4
-#   ./scripts/prepare-sdcard.sh /dev/disk4 --gateway
+#   ./scripts/prepare-sdcard.sh /dev/disk4 --node 3
 #   ./scripts/prepare-sdcard.sh /Volumes/rootfs
+#
+# CdC §3.4 #10 — uniform node role: every SD prepares the same stack
+# (mesh + AP + eth0 sound-bridge). The legacy --gateway / --mode flags
+# are accepted but ignored, with a deprecation warning.
 #
 # What it does:
 #   1. Copies the entire project to /opt/nightwatch/ on the SD card
@@ -51,7 +55,7 @@ REGISTRY_FILE="$PROJECT_DIR/.node-registry"
 
 registry_init() {
     if [ ! -f "$REGISTRY_FILE" ]; then
-        printf '# Nightwatch Node Registry — tracks assigned node numbers\n# NODE  DATE        MODE        NOTES\n' > "$REGISTRY_FILE"
+        printf '# Nightwatch Node Registry — tracks assigned node numbers\n# NODE  DATE        NOTES\n' > "$REGISTRY_FILE"
     fi
 }
 
@@ -78,12 +82,12 @@ registry_next_free() {
 }
 
 registry_add() {
-    local num="$1" mode="$2" notes="${3:-}"
+    local num="$1" notes="${2:-}"
     registry_init
     if registry_has "$num"; then
         return 1
     fi
-    printf '%-6s  %s  %-12s  %s\n' "$num" "$(date +%Y-%m-%d)" "$mode" "$notes" >> "$REGISTRY_FILE"
+    printf '%-6s  %s  %s\n' "$num" "$(date +%Y-%m-%d)" "$notes" >> "$REGISTRY_FILE"
 }
 
 # Colors
@@ -103,18 +107,20 @@ usage() {
     echo ""
     echo "Options:"
     echo "  --node N      Assign node number N (1-$MAX_NODES). Auto-picks if omitted."
-    echo "  --mode MODE   Set node mode: mesh (default), gateway, sound-bridge"
-    echo "  --gateway     Shorthand for --mode gateway"
     echo "  --yes         Skip confirmation prompts"
     echo ""
     echo "Examples (Linux):"
     echo "  $0 /dev/sdf"
-    echo "  $0 /dev/sdf --gateway"
+    echo "  $0 /dev/sdf --node 3"
     echo ""
     echo "Examples (macOS):"
     echo "  $0 /dev/disk4"
-    echo "  $0 /dev/disk4 --gateway"
+    echo "  $0 /dev/disk4 --node 3"
     echo "  $0 /Volumes/rootfs"
+    echo ""
+    echo "CdC §3.4 #10 — every node runs the same stack (mesh + AP + eth0"
+    echo "sound-bridge). Legacy --mode and --gateway flags are accepted but"
+    echo "ignored with a deprecation warning."
     echo ""
     echo "Node number is assigned at SD card prep time (tracked in .node-registry)."
     echo "Set NODE=N or --node N, or let the script auto-pick the next free number."
@@ -122,12 +128,10 @@ usage() {
     echo "Environment variables (optional — skips password prompts):"
     echo "  IRC_LINK_PASSWORD   IRC federation password (same on all nodes)"
     echo "  TAILSCALE_AUTH_KEY  Tailscale pre-auth key (from admin console)"
-    echo "  HF_TOKEN            Hugging Face API token"
+    echo "  HF_TOKEN            Hugging Face API token (reserved for future use, currently unused)"
     exit 1
 }
 
-GATEWAY_MODE=false
-NODE_MODE="mesh"
 SD_ROOT=""
 AUTO_YES=false
 NODE_NUM="${NODE:-}"
@@ -136,21 +140,16 @@ NODE_NUM="${NODE:-}"
 while [ $# -gt 0 ]; do
     case "$1" in
         --node)       shift; NODE_NUM="${1:-}" ;;
-        --gateway)    NODE_MODE="gateway"; GATEWAY_MODE=true ;;
-        --mode)       shift; NODE_MODE="${1:-mesh}" ;;
+        --gateway|--mode)
+            echo -e "${YELLOW}Note: '$1' is no longer accepted (uniform node role per CdC §3.4 #10)${NC}" >&2
+            if [ "$1" = "--mode" ]; then shift; fi
+            ;;
         --yes|-y)     AUTO_YES=true ;;
         --help|-h)    usage ;;
         *)            SD_ROOT="$1" ;;
     esac
     shift
 done
-
-# Validate mode
-case "$NODE_MODE" in
-    mesh|gateway|sound-bridge) ;;
-    *) echo -e "${RED}Error: invalid mode '$NODE_MODE' (valid: mesh, gateway, sound-bridge)${NC}"; exit 1 ;;
-esac
-GATEWAY_MODE=$( [ "$NODE_MODE" = "gateway" ] && echo true || echo false )
 
 # ---- Validate SD card path ----
 
@@ -228,7 +227,6 @@ prepare_via_boot_partition() {
     echo ""
     echo "  Mode:       macOS → boot partition staging"
     echo "  Node:       $NODE_NUM (IP: $MESH_IP)"
-    echo "  Gateway:    $GATEWAY_MODE"
     echo "  Tailscale:  $([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo 'yes (auth key set)' || echo 'no')"
     echo "  Boot part:  $boot_mount"
     echo ""
@@ -277,7 +275,6 @@ prepare_via_boot_partition() {
     printf 'IRC_LINK_PASSWORD=%s\n' "$IRC_LINK_PASSWORD" >> "$secrets_file"
     printf 'TAILSCALE_AUTH_KEY=%s\n' "${TAILSCALE_AUTH_KEY:-}" >> "$secrets_file"
     printf 'HF_TOKEN=%s\n' "${HF_TOKEN:-}" >> "$secrets_file"
-    printf 'NODE_MODE=%s\n' "$NODE_MODE" >> "$secrets_file"
     echo "[+] Secrets staged"
     echo "    IRC_LINK_PASSWORD=***"
     echo "    TAILSCALE_AUTH_KEY=$([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo '***' || echo '(empty)')"
@@ -567,7 +564,6 @@ FIRSTEOF
     echo "======================================${NC}"
     echo ""
     echo "  Node:       $NODE_NUM (IP: $MESH_IP)"
-    echo "  Gateway:    $GATEWAY_MODE"
     echo "  Tailscale:  $([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo 'yes' || echo 'no')"
     echo ""
     echo -e "  ${BOLD}How it works on macOS:${NC}"
@@ -595,7 +591,7 @@ FIRSTEOF
     echo ""
 
     # Register this node
-    registry_add "$NODE_NUM" "$NODE_MODE" || true
+    registry_add "$NODE_NUM" "" || true
     echo -e "  ${GREEN}Node $NODE_NUM registered in .node-registry${NC}"
     echo ""
 }
@@ -761,7 +757,6 @@ echo "  Nightwatch SD Card Preparation"
 echo -e "======================================${NC}"
 echo ""
 echo "  Node:       $NODE_NUM (IP: $MESH_IP)"
-echo "  Gateway:    $GATEWAY_MODE"
 echo "  Tailscale:  $([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo 'yes (auth key set)' || echo 'no')"
 echo "  SD card:    $SD_ROOT"
 echo ""
@@ -801,8 +796,6 @@ printf 'IRC_LINK_PASSWORD=%s\n' "$IRC_LINK_PASSWORD" | sudo tee -a "$SECRETS_DES
 printf 'TAILSCALE_AUTH_KEY=%s\n' "${TAILSCALE_AUTH_KEY:-}" | sudo tee -a "$SECRETS_DEST" > /dev/null
 printf 'HF_TOKEN=%s\n' "${HF_TOKEN:-}" | sudo tee -a "$SECRETS_DEST" > /dev/null
 sudo chmod 600 "$SECRETS_DEST"
-
-printf 'NODE_MODE=%s\n' "$NODE_MODE" | sudo tee -a "$SECRETS_DEST" > /dev/null
 
 # Remove any .env so nodeconfig generates a fresh one
 sudo rm -f "$DEST/.env"
@@ -882,7 +875,6 @@ echo "  SD Card Ready!"
 echo "======================================${NC}"
 echo ""
 echo "  Node:       $NODE_NUM (IP: $MESH_IP)"
-echo "  Gateway:    $GATEWAY_MODE"
 echo "  Tailscale:  $([ -n "${TAILSCALE_AUTH_KEY:-}" ] && echo 'yes' || echo 'no')"
 echo ""
 echo -e "  ${BOLD}Next steps:${NC}"
@@ -906,6 +898,6 @@ fi
 echo ""
 
 # Register this node
-registry_add "$NODE_NUM" "$NODE_MODE" || true
+registry_add "$NODE_NUM" "" || true
 echo -e "  ${GREEN}Node $NODE_NUM registered in .node-registry${NC}"
 echo ""

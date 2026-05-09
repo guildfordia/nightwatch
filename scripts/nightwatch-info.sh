@@ -29,7 +29,7 @@ echo "  Hostname:    $(hostname 2>/dev/null || echo unknown)"
 echo "  Pi model:    $(cat /proc/device-tree/model 2>/dev/null | tr -d '\0' || echo unknown)"
 echo "  Node number: ${PI_NUMBER:-unknown}"
 echo "  Mesh IP:     ${MESH_IP:-unknown}"
-echo "  Gateway:     ${MESH_GATEWAY:-false}"
+echo "  Role:        uniform (mesh + AP + eth0 sound-bridge)"
 
 # ---- System ----
 section "System"
@@ -145,7 +145,7 @@ echo ""
 if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
     echo -e "  Internet:   ${GREEN}reachable${NC}"
 else
-    echo -e "  Internet:   ${YELLOW}not reachable${NC} (expected unless gateway)"
+    echo -e "  Internet:   ${YELLOW}not reachable${NC} (expected — mesh is air-gapped, use wlan0 for updates)"
 fi
 
 # ---- Tailscale ----

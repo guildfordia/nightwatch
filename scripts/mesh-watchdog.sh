@@ -29,15 +29,12 @@ NIGHTWATCH_DIR="${NIGHTWATCH_DIR:-/opt/nightwatch}"
 
 MESH_IFACE="wlan1"
 AP_IFACE="wlan2"
-NODE_MODE="mesh"
 if [ -f "$NIGHTWATCH_DIR/.env" ]; then
     MESH_IFACE=$(grep '^MESH_IFACE=' "$NIGHTWATCH_DIR/.env" | cut -d= -f2 || echo "wlan1")
     AP_IFACE=$(grep '^AP_IFACE=' "$NIGHTWATCH_DIR/.env" | cut -d= -f2 || echo "wlan2")
-    NODE_MODE=$(grep '^NODE_MODE=' "$NIGHTWATCH_DIR/.env" | cut -d= -f2 || echo "mesh")
 elif [ -f "$NIGHTWATCH_DIR/.env.example" ]; then
     MESH_IFACE=$(grep '^MESH_IFACE=' "$NIGHTWATCH_DIR/.env.example" | cut -d= -f2 || echo "wlan1")
     AP_IFACE=$(grep '^AP_IFACE=' "$NIGHTWATCH_DIR/.env.example" | cut -d= -f2 || echo "wlan2")
-    NODE_MODE=$(grep '^NODE_MODE=' "$NIGHTWATCH_DIR/.env.example" | cut -d= -f2 || echo "mesh")
 fi
 
 # Only run if mesh service is enabled (not disabled by operator)
@@ -82,19 +79,19 @@ if [ "$HEALTHY" = true ]; then
     fi
 fi
 
-# ---- Check 3: hostapd is running (skip in sound-bridge mode) ----
+# ---- Check 3: hostapd is running ----
 
 HOSTAPD_PID="/var/run/hostapd-nightwatch.pid"
-if [ "$HEALTHY" = true ] && [ "$NODE_MODE" != "sound-bridge" ]; then
+if [ "$HEALTHY" = true ]; then
     if [ ! -f "$HOSTAPD_PID" ] || ! kill -0 "$(cat "$HOSTAPD_PID" 2>/dev/null)" 2>/dev/null; then
         log "hostapd not running"
         HEALTHY=false
     fi
 fi
 
-# ---- Check 4: AP interface exists (skip in sound-bridge mode) ----
+# ---- Check 4: AP interface exists ----
 
-if [ "$HEALTHY" = true ] && [ "$NODE_MODE" != "sound-bridge" ] && [ ! -d "/sys/class/net/$AP_IFACE" ]; then
+if [ "$HEALTHY" = true ] && [ ! -d "/sys/class/net/$AP_IFACE" ]; then
     log "$AP_IFACE missing"
     HEALTHY=false
 fi
@@ -102,10 +99,9 @@ fi
 # ---- Check 5: dnsmasq is running (CdC §3.4 #3a) ----
 # dnsmasq is launched inline by mesh-fix.sh and has no systemd unit of its
 # own, so without this check a `kill` would leave clients without DHCP/DNS.
-# Skip in sound-bridge mode (no AP, no client DHCP needed).
 
 DNSMASQ_PID="/var/run/dnsmasq-nightwatch.pid"
-if [ "$HEALTHY" = true ] && [ "$NODE_MODE" != "sound-bridge" ]; then
+if [ "$HEALTHY" = true ]; then
     if [ ! -f "$DNSMASQ_PID" ] || ! kill -0 "$(cat "$DNSMASQ_PID" 2>/dev/null)" 2>/dev/null; then
         log "dnsmasq not running — restarting (the rest of the mesh is healthy)"
         "$NIGHTWATCH_DIR/scripts/mesh-fix.sh" restart-dnsmasq 2>&1 | logger -t "$LOG_TAG" || true

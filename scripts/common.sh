@@ -97,15 +97,15 @@ mesh_ip_for_node() {
     echo "192.168.199.$((100 + n))"
 }
 
-# generate_dnsmasq_conf <conf_path> <node_num> <mesh_ip> [sound_bridge]
-# Writes the dnsmasq.conf template for captive portal + DHCP.
-# When sound_bridge=1 a second interface block is appended so a Mac plugged
-# into eth0 receives a DHCP lease on 10.0.0.0/24 (CdC §3.4 #4 plug-and-play).
+# generate_dnsmasq_conf <conf_path> <node_num> <mesh_ip>
+# Writes the dnsmasq.conf template for captive portal + DHCP. Every node
+# also serves a DHCP lease on eth0 (10.0.0.0/24) for the Mac sound-bridge
+# (CdC §3.4 #4 plug-and-play). dnsmasq's bind-interfaces makes the eth0
+# listener inert until eth0 has the 10.0.0.1/24 address mesh-fix.sh sets up.
 generate_dnsmasq_conf() {
     local conf_path="$1"
     local node_num="$2"
     local mesh_ip="${3%/*}"  # strip CIDR suffix if present
-    local sound_bridge="${4:-0}"
 
     # Validate node_num is within range (prevents invalid DHCP ranges)
     if ! [[ "$node_num" =~ ^[0-9]+$ ]] || [ "$node_num" -lt 1 ] || [ "$node_num" -gt "$MAX_NODES" ]; then
@@ -174,13 +174,12 @@ log-dhcp
 pid-file=/var/run/dnsmasq-nightwatch.pid
 DNSEOF
 
-    # CdC §3.4 #4 — when this node hosts the Mac sound-bridge on eth0, hand
-    # the Mac a DHCP lease on 10.0.0.0/24 (the static IP alone isn't enough
-    # for plug-and-play). dnsmasq with bind-interfaces only binds when the
-    # interface has the configured address, so this block is harmless when
-    # eth0 is not configured by mesh-fix.sh in setup_sound_bridge.
-    if [ "$sound_bridge" = "1" ]; then
-        cat >> "$conf_path" << SOUNDEOF
+    # CdC §3.4 #4 — every node serves a DHCP lease on eth0 (10.0.0.0/24)
+    # so a Mac running nightwatch-sound can be plugged into any Pi and
+    # reach 192.168.199.1. dnsmasq's bind-interfaces only binds when eth0
+    # has the configured address (set by mesh-fix.sh), so this block is
+    # inert on nodes that have nothing on eth0.
+    cat >> "$conf_path" << 'SOUNDEOF'
 
 # ── Sound-bridge subnet (eth0, CdC §3.4 #4) ──
 interface=eth0
@@ -191,7 +190,6 @@ dhcp-range=set:eth,10.0.0.10,10.0.0.50,255.255.255.0,1h
 dhcp-option=tag:eth,3,10.0.0.1
 dhcp-option=tag:eth,6,10.0.0.1
 SOUNDEOF
-    fi
 }
 
 # generate_hostapd_conf <conf_path> <ap_iface> <br_iface> <ssid> <password> <channel> <bssid>
@@ -332,33 +330,6 @@ set_env_value() {
 
     # Flush to disk so a power loss doesn't leave a truncated/empty config
     sync 2>/dev/null || true
-}
-
-# resolve_node_mode — sets NODE_MODE from env, with backward compat for MESH_GATEWAY
-# Valid modes: mesh (default), gateway, sound-bridge
-# If NODE_MODE is not set but MESH_GATEWAY=true, maps to gateway mode.
-resolve_node_mode() {
-    local mode="${NODE_MODE:-}"
-
-    # Backward compat: MESH_GATEWAY=true → gateway mode
-    if [ -z "$mode" ] && [ "${MESH_GATEWAY:-false}" = "true" ]; then
-        mode="gateway"
-    fi
-
-    # Default to mesh
-    mode="${mode:-mesh}"
-
-    # Validate
-    case "$mode" in
-        mesh|gateway|sound-bridge) ;;
-        *)
-            echo "resolve_node_mode: unknown mode '$mode' (valid: mesh, gateway, sound-bridge)" >&2
-            mode="mesh"
-            ;;
-    esac
-
-    NODE_MODE="$mode"
-    export NODE_MODE
 }
 
 # check_deps <cmd1> [cmd2] ... — verifies required commands exist, exits with message if missing

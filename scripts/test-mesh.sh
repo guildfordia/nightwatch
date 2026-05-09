@@ -83,9 +83,8 @@ echo "======================================"
 echo "  Nightwatch Mesh Integration Test"
 echo "======================================"
 echo ""
-resolve_node_mode
 echo "  This node:  $LOCAL_IP (node #${PI_NUMBER:-?})"
-echo "  Node mode:  $NODE_MODE"
+echo "  Role:       uniform (CdC §3.4 #10)"
 echo "  Scanning:   192.168.199.101-$((100 + MAX_NODES)) (max $MAX_NODES nodes)"
 echo "  Test mode:  $([ "$QUICK_MODE" = true ] && echo 'quick' || echo 'full')"
 echo ""
@@ -201,20 +200,13 @@ else
     fail "$MESH_IFACE not found in batman-adv interfaces"
 fi
 
-# batman-adv gateway mode
+# batman-adv gateway mode — uniform role expects every node to be a client
+# (CdC §3.4 #10; mesh is air-gapped, no NAT gateway).
 gw_mode=$(batctl meshif "$BAT_IFACE" gw_mode 2>/dev/null || batctl gw_mode 2>/dev/null || echo "unknown")
-if [ "$NODE_MODE" = "gateway" ]; then
-    if echo "$gw_mode" | grep -qi "server"; then
-        pass "Gateway mode: server (as configured)"
-    else
-        fail "Gateway mode should be 'server' but got: $gw_mode"
-    fi
+if echo "$gw_mode" | grep -qi "client\|off"; then
+    pass "batman-adv gw_mode: $gw_mode (uniform — all nodes are clients)"
 else
-    if echo "$gw_mode" | grep -qi "client\|off"; then
-        pass "Gateway mode: client (as configured — mode: $NODE_MODE)"
-    else
-        warn "Gateway mode unexpected: $gw_mode"
-    fi
+    fail "batman-adv gw_mode should be 'client' but got: $gw_mode"
 fi
 
 # ============================================================
@@ -358,11 +350,10 @@ gw_list=$(batctl meshif "$BAT_IFACE" gwl 2>/dev/null || batctl gwl 2>/dev/null |
 gw_count=$(echo "$gw_list" | grep -cE "([0-9a-f]{2}:){5}[0-9a-f]{2}" || true)
 gw_count=$((gw_count + 0))
 if [ "$gw_count" -gt 0 ]; then
-    pass "batman-adv sees $gw_count gateway(s)"
-elif [ "${MESH_GATEWAY:-false}" = "true" ]; then
-    warn "This node is a gateway but no gateways in list (may need time)"
+    # Pre-uniform-refactor nodes may still advertise themselves as gateways.
+    warn "batman-adv sees $gw_count gateway(s) — uniform role expects 0 (mesh is air-gapped)"
 else
-    skip "No gateways in mesh"
+    pass "batman-adv: 0 gateways (uniform role — mesh is air-gapped)"
 fi
 
 # ============================================================
@@ -636,72 +627,43 @@ if [ -d "/sys/class/net/$BR_IFACE" ]; then
         fail "hostapd not running — WiFi AP is unavailable"
     fi
 
-    # Sound-bridge mode: check eth0 has the Mac Mini subnet IP
-    if [ "$NODE_MODE" = "sound-bridge" ]; then
-        eth0_ip=$(ip -4 addr show dev eth0 2>/dev/null | grep -oP 'inet \K[0-9.]+' || echo "")
-        if [ "$eth0_ip" = "10.0.0.1" ]; then
-            pass "eth0 has 10.0.0.1 (Mac Mini subnet)"
-        else
-            fail "eth0 should have 10.0.0.1 but has '$eth0_ip'"
-        fi
+    # Uniform role — eth0 always carries the sound-bridge subnet (CdC §3.4 #4).
+    eth0_ip=$(ip -4 addr show dev eth0 2>/dev/null | grep -oP 'inet \K[0-9.]+' || echo "")
+    if [ "$eth0_ip" = "10.0.0.1" ]; then
+        pass "eth0 has 10.0.0.1 (sound-bridge subnet, CdC §3.4 #4)"
+    elif [ -z "$eth0_ip" ]; then
+        warn "eth0 has no IP — mesh-fix.sh setup_eth_subnet may have failed"
+    else
+        fail "eth0 should have 10.0.0.1 but has '$eth0_ip'"
     fi
 else
     fail "$BR_IFACE bridge not found (eth0 and bat0 are not bridged)"
 fi
 
 # ============================================================
-# 9. Gateway & Internet
+# 9. Sound-bridge subnet (CdC §3.4 #4) + air-gapped check
 # ============================================================
 
-section "9. Gateway & Internet"
+section "9. Sound-bridge & Internet"
 
-if [ "$NODE_MODE" = "gateway" ]; then
-    echo "  This node is configured as gateway"
-
-    fwd=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo "0")
-    if [ "$fwd" = "1" ]; then
-        pass "IP forwarding enabled"
-    else
-        fail "IP forwarding disabled"
-    fi
-
-    if iptables -t nat -L POSTROUTING -n 2>/dev/null | grep -q "MASQUERADE"; then
-        pass "NAT/MASQUERADE rule active"
-    else
-        fail "No MASQUERADE rule (internet sharing broken)"
-    fi
-
-    if ping -c 2 -W 3 8.8.8.8 >/dev/null 2>&1; then
-        pass "Internet reachable (8.8.8.8)"
-    else
-        fail "Internet not reachable from gateway"
-    fi
-elif [ "$NODE_MODE" = "sound-bridge" ]; then
-    echo "  This node is configured as sound-bridge"
-
-    fwd=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo "0")
-    if [ "$fwd" = "1" ]; then
-        pass "IP forwarding enabled (mesh <-> Mac Mini)"
-    else
-        fail "IP forwarding disabled (sound-bridge needs it)"
-    fi
-
-    if ping -c 1 -W 2 10.0.0.2 >/dev/null 2>&1; then
-        pass "Mac Mini reachable at 10.0.0.2"
-    else
-        warn "Mac Mini not reachable at 10.0.0.2 (may not be connected)"
-    fi
+fwd=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo "0")
+if [ "$fwd" = "1" ]; then
+    pass "IP forwarding enabled (mesh ↔ Mac Mini routing)"
 else
-    if [ "$gw_count" -gt 0 ]; then
-        pass "Gateway available in mesh ($gw_count gateway(s))"
-    else
-        skip "No gateway in mesh (nodes use their own uplink)"
-    fi
-    if ping -c 2 -W 5 8.8.8.8 >/dev/null 2>&1; then
-        pass "Internet reachable"
-    else
-        warn "Internet not reachable"
-    fi
+    fail "IP forwarding disabled — Mac on eth0 cannot reach the mesh"
+fi
+
+if ping -c 1 -W 2 10.0.0.2 >/dev/null 2>&1; then
+    pass "Mac Mini reachable at 10.0.0.2 (DHCP first lease)"
+else
+    skip "Mac Mini not present on eth0 — expected when none is plugged in"
+fi
+
+# CdC §3.4 #10 — uniform role expects the mesh to be air-gapped.
+if ping -c 2 -W 3 8.8.8.8 >/dev/null 2>&1; then
+    warn "Internet reachable from $BR_IFACE — mesh is supposed to be air-gapped"
+else
+    pass "Internet not reachable from $BR_IFACE (uniform role: mesh is air-gapped)"
 fi
 
 # ============================================================

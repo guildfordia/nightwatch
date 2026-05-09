@@ -16,8 +16,10 @@
 # Usage:
 #   sudo ./scripts/setup-rpi.sh              # Interactive (asks for node number)
 #   sudo ./scripts/setup-rpi.sh 3            # Node 3
-#   sudo ./scripts/setup-rpi.sh 5 --gateway  # Node 5, gateway mode
-#   sudo ./scripts/setup-rpi.sh 5 --mode sound-bridge  # Node 5, sound-bridge mode
+#
+# CdC §3.4 #10 — uniform node role: every Pi runs mesh + AP + the eth0
+# sound-bridge subnet. There is no NODE_MODE switch; the gateway role is
+# gone (the mesh is intentionally air-gapped).
 #
 # After reboot, the boot sequence is:
 #   nodeconfig → generates .env from hostname
@@ -42,33 +44,21 @@ NC='\033[0m'
 # ---- Parse arguments ----
 
 NODE_NUM=""
-NODE_MODE=""
-IS_GATEWAY=false
 
 ARGS=("$@")
 i=0
 while [ $i -lt ${#ARGS[@]} ]; do
     arg="${ARGS[$i]}"
     case "$arg" in
-        --gateway|-gw) NODE_MODE="gateway"; IS_GATEWAY=true ;;
-        --mode)        i=$((i+1)); NODE_MODE="${ARGS[$i]:-mesh}" ;;
-        [0-9]*)        NODE_NUM="$arg" ;;
+        --gateway|-gw|--mode)
+            echo -e "${YELLOW}Note: '$arg' is no longer accepted (uniform node role per CdC §3.4 #10)${NC}"
+            # --mode takes a value; skip it too
+            if [ "$arg" = "--mode" ]; then i=$((i+1)); fi
+            ;;
+        [0-9]*) NODE_NUM="$arg" ;;
     esac
     i=$((i+1))
 done
-
-# Backward compat: --gateway sets NODE_MODE=gateway
-if [ "$IS_GATEWAY" = true ] && [ -z "$NODE_MODE" ]; then
-    NODE_MODE="gateway"
-fi
-NODE_MODE="${NODE_MODE:-mesh}"
-
-# Validate mode
-case "$NODE_MODE" in
-    mesh|gateway|sound-bridge) ;;
-    *) echo -e "${RED}Error: invalid mode '$NODE_MODE' (valid: mesh, gateway, sound-bridge)${NC}"; exit 1 ;;
-esac
-IS_GATEWAY=$( [ "$NODE_MODE" = "gateway" ] && echo true || echo false )
 
 # ---- Must be root ----
 
@@ -105,33 +95,14 @@ while [ -z "$NODE_NUM" ] || ! [[ "$NODE_NUM" =~ ^[0-9]+$ ]] || [ "$NODE_NUM" -lt
     read -rp "  Enter node number (1-20): " NODE_NUM
 done
 
-# Ask about mode if not specified via flag (only for default mesh mode)
-if [ "$NODE_MODE" = "mesh" ]; then
-    echo ""
-    echo -e "  ${BOLD}Node mode:${NC}"
-    echo "    1) mesh          (default — hostapd AP on wlan2)"
-    echo "    2) gateway       (internet sharing via wlan0)"
-    echo "    3) sound-bridge  (eth0 to Mac Mini for nightwatch-sound)"
-    read -rp "  Choose mode [1]: " mode_choice
-    case "$mode_choice" in
-        2) NODE_MODE="gateway"; IS_GATEWAY=true ;;
-        3) NODE_MODE="sound-bridge" ;;
-        *) NODE_MODE="mesh" ;;
-    esac
-fi
-
 MESH_IP="$(mesh_ip_for_node "$NODE_NUM")"
-case "$NODE_MODE" in
-    gateway)      NEW_HOSTNAME="nightwatch-gw-${NODE_NUM}" ;;
-    sound-bridge) NEW_HOSTNAME="nightwatch-sb-${NODE_NUM}" ;;
-    *)            NEW_HOSTNAME="nightwatch-${NODE_NUM}" ;;
-esac
+NEW_HOSTNAME="nightwatch-${NODE_NUM}"
 
 echo ""
 echo -e "  ${BOLD}Node:${NC}     #$NODE_NUM"
 echo -e "  ${BOLD}Hostname:${NC} $NEW_HOSTNAME"
 echo -e "  ${BOLD}Mesh IP:${NC}  $MESH_IP"
-echo -e "  ${BOLD}Mode:${NC}     $NODE_MODE"
+echo -e "  ${BOLD}Role:${NC}     uniform (mesh + AP + eth0 sound-bridge)"
 echo ""
 read -rp "  Continue with setup? [Y/n] " final_confirm
 if [[ "$final_confirm" =~ ^[Nn]$ ]]; then
@@ -287,11 +258,6 @@ cp "$INSTALL_DIR/.env.example" "$ENV_FILE"
 set_env_value "$ENV_FILE" "PI_NUMBER" "$NODE_NUM"
 set_env_value "$ENV_FILE" "MESH_IP" "$MESH_IP"
 
-set_env_value "$ENV_FILE" "NODE_MODE" "$NODE_MODE"
-if [ "$NODE_MODE" = "gateway" ]; then
-    set_env_value "$ENV_FILE" "INET_IFACE" "wlan0"
-fi
-
 # Set IRC federation password (prompt if not already in .env from a previous install)
 if grep -q "CHANGE_ME_BEFORE_DEPLOY" "$ENV_FILE"; then
     echo ""
@@ -302,7 +268,7 @@ if grep -q "CHANGE_ME_BEFORE_DEPLOY" "$ENV_FILE"; then
     set_env_value "$ENV_FILE" "IRC_LINK_PASSWORD" "$IRC_PWD"
 fi
 
-echo "[+] .env generated (PI_NUMBER=$NODE_NUM, MESH_IP=$MESH_IP, MODE=$NODE_MODE)"
+echo "[+] .env generated (PI_NUMBER=$NODE_NUM, MESH_IP=$MESH_IP)"
 
 # Generate ngircd config
 cd "$INSTALL_DIR"
@@ -421,12 +387,8 @@ fi
 echo ""
 echo "  Node:     #$NODE_NUM ($NEW_HOSTNAME)"
 echo "  Mesh IP:  $MESH_IP"
-echo "  Mode:     $NODE_MODE"
-if [ "$NODE_MODE" = "sound-bridge" ]; then
-echo "  Bridge:   br0 (bat0 only) + eth0 → Mac Mini (10.0.0.1/24)"
-else
-echo "  Bridge:   br0 (bat0 + wlan2 → hostapd AP)"
-fi
+echo "  Role:     uniform (mesh + AP + eth0 sound-bridge)"
+echo "  Bridge:   br0 (bat0 + wlan2 → hostapd AP) | eth0 (10.0.0.1/24)"
 echo ""
 echo -e "  ${BOLD}Next steps:${NC}"
 echo "    sudo reboot"

@@ -242,7 +242,7 @@ if command -v hostapd_cli >/dev/null 2>&1; then
     if echo "$HOSTAPD_CFG" | grep -q "^max_num_sta=8$"; then
         pass "hostapd_cli get_config reports max_num_sta=8"
     elif [ -z "$HOSTAPD_CFG" ]; then
-        skip "hostapd_cli unreachable (AP may be down or running in sound-bridge mode)"
+        skip "hostapd_cli unreachable (AP dongle may be missing or hostapd not yet up)"
     else
         fail "hostapd reports a different max_num_sta value"
     fi

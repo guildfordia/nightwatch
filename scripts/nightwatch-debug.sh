@@ -57,10 +57,9 @@ collect_debug_info() {
     PI_MODEL=$(cat /proc/device-tree/model 2>/dev/null | tr -d '\0' || echo "unknown")
     local NODE_NUM="${PI_NUMBER:-unknown}"
     local MESH_IP_VAL="${MESH_IP:-unknown}"
-    local IS_GW="${MESH_GATEWAY:-false}"
-    local MODE="${NODE_MODE:-mesh}"
-    # Backward compat: resolve mode from MESH_GATEWAY if NODE_MODE not set
-    if [ "$MODE" = "mesh" ] && [ "$IS_GW" = "true" ]; then MODE="gateway"; fi
+    # CdC §3.4 #10 — uniform node role; no mode/gateway switch.
+    local MODE="uniform"
+    local IS_GW="false"
 
     # ---- Mesh interface ----
     local MESH_IFACE_VAL="${MESH_IFACE:-wlan1}"
