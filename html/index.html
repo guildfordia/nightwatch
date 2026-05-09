@@ -208,6 +208,8 @@
     .rgpd-banner .rgpd-rule { opacity: 0.6; }
     .rgpd-banner .rgpd-minors { font-style: italic; color: var(--text-highlight, #ffaa00); }
     .rgpd-banner a { color: var(--text-highlight, #ffaa00); text-decoration: underline; }
+    .rgpd-banner .rgpd-extra { margin-top: 0.4em; padding-top: 0.4em; border-top: 1px dashed currentColor; opacity: 0.85; }
+    .rgpd-banner .rgpd-extra p { margin: 0 0 0.4em; }
 
     .input-bar {
       background: var(--bg-primary);
@@ -270,14 +272,20 @@
     </div>
 
     <div class="main-content">
-      <div class="chat-area" id="chatArea"><!-- CdC §3.4 #12 — RGPD/LCEN banner. Hard-coded; the mailto target is filled
-             from /api/config (SIGNALEMENT_EMAIL of the node's .env) at runtime. -->
+      <div class="chat-area" id="chatArea"><!-- CdC §3.4 #12 — RGPD/LCEN banner. Hard-coded; the mailto target, operator
+             identity and RGPD contact are filled from /api/config (SIGNALEMENT_EMAIL,
+             LEGAL_OPERATOR_INFO, LEGAL_RGPD_EMAIL of the node's .env) at runtime.
+             Operator can drop an html/banner-extra.html file for the verbatim Annexe A.1
+             text — its content is inserted into #rgpdBannerExtra below. -->
         <div id="rgpdBanner" class="rgpd-banner" role="note" aria-label="Information RGPD et LCEN">
           <p class="rgpd-rule">─── INFORMATION (RGPD / LCEN) ───</p>
           <p>Ce chat est public et local au lieu d'exposition. Les messages ne sont pas publiés sur Internet. Lorsque la couche son est branchée, chaque message est transmis automatiquement à un service de traduction Google (États-Unis) pour normalisation en anglais avant analyse de sentiment et d'émotion. Ce transfert hors UE n'est pas encadré par un contrat art. 46 RGPD ; il est porté à votre connaissance afin que vous décidiez du contenu que vous saisissez.</p>
           <p>Les messages reçus par la couche son peuvent être conservés à des fins de documentation de l'œuvre (10 ans maximum). Les journaux des nœuds (pseudos, adresses MAC) sont effacés à la fermeture de l'exposition.</p>
+          <p id="rgpdOperatorLine" hidden>Responsable de publication / hébergeur (LCEN art. 6-III) : <span id="rgpdOperatorInfo"></span></p>
           <p class="rgpd-minors">Tu as moins de 15 ans ? Demande à un adulte avant d'écrire — n'écris pas ton nom ni ton école.</p>
           <p>Signaler un contenu illicite (LCEN art. 6-I-7) : <a id="rgpdSignalement" href="mailto:NON_DEFINI@nightwatch.local">signaler par email</a>. Réclamation : <a href="https://www.cnil.fr" target="_blank" rel="noopener noreferrer">CNIL — www.cnil.fr</a>.</p>
+          <p id="rgpdRightsLine" hidden>Exercer vos droits RGPD (art. 15-22) : <a id="rgpdRights" href="#"></a><span id="rgpdRightsHint"></span></p>
+          <div id="rgpdBannerExtra" class="rgpd-extra" hidden></div>
           <p class="rgpd-rule">─────────────────────────────────</p>
         </div></div>
       <div class="user-list" id="userList">
@@ -398,19 +406,66 @@
       }
 
       fetchRuntimeConfig() {
-        // CdC §3.4 #12, #13 — pull SIGNALEMENT_EMAIL + NIGHTWATCH_MODE from
-        // the bridge so the banner mailto link points at the operator-defined
-        // address and diagnostic commands stay hidden in production.
+        // CdC §3.4 #12, #13, §6.2-6.3 / Annexe A — pull banner inputs from the
+        // bridge so the mailto link, operator identity and RGPD contact match
+        // the node's .env, and so the diagnostic commands stay hidden in
+        // production. In parallel, fetch html/banner-extra.html (operator-
+        // controlled) for the optional verbatim Annexe A.1 text.
         fetch('/api/config').then(r => r.ok ? r.json() : null).then(cfg => {
           if (!cfg) return;
-          if (cfg.signalement_email) {
-            const link = document.getElementById('rgpdSignalement');
-            if (link) link.href = 'mailto:' + cfg.signalement_email;
-          }
-          if (cfg.mode) {
-            this.nightwatchMode = cfg.mode;
-          }
+          if (cfg.mode) this.nightwatchMode = cfg.mode;
+          this.populateLegalBanner(cfg);
         }).catch(() => { /* keep production defaults */ });
+        // Operator-supplied extra banner content. nginx serves /banner-extra.html
+        // when html/banner-extra.html exists; missing file = 404, leave empty.
+        fetch('/banner-extra.html').then(r => r.ok ? r.text() : '').then(html => {
+          const trimmed = (html || '').trim();
+          if (!trimmed) return;
+          const slot = document.getElementById('rgpdBannerExtra');
+          if (slot) {
+            slot.innerHTML = trimmed;
+            slot.hidden = false;
+          }
+        }).catch(() => { /* file absent — fine */ });
+      }
+
+      populateLegalBanner(cfg) {
+        const sig = cfg.signalement_email || '';
+        if (sig) {
+          const link = document.getElementById('rgpdSignalement');
+          if (link) link.href = 'mailto:' + sig;
+        }
+        // Operator identity (LCEN art. 6-III). Hidden when LEGAL_OPERATOR_INFO
+        // is empty so private/lab installs aren't forced to display anything.
+        const opInfo = (cfg.legal_operator_info || '').trim();
+        if (opInfo) {
+          const span = document.getElementById('rgpdOperatorInfo');
+          const line = document.getElementById('rgpdOperatorLine');
+          if (span && line) {
+            span.textContent = opInfo;
+            line.hidden = false;
+          }
+        }
+        // RGPD rights contact. Prefer LEGAL_RGPD_EMAIL when set; otherwise
+        // fall back to SIGNALEMENT_EMAIL with the [RGPD]/[SIGNALEMENT] subject
+        // convention (Annexe A.4). Line hidden if neither is configured.
+        const rgpdEmail = (cfg.legal_rgpd_email || '').trim();
+        const link = document.getElementById('rgpdRights');
+        const hint = document.getElementById('rgpdRightsHint');
+        const rightsLine = document.getElementById('rgpdRightsLine');
+        if (rightsLine && link && hint) {
+          if (rgpdEmail) {
+            link.href = 'mailto:' + rgpdEmail;
+            link.textContent = 'contactez le responsable';
+            hint.textContent = '';
+            rightsLine.hidden = false;
+          } else if (sig && !sig.startsWith('NON_DEFINI')) {
+            link.href = 'mailto:' + sig + '?subject=%5BRGPD%5D';
+            link.textContent = 'contactez ' + sig;
+            hint.textContent = ' (préfixez le sujet par [RGPD]; pour un signalement LCEN, [SIGNALEMENT])';
+            rightsLine.hidden = false;
+          }
+        }
       }
 
       isDebugMode() { return this.nightwatchMode === 'debug'; }

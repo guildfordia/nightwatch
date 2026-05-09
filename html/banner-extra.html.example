@@ -1,0 +1,59 @@
+<!--
+  Nightwatch — extra RGPD/LCEN banner content (CdC §3.4 #12, Annexe A)
+
+  Copy this file to html/banner-extra.html and edit the placeholders to match
+  your installation. Anything you put here is appended at the bottom of the
+  in-chat banner served by every node, AFTER the structured fields surfaced
+  via the .env (LEGAL_OPERATOR_INFO, LEGAL_RGPD_EMAIL).
+
+  When this file is absent (default), the banner stops at the structured
+  fields. Use this when the commanditaire wants the verbatim Annexe A
+  wording rather than the minimal structured form — typically required for
+  any installation open to the public.
+
+  HTML is allowed. Sanitization is the operator's responsibility (this file
+  is operator-controlled and not editable by visitors).
+  -->
+
+<!-- ─── Annexe A.1 — Texte de référence (couche son branchée) ─── -->
+<p>
+  Ce chat est public et local au lieu d'exposition. Les messages ne sont pas
+  publiés sur Internet. Pour piloter la sonification, lorsque la couche son
+  est branchée, <strong>chaque message est transmis automatiquement, en temps
+  réel, à un service de traduction automatique de Google (Google Translate,
+  États-Unis) pour normalisation en anglais, avant analyse de sentiment et
+  d'émotion</strong>. Ce transfert hors Union européenne est <strong>non
+  encadré par un contrat de transfert au sens de l'article 46 du RGPD</strong> ;
+  il est porté à votre connaissance afin que vous décidiez, en pleine
+  information, du contenu que vous saisissez dans ce chat.
+</p>
+
+<p>
+  Les messages reçus par la couche son peuvent être conservés à des fins de
+  documentation de l'œuvre, pour une durée maximale de 10 ans. Les journaux
+  des nœuds (pseudos, adresses MAC) sont effacés à la fermeture de
+  l'exposition.
+</p>
+
+<p>
+  Responsable de traitement :
+  <strong>&lt;COMMANDITAIRE — identité et coordonnées à compléter&gt;</strong>.
+  Pour exercer vos droits d'accès, rectification, effacement, opposition
+  (RGPD art. 15-22), contactez :
+  <a href="mailto:CONTACT_RGPD@example.com">&lt;ADRESSE_CONTACT_RGPD à fournir par le commanditaire&gt;</a>.
+  Pour faire effacer vos messages du log de la couche son, indiquez le pseudo
+  utilisé lors de votre demande ; faute d'authentification, l'effacement
+  portera sur l'ensemble des messages associés à ce pseudo. Vous pouvez à
+  tout moment introduire une réclamation auprès de la
+  <a href="https://www.cnil.fr" target="_blank" rel="noopener noreferrer">CNIL</a>.
+</p>
+
+<!-- ─── Annexe A.4 — Mention de mutualisation (optionnelle) ─── -->
+<!-- Décommentez ce paragraphe si SIGNALEMENT_EMAIL et ADRESSE_CONTACT_RGPD
+     sont mutualisés sur une seule adresse :
+<p>
+  <em>Pour signaler un contenu illicite, préfixez l'objet de votre email par
+  <code>[SIGNALEMENT]</code>. Pour exercer vos droits RGPD, préfixez par
+  <code>[RGPD]</code>.</em>
+</p>
+-->

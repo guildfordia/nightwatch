@@ -63,12 +63,17 @@ func handleDebug(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleConfig serves runtime configuration to the chat frontend (mode +
-// LCEN signalement email used in the RGPD banner — CdC §3.4 #12). Always
-// reachable; no diagnostics leak through it.
+// banner inputs from CdC §3.4 #12, §6.2, §6.3 / Annexe A). Always reachable;
+// no diagnostics leak through it. The frontend uses these to decide what to
+// render — the structured LEGAL_* fields for short identity strings, plus an
+// optional html/banner-extra.html the operator may drop in for the verbatim
+// Annexe A.1 text.
 func handleConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := map[string]string{
-		"mode":              nightwatchMode,
-		"signalement_email": envOrDefault("SIGNALEMENT_EMAIL", "NON_DEFINI@nightwatch.local"),
+		"mode":                nightwatchMode,
+		"signalement_email":   envOrDefault("SIGNALEMENT_EMAIL", "NON_DEFINI@nightwatch.local"),
+		"legal_operator_info": os.Getenv("LEGAL_OPERATOR_INFO"),
+		"legal_rgpd_email":    os.Getenv("LEGAL_RGPD_EMAIL"),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache")
