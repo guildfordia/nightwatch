@@ -135,9 +135,14 @@ receive_beacons() {
 }
 
 # ---- Expire stale peers ----
+# Sleep at PEER_TIMEOUT/3 so the worst-case expiration window stays close to
+# PEER_TIMEOUT (CdC §9.2 specifies 90 s). With sleep = PEER_TIMEOUT, a dead
+# peer could linger up to 2 × PEER_TIMEOUT before being pruned.
 expire_peers() {
+    local check_interval=$(( PEER_TIMEOUT / 3 ))
+    [ "$check_interval" -lt 5 ] && check_interval=5
     while true; do
-        sleep "$PEER_TIMEOUT"
+        sleep "$check_interval"
         if [ ! -f "$PEER_FILE" ]; then
             continue
         fi

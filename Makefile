@@ -207,22 +207,33 @@ info:
 scan:
 	@sudo scripts/test-scan.sh $(ARGS)
 
-# CdC §9.2 — Iterate SSH on all mesh nodes (.101-.120) and erase ngircd/hostapd
-# logs at expo close. Override SSH user with USER=<user>; defaults to current.
-# Fallback if SSH fails: run locally on each Pi:
-#   sudo rm -f /var/log/ngircd.log /var/log/hostapd.log*
+# CdC §6.3 + §9.2 — at expo close, erase every persistent file that links
+# a visitor pseudo, IP, or MAC. Iterates SSH on .101-.120; override the
+# SSH user with USER=<user>. Wipes:
+#   - /var/log/ngircd.log         pseudo ↔ IP entries
+#   - /var/log/hostapd.log*       MAC association events
+#   - /var/lib/misc/dnsmasq.leases visitor MAC ↔ IP leases
+#   - /var/log/nginx/access.log*  IP ↔ URL access entries
+#   - /var/log/nginx/error.log*   IP entries on errors
+#   - systemd journal             rotates + vacuums to 1 s; otherwise
+#                                 hostapd's AP-STA-CONNECTED events keep
+#                                 visitor MACs in the journal for ~1 month
+# Fallback if SSH fails: run the same commands locally on each Pi.
+WIPE_PATHS := /var/log/ngircd.log /var/log/hostapd.log* /var/lib/misc/dnsmasq.leases /var/log/nginx/access.log* /var/log/nginx/error.log*
+WIPE_CMD   := sudo rm -f $(WIPE_PATHS) && sudo journalctl --rotate >/dev/null 2>&1 && sudo journalctl --vacuum-time=1s >/dev/null 2>&1
+
 wipe-logs:
 	@SSH_USER=$${USER:-$$(id -un)}; \
-	echo "[+] Wiping ngircd & hostapd logs on nodes .101-.120 as $$SSH_USER..."; \
+	echo "[+] Wiping pseudo/IP/MAC traces on nodes .101-.120 as $$SSH_USER..."; \
 	for i in $$(seq 101 120); do \
 		ip="192.168.199.$$i"; \
 		if ssh -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new -o BatchMode=yes \
 			"$$SSH_USER@$$ip" \
-			'sudo rm -f /var/log/ngircd.log /var/log/hostapd.log*' 2>/dev/null; then \
+			"$(WIPE_CMD)" 2>/dev/null; then \
 			echo "  [+] $$ip wiped"; \
 		else \
 			echo "  [-] $$ip unreachable (skipped)"; \
 		fi; \
 	done; \
 	echo "[+] Wipe complete. Fallback for unreachable nodes: SSH in locally and run"; \
-	echo "    sudo rm -f /var/log/ngircd.log /var/log/hostapd.log*"
+	echo "    $(WIPE_CMD)"
