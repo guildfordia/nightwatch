@@ -516,7 +516,7 @@ if [ -f "$SECRETS_FILE" ]; then
     log "Injecting secrets from .secrets..."
     # Whitelist of allowed secret keys — prevents .secrets from injecting
     # arbitrary env vars into the node config (defense in depth)
-    ALLOWED_KEYS="IRC_LINK_PASSWORD TAILSCALE_AUTH_KEY HF_TOKEN WIFI_SSID WIFI_PASSWORD"
+    ALLOWED_KEYS="IRC_LINK_PASSWORD TAILSCALE_AUTH_KEY HF_TOKEN WIFI_SSID WIFI_PASSWORD SIGNALEMENT_EMAIL LEGAL_OPERATOR_INFO LEGAL_RGPD_EMAIL COUNTRY_CODE"
     while IFS= read -r line; do
         # Skip comments and empty lines
         [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue

@@ -132,7 +132,7 @@ collect_debug_info() {
 
     # ---- Discovery peers ----
     local PEERS_JSON="[]"
-    local PEER_FILE="/tmp/nightwatch-peers"
+    local PEER_FILE="/run/nightwatch-peers"
     if [ -f "$PEER_FILE" ] && [ -s "$PEER_FILE" ]; then
         PEERS_JSON="["
         local FIRST=true
