@@ -97,12 +97,15 @@ mesh_ip_for_node() {
     echo "192.168.199.$((100 + n))"
 }
 
-# generate_dnsmasq_conf <conf_path> <node_num> <mesh_ip>
+# generate_dnsmasq_conf <conf_path> <node_num> <mesh_ip> [sound_bridge]
 # Writes the dnsmasq.conf template for captive portal + DHCP.
+# When sound_bridge=1 a second interface block is appended so a Mac plugged
+# into eth0 receives a DHCP lease on 10.0.0.0/24 (CdC §3.4 #4 plug-and-play).
 generate_dnsmasq_conf() {
     local conf_path="$1"
     local node_num="$2"
     local mesh_ip="${3%/*}"  # strip CIDR suffix if present
+    local sound_bridge="${4:-0}"
 
     # Validate node_num is within range (prevents invalid DHCP ranges)
     if ! [[ "$node_num" =~ ^[0-9]+$ ]] || [ "$node_num" -lt 1 ] || [ "$node_num" -gt "$MAX_NODES" ]; then
@@ -110,14 +113,20 @@ generate_dnsmasq_conf() {
         return 1
     fi
 
-    local dhcp_start=$((200 + (node_num - 1) * 5 + 1))
-    local dhcp_end=$((200 + (node_num - 1) * 5 + 5))
-    # Cap at .254 to stay within /24 subnet
-    [ "$dhcp_end" -gt 254 ] && dhcp_end=254
-    if [ "$dhcp_start" -gt 254 ]; then
-        echo "generate_dnsmasq_conf: node $node_num has no DHCP range (start .${dhcp_start} > .254)" >&2
-        echo "  Reduce MAX_NODES or use fewer nodes. Max 11 nodes fit in .201-.254." >&2
-        return 1
+    # DHCP pool layout — 8 IPs per node, supporting up to 20 nodes fleet-wide.
+    # Cohérent avec §3.4 #11 du CdC (max_num_sta=8) et §3.3 (capacité 20 nœuds).
+    # The node IPs themselves live at .101-.120, the anchor service IP at .1, so
+    # the visitor pool layout is:
+    #   Nodes 1-16  → primary range  .121 to .248  (16 × 8 = 128 IPs)
+    #   Nodes 17-20 → secondary range .2   to .33  (4 × 8 = 32 IPs)
+    # The .34-.100 and .249-.254 gaps are left free for operational use.
+    local dhcp_start dhcp_end
+    if [ "$node_num" -le 16 ]; then
+        dhcp_start=$(( (node_num - 1) * 8 + 121 ))
+        dhcp_end=$(( (node_num - 1) * 8 + 128 ))
+    else
+        dhcp_start=$(( (node_num - 17) * 8 + 2 ))
+        dhcp_end=$(( (node_num - 17) * 8 + 9 ))
     fi
 
     mkdir -p "$(dirname "$conf_path")"
@@ -131,9 +140,11 @@ generate_dnsmasq_conf() {
 interface=br0
 bind-interfaces
 
-# DHCP range for WiFi clients (each node gets 5 addresses to avoid conflicts)
+# DHCP range for WiFi clients — each node owns 8 IPs (matching max_num_sta=8).
 # Batman-adv bridges all routers, so DHCP broadcasts reach every node's dnsmasq.
-# Non-overlapping ranges prevent duplicate leases: 20 nodes × 5 = .201-.240+
+# Non-overlapping ranges prevent duplicate leases. Layout:
+#   nodes 1-16  → .121 to .248 (primary range)
+#   nodes 17-20 → .2   to .33  (secondary range)
 dhcp-range=192.168.199.${dhcp_start},192.168.199.${dhcp_end},255.255.255.0,1h
 
 # Tell clients to use this node as gateway and DNS
@@ -162,6 +173,25 @@ log-dhcp
 # PID file for mesh-fix.sh to manage
 pid-file=/var/run/dnsmasq-nightwatch.pid
 DNSEOF
+
+    # CdC §3.4 #4 — when this node hosts the Mac sound-bridge on eth0, hand
+    # the Mac a DHCP lease on 10.0.0.0/24 (the static IP alone isn't enough
+    # for plug-and-play). dnsmasq with bind-interfaces only binds when the
+    # interface has the configured address, so this block is harmless when
+    # eth0 is not configured by mesh-fix.sh in setup_sound_bridge.
+    if [ "$sound_bridge" = "1" ]; then
+        cat >> "$conf_path" << SOUNDEOF
+
+# ── Sound-bridge subnet (eth0, CdC §3.4 #4) ──
+interface=eth0
+# Reserve .10-.50: leaves .1 (Pi) and the high range free for static
+# overrides if the operator pins a specific Mac. Tag the range so the
+# eth0-specific gateway/DNS options below override the br0 globals.
+dhcp-range=set:eth,10.0.0.10,10.0.0.50,255.255.255.0,1h
+dhcp-option=tag:eth,3,10.0.0.1
+dhcp-option=tag:eth,6,10.0.0.1
+SOUNDEOF
+    fi
 }
 
 # generate_hostapd_conf <conf_path> <ap_iface> <br_iface> <ssid> <password> <channel> <bssid>
@@ -198,6 +228,26 @@ ssid=$ssid
 channel=$channel
 hw_mode=g
 ieee80211n=1
+HAPEOF
+
+    # If channel=0, hostapd runs ACS (Automatic Channel Selection) at startup.
+    # Restrict ACS to channels 1 and 6 — the only non-overlap 2.4 GHz channels
+    # available for visitor APs (channel 11 is reserved fleet-wide for the mesh,
+    # see §3.3 of the cahier des charges). If the operator pinned an explicit
+    # AP_CHANNEL (1 or 6), we skip chanlist entirely.
+    if [ "$channel" = "0" ]; then
+        cat >> "$conf_path" << 'HAPACS'
+chanlist=1 6
+HAPACS
+    fi
+
+    cat >> "$conf_path" << HAPEOF
+
+# AR9271 firmware becomes unstable past 12-15 stations and crashes the
+# driver, triggering the watchdog cycle. Cap explicitly at 8 — hostapd
+# refuses associations beyond this with a clean reason code rather than
+# letting the radio crash. Cohérent avec le critère §3.4 #11 du CdC.
+max_num_sta=8
 
 # Each node broadcasts the same SSID with its dongle's own hardware BSSID
 # (unique per node). Phones see multiple APs and pick the strongest.
@@ -502,6 +552,7 @@ install_systemd_services() {
     systemctl enable nightwatch-led.service
     systemctl enable nightwatch-debug.service
     systemctl enable nightwatch-watchdog.timer
+    systemctl enable nightwatch-arp-refresh.service
     # nightwatch-roamer.service is intentionally NOT enabled here.
     # The 802.11v steering daemon is experimental — opt in per node with:
     #   sudo systemctl enable --now nightwatch-roamer.service

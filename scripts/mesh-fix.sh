@@ -468,8 +468,16 @@ start_dnsmasq() {
     # after changing PI_NUMBER or MESH_IP without manually removing the file.
     local node_num="${PI_NUMBER:-1}"
     local mesh_ip="${MESH_IP%/*}"
-    generate_dnsmasq_conf "$DNSMASQ_CONF" "$node_num" "$mesh_ip"
-    echo "[+] dnsmasq.conf regenerated for node $node_num (mesh IP $mesh_ip)"
+    local sb_flag=0
+    if [ "$NODE_MODE" = "sound-bridge" ]; then
+        sb_flag=1
+    fi
+    generate_dnsmasq_conf "$DNSMASQ_CONF" "$node_num" "$mesh_ip" "$sb_flag"
+    if [ "$sb_flag" = "1" ]; then
+        echo "[+] dnsmasq.conf regenerated for node $node_num (mesh $mesh_ip + eth0 10.0.0.0/24)"
+    else
+        echo "[+] dnsmasq.conf regenerated for node $node_num (mesh IP $mesh_ip)"
+    fi
 
     if [ -f "$DNSMASQ_CONF" ]; then
         echo "[+] Starting dnsmasq (DHCP + captive portal DNS on $BR_IFACE)..."
