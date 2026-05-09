@@ -210,6 +210,9 @@ generate_hostapd_conf() {
     local password="$5"
     local channel="${6:-6}"
     local bssid="${7:-02:00:4E:57:00:01}"
+    # CdC §6.1 — pin hostapd to the deployment country so 2.4 GHz channels
+    # and EIRP stay inside the local regulatory envelope (FR/ARCEP ≤ 100 mW).
+    local country_code="${COUNTRY_CODE:-FR}"
 
     mkdir -p "$(dirname "$conf_path")"
 
@@ -220,6 +223,10 @@ generate_hostapd_conf() {
 interface=$ap_iface
 bridge=$br_iface
 driver=nl80211
+
+# Regulatory domain (CdC §6.1)
+country_code=$country_code
+ieee80211d=1
 
 # WiFi settings
 ssid=$ssid

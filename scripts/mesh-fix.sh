@@ -67,6 +67,17 @@ load_batman_module() {
     echo "[+] batman-adv version: $(cat /sys/module/batman_adv/version 2>/dev/null || echo 'unknown')"
 }
 
+# CdC §6.1 — set the kernel-wide regulatory domain so iw / wpa_supplicant /
+# the mesh interface respect the local 2.4 GHz envelope (FR/ARCEP ≤ 100 mW
+# EIRP). hostapd has its own country_code= directive too. Idempotent.
+apply_regulatory_domain() {
+    local cc="${COUNTRY_CODE:-FR}"
+    if command -v iw >/dev/null 2>&1; then
+        iw reg set "$cc" 2>/dev/null || true
+        echo "[+] Regulatory domain: $(iw reg get 2>/dev/null | awk '/^country/{print $2; exit}' | tr -d ':')"
+    fi
+}
+
 # wait_for_ap_interface <iface>
 # Waits for the AP WiFi dongle (wlan2) to appear, with USB reset recovery.
 # IMPORTANT: Does NOT use modprobe -r ath9k_htc (would kill wlan1's mesh too).
@@ -640,6 +651,7 @@ case "$1" in
         # eth0 sound-bridge subnet. No NODE_MODE switch.
         echo "[+] Node role: uniform (mesh + AP + eth0 sound-bridge subnet)"
 
+        apply_regulatory_domain
         load_batman_module
         setup_mesh_interface
         setup_batman
