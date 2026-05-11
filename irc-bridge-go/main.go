@@ -240,7 +240,14 @@ const (
 	wsWriteWait      = 10 * time.Second
 	shutdownTimeout  = 10 * time.Second
 	maxIRCMsgLen     = 400 // IRC limit minus protocol overhead
-	replayBufferSize = 30  // number of recent messages to replay on reconnect (CdC §3.4 #8)
+	// replayBufferSize: at the §5.2 #6 charge target (50 active WS,
+	// 1 msg / 15 s) we see ~3.3 msg/s sustained. 30 messages covered
+	// ~9 s of history — enough for the original 4-node bench but
+	// tight for a vernissage of 100 + phones where 100 active senders
+	// produce ~7 msg/s and a phone briefly out of WiFi might be down
+	// for 10-15 s. 100 entries give ~15 s of replay at peak, matching
+	// the reconnect backoff window.
+	replayBufferSize = 100 // CdC §3.4 #8 — recent messages replayed to reconnects
 )
 
 // ircDialTimeout is configurable via IRC_DIAL_TIMEOUT env var (default 10s).

@@ -145,7 +145,15 @@ bind-interfaces
 # Non-overlapping ranges prevent duplicate leases. Layout:
 #   nodes 1-16  → .121 to .248 (primary range)
 #   nodes 17-20 → .2   to .33  (secondary range)
-dhcp-range=192.168.199.${dhcp_start},192.168.199.${dhcp_end},255.255.255.0,1h
+#
+# Lease time: 1h is the default and matches a quiet deployment where
+# the same visitor keeps the same IP for the whole visit. For event-
+# style use (vernissage with 100 + people churning through over a few
+# hours), set NIGHTWATCH_DHCP_LEASE in /etc/default/nightwatch to a
+# shorter value like "10m" — phones that leave free their IP slot
+# faster, raising the effective fleet capacity above the per-node
+# 8-IP cap (the cap stays, but the rotation accelerates).
+dhcp-range=192.168.199.${dhcp_start},192.168.199.${dhcp_end},255.255.255.0,${NIGHTWATCH_DHCP_LEASE:-1h}
 
 # Tell clients to use this node as gateway and DNS
 dhcp-option=3,${mesh_ip}
