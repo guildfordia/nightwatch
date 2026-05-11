@@ -11,10 +11,21 @@
 #   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #   source "$SCRIPT_DIR/common.sh"
 
-# Maximum number of nodes in the mesh (IPs .101-.120)
-# Note: DHCP pools (.201-.254) only fit 11 nodes (5 IPs each).
-# Nodes 12-20 work for mesh/IRC but can't serve DHCP to WiFi clients.
-MAX_NODES=20
+# Maximum number of nodes in the mesh.
+#
+# Architectural ceiling for the /24 subnet 192.168.199.0/24:
+#   28 nodes × 8 DHCP IPs/node = 224 baux, fits in /24 with .101-.128
+#   reserved for static node IPs, .1 anchor, .255 broadcast, and
+#   .98-.100 / .129-.130 / .249-.254 left as operational gaps.
+#
+# For 30+ nodes you must migrate to /23 (192.168.198.0/23) — see
+# docs/capacity-planning.md. That is a netmask + IP-scheme change,
+# not a constant bump.
+#
+# Default 20 matches the CdC §3.3 design figure. Bump up to 28 for
+# a single-event capacity push without changing the subnet. Going
+# higher requires the subnet migration.
+MAX_NODES="${MAX_NODES:-20}"
 
 # load_env <path> — loads .env file with allexport, exits on missing file
 load_env() {

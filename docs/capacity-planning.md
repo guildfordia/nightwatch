@@ -6,15 +6,30 @@ config** (AR9271 dongles, `max_num_sta=8` per AP, mesh AR9271).
 
 ## TL;DR
 
-| Visitors expected at peak | Pi nodes you need | Subnet |
-|---------------------------|-------------------|--------|
-|  ≤ 32                     |  4                | /24 OK |
-|  ≤ 80                     | 10                | /24 OK |
-|  ≤ 96                     | 12                | /24 OK |
-|  ≤ 104                    | 13                | /24 OK |
-|  ≤ 120                    | 15                | /24 OK |
-|  ≤ 160 *(theoretical max)*| 20                | /24 OK |
-| > 160                     | hardware change required (see below) |
+| Visitors expected at peak | Pi nodes you need | Subnet | Confidence |
+|---------------------------|-------------------|--------|------------|
+|  ≤ 32                     |  4                | /24    | **High** — sim validated |
+|  ≤ 80                     | 10                | /24    | **High** — sim validated |
+|  ≤ 96                     | 12                | /24    | **High** — sim validated up to 12 nodes |
+|  ≤ 104                    | 13                | /24    | **Medium** — extrapolation; race fix landed |
+|  ≤ 160                    | 20                | /24    | **Medium** — needs §7.3 grandeur nature |
+|  ≤ 224                    | 28                | /24    | **Low** — at the /24 architectural limit |
+|  ≤ 240                    | 30                | **/23**| **Low** — needs subnet migration + §7.3 |
+| > 240                     | hardware change required (see below) | | |
+
+**Confidence levels above:**
+- **High**: tested in the sim, no architectural concern.
+- **Medium**: math fits the architecture, but mesh-radio
+  contention and per-Pi convergence at this scale haven't been
+  observed on real hardware. CdC §7.3 grandeur nature is the
+  validation gate.
+- **Low**: requires changes (subnet migration, MAX_NODES bump
+  past 28) beyond what the current sim has exercised.
+
+For any new deployment past 12 nodes the grandeur-nature test
+must precede the public event — the sim cannot reproduce 2.4 GHz
+shared-channel contention between 20-30 physical Pis in the
+same venue.
 
 Formula: `peak_visitors = floor(8 × N_nodes)`.
 
@@ -32,20 +47,57 @@ radio chipset. With this radio, 8 stations per AP is the safe ceiling.
 
 Three options, ordered by cost:
 
-1. **Add more nodes**. Up to `MAX_NODES = 20` is already wired in
-   the DHCP layout. `scripts/common.sh:17` ; can bump to 24-30 by
-   editing that constant + the DHCP-range math, no other changes
-   needed (`/24` has room for 8 × 30 = 240 baux).
+1. **Add more nodes** within `/24` — bumpez `MAX_NODES` (env var
+   in `scripts/common.sh`) up to **28**. The DHCP layout already
+   handles 28 × 8 = 224 baux without conflicts (verified math:
+   static node IPs .101-.128, anchor .1, broadcast .255 reserved;
+   DHCP at .121-.248 + .2-.97 = 224 IPs available). Past 28 you
+   hit the /24 ceiling and must migrate the subnet.
 2. **Better AP radio (no other software change)**. Swap the AP-side
    AR9271 for an **MT7612U** (~€35/dongle). The mesh-side AR9271 can
    stay. MT7612U handles 25-30 stations cleanly and removes the
    firmware crash mode. Per the existing README note: "Same-venue
    100-user is realistic in this configuration." With 6-8 MT7612U
    nodes you cover the 100-user event from a smaller mesh.
-3. **Bigger subnet**. Move `192.168.199.0/24` to `/23` (510 hosts)
-   or `/22` (1022 hosts). Edits: `scripts/common.sh` (mesh IP
-   computation, DHCP range), `dhcp-option=3/6` netmask. No new
-   tech, just wider addressing. Only worth it past 160 stations.
+3. **Bigger subnet** for 30+ nodes. Move `192.168.199.0/24` to
+   `/23` (192.168.198.0/23 = 510 hosts) or `/22` (1022 hosts).
+   Touch points:
+   - `scripts/common.sh` — mesh IP computation, DHCP range math,
+     anchor IP address.
+   - `scripts/mesh-fix.sh` and `scripts/nodeconfig.sh` — br0
+     netmask must change from `/24` to `/23` (or `/22`).
+   - `dhcp-range` line in `generate_dnsmasq_conf` — last field is
+     the netmask, must match.
+   - `dhcp-option=3,${mesh_ip}` (gateway) stays the same since
+     the mesh IP is still in the wider range.
+   - Test scripts that hardcode `.101-.120` regex (e.g.
+     `test-mesh.sh:88`, `test-scan.sh`) — update to span the
+     new range.
+   This is a real migration, not a constant bump. **Not
+   validated in this codebase**. Plan a §7.3 grandeur-nature
+   day specifically for the subnet change.
+
+### Known risks at higher node counts
+
+The sim cannot exercise these, only physical Pi tests can:
+
+- **2.4 GHz channel contention** between 20-30 Pis in the same
+  venue. The mesh radio (wlan1) and the AP radio (wlan2 if used,
+  AR9271 by default) all broadcast OGMs and management frames on
+  the same channel. Past ~15 Pis in close radio range, expect
+  measurable mesh convergence time (30-60 s on cold start) and
+  occasionally lost OGM batches.
+- **AR9271 firmware stability** on the mesh side under sustained
+  high node count. The 8-station cap on the AP-side AR9271 is
+  documented; the mesh-side AR9271 has its own quirks at scale.
+- **batman-adv routing-table size**. At 30 nodes × 8 stations =
+  240 MAC addresses, batman-adv DAT (Distributed ARP Table) holds
+  several hundred entries. Tested up to 100+ in batman-adv
+  benchmarks, so headroom exists, but not exercised by us.
+
+The CdC §7.3 grandeur nature is the validation gate for any of
+these. Without it, the high-node-count rows in the table above
+are math projections, not guarantees.
 
 ## Event-night tuning (no code changes, just env)
 

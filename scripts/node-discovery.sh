@@ -188,12 +188,31 @@ generate_irc_config() {
     generate_ngircd_base_conf "$CONF" "$SERVER_NAME" "$NODE_NUM"
 
     # Add server links for each known peer (read under shared lock to
-    # avoid races with beacon receiver writing to the peer file)
+    # avoid races with beacon receiver writing to the peer file).
+    #
+    # Passive direction is asymmetric, decided by node-id ordering:
+    # peer-of-lower-id is `Passive = yes` (waits to be connected to),
+    # peer-of-higher-id is `Passive = no` (initiates the TCP).
+    # At ≥ 16 nodes, both-sides-initiating creates a startup race
+    # where ngircd's duplicate-detection drops BOTH attempts and the
+    # link never forms; the spanning tree ends up missing an edge
+    # and the fleet splits into disconnected components. Verified
+    # in the sim (37 % delivery at 16 × 68 with symmetric Passive=no).
+    # Real Pi boots are staggered enough that the race rarely fires
+    # at the current 4-10 node CdC scale, but for the documented
+    # 100-visitor / 13-20 node deployment the race window widens.
+    # Asymmetric initiative eliminates the race entirely with no
+    # other config or topology change.
     if [ -f "$PEER_FILE" ]; then
         (
             flock -s 200
             while IFS='|' read -r num ip name ts; do
                 [ -z "$num" ] && continue
+                local passive="yes"
+                if [ "$num" -lt "$NODE_NUM" ]; then
+                    # I have the higher id, I initiate the TCP.
+                    passive="no"
+                fi
                 cat >> "$CONF" << EOF
 
 [Server]
@@ -203,7 +222,7 @@ Port = 6667
 MyPassword = $IRC_LINK_PASSWORD
 PeerPassword = $IRC_LINK_PASSWORD
 Group = 1
-Passive = no
+Passive = $passive
 EOF
             done < "$PEER_FILE"
         ) 200>"${PEER_FILE}.lock"
