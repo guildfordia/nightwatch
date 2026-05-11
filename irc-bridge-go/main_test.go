@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -20,8 +21,8 @@ import (
 func TestRateLimiterAllowUnderLimit(t *testing.T) {
 	rl := newRateLimiter()
 	for i := 0; i < maxConnsPerIP; i++ {
-		if !rl.Allow("192.168.1.1") {
-			t.Fatalf("Allow() returned false on connection %d, want true (limit=%d)", i+1, maxConnsPerIP)
+		if rl.Allow("192.168.1.1") != AllowAccepted {
+			t.Fatalf("Allow() denied connection %d, want accepted (limit=%d)", i+1, maxConnsPerIP)
 		}
 	}
 }
@@ -31,8 +32,8 @@ func TestRateLimiterBlockOverLimit(t *testing.T) {
 	for i := 0; i < maxConnsPerIP; i++ {
 		rl.Allow("192.168.1.1")
 	}
-	if rl.Allow("192.168.1.1") {
-		t.Fatal("Allow() returned true over limit, want false")
+	if r := rl.Allow("192.168.1.1"); r != AllowDeniedPerIP {
+		t.Fatalf("Allow() over per-IP limit returned %v, want AllowDeniedPerIP", r)
 	}
 }
 
@@ -42,8 +43,8 @@ func TestRateLimiterSeparateIPs(t *testing.T) {
 		rl.Allow("192.168.1.1")
 	}
 	// Different IP should still be allowed
-	if !rl.Allow("192.168.1.2") {
-		t.Fatal("Allow() blocked a different IP, want true")
+	if rl.Allow("192.168.1.2") != AllowAccepted {
+		t.Fatal("Allow() blocked a different IP, want AllowAccepted")
 	}
 }
 
@@ -52,12 +53,26 @@ func TestRateLimiterRelease(t *testing.T) {
 	for i := 0; i < maxConnsPerIP; i++ {
 		rl.Allow("192.168.1.1")
 	}
-	if rl.Allow("192.168.1.1") {
+	if rl.Allow("192.168.1.1") == AllowAccepted {
 		t.Fatal("should be blocked before release")
 	}
 	rl.Release("192.168.1.1")
-	if !rl.Allow("192.168.1.1") {
-		t.Fatal("Allow() returned false after Release(), want true")
+	if rl.Allow("192.168.1.1") != AllowAccepted {
+		t.Fatal("Allow() denied after Release(), want AllowAccepted")
+	}
+}
+
+func TestRateLimiterGlobalCap(t *testing.T) {
+	rl := newRateLimiter()
+	// Fill the global cap with distinct IPs so per-IP limit never fires.
+	for i := 0; i < rl.maxTotal; i++ {
+		if rl.Allow(fmt.Sprintf("10.0.0.%d", i)) != AllowAccepted {
+			t.Fatalf("Allow() denied at slot %d under global cap", i)
+		}
+	}
+	// One more from a fresh IP should be saturated, not per-IP.
+	if r := rl.Allow("10.99.99.99"); r != AllowDeniedSaturated {
+		t.Fatalf("Allow() at cap returned %v, want AllowDeniedSaturated", r)
 	}
 }
 
@@ -76,7 +91,7 @@ func TestRateLimiterReleaseDeletesKey(t *testing.T) {
 func TestRateLimiterConcurrent(t *testing.T) {
 	rl := newRateLimiter()
 	var wg sync.WaitGroup
-	allowed := make(chan bool, 100)
+	allowed := make(chan AllowResult, 100)
 
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
@@ -90,7 +105,7 @@ func TestRateLimiterConcurrent(t *testing.T) {
 
 	count := 0
 	for a := range allowed {
-		if a {
+		if a == AllowAccepted {
 			count++
 		}
 	}

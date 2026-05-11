@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -222,6 +223,16 @@ const (
 	ircChannel       = "#nightwatch"
 	listenAddr       = ":3000"
 	maxConnsPerIP    = 5
+	// maxConnsGlobal caps total concurrent WS connections handled
+	// by this bridge. At a vernissage scale of ~5 phones/node,
+	// 40 gives 8 × headroom for the realistic ratio and triggers
+	// only on genuine overload (someone trying to brute-flood the
+	// node, or a runaway test). When the cap is hit, new WS
+	// upgrade requests receive HTTP 503 + Retry-After: 30 so the
+	// captive portal shows a "trop de monde, réessaye plus tard"
+	// page instead of letting the user experience a degraded chat.
+	// Override at runtime: NIGHTWATCH_MAX_CONNS=N nightwatch-bridge
+	maxConnsGlobal   = 40
 	wsReadLimit      = 4096
 	clientSendBuffer = 512 // buffered channel size for WebSocket messages (larger for slow mesh links)
 	wsPongWait       = 5 * time.Minute   // mobile browsers may background for minutes
@@ -314,28 +325,62 @@ var upgrader = websocket.Upgrader{
 // --- Rate limiter (per-IP connection tracking) ---
 
 type RateLimiter struct {
-	mu    sync.Mutex
-	conns map[string]int
+	mu       sync.Mutex
+	conns    map[string]int
+	total    int            // global counter; saturates at maxConnsGlobal
+	maxTotal int            // configurable cap (env override)
 }
 
 func newRateLimiter() *RateLimiter {
-	return &RateLimiter{conns: make(map[string]int)}
+	max := maxConnsGlobal
+	if v := os.Getenv("NIGHTWATCH_MAX_CONNS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			max = n
+		}
+	}
+	return &RateLimiter{conns: make(map[string]int), maxTotal: max}
 }
 
-func (rl *RateLimiter) Allow(ip string) bool {
+// AllowResult disambiguates the three rejection paths a WS upgrade
+// can hit, so the caller can return the right HTTP status code:
+//   - allowed:   take the connection
+//   - perIP:     429 (one IP slamming us — local rate limit)
+//   - saturated: 503 (the whole bridge is full — show the captive
+//                "trop de monde, reviens dans 1 min" page)
+type AllowResult int
+
+const (
+	AllowAccepted AllowResult = iota
+	AllowDeniedPerIP
+	AllowDeniedSaturated
+)
+
+func (rl *RateLimiter) Allow(ip string) AllowResult {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+	// Global cap first — when the bridge is saturated, even a clean
+	// per-IP slot doesn't get you in. Surfacing it as 503 (vs 429)
+	// lets the captive portal distinguish "too many of you" from
+	// "we're full overall".
+	if rl.total >= rl.maxTotal {
+		return AllowDeniedSaturated
+	}
 	if rl.conns[ip] >= maxConnsPerIP {
-		return false
+		return AllowDeniedPerIP
 	}
 	rl.conns[ip]++
-	return true
+	rl.total++
+	return AllowAccepted
 }
 
 func (rl *RateLimiter) Release(ip string) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	rl.conns[ip]--
+	rl.total--
+	if rl.total < 0 {
+		rl.total = 0
+	}
 	if rl.conns[ip] <= 0 {
 		delete(rl.conns, ip)
 	}
@@ -631,10 +676,23 @@ func handleWebSocket(hub *Hub, limiter *RateLimiter, cleanupWg *sync.WaitGroup, 
 		}
 	}
 
-	// Rate limit
-	if !limiter.Allow(clientIP) {
-		log.Printf("Rate limit exceeded for %s", clientIP)
-		http.Error(w, "Too many connections", http.StatusTooManyRequests)
+	// Rate limit. Tri-state: per-IP cap → 429, global cap → 503 with
+	// Retry-After so the captive portal can distinguish "you sent too
+	// many tabs" from "the whole node is full, the next visitor in
+	// line gets the next slot".
+	switch limiter.Allow(clientIP) {
+	case AllowAccepted:
+		// fall through
+	case AllowDeniedPerIP:
+		log.Printf("Per-IP rate limit exceeded for %s", clientIP)
+		http.Error(w, "Too many connections from this IP", http.StatusTooManyRequests)
+		return
+	case AllowDeniedSaturated:
+		log.Printf("Bridge saturated, rejecting %s (total=%d max=%d)",
+			clientIP, limiter.maxTotal, limiter.maxTotal)
+		w.Header().Set("Retry-After", "30")
+		http.Error(w, "Bridge saturated, please retry in a moment",
+			http.StatusServiceUnavailable)
 		return
 	}
 
@@ -928,6 +986,33 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // --- Status endpoint (debug diagnostics) ---
 
+// handleCapacity is a public, low-noise sibling of /status. It returns
+// just enough info for the captive portal to decide whether to open a
+// WS or to show the "trop de monde" page. Intentionally exposes no
+// client identity, nick state, or memory stats — only the global cap
+// and the current count.
+func handleCapacity(limiter *RateLimiter) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		limiter.mu.Lock()
+		total := limiter.total
+		max := limiter.maxTotal
+		limiter.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		// 503 + Retry-After when saturated so plain HTTP clients and
+		// monitoring probes treat it as a "back off" signal too.
+		if total >= max {
+			w.Header().Set("Retry-After", "30")
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"saturated": total >= max,
+			"total":     total,
+			"max":       max,
+		})
+	}
+}
+
 func handleStatus(hub *Hub, limiter *RateLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		hub.mu.RLock()
@@ -1034,6 +1119,11 @@ func main() {
 		handleWebSocket(hub, limiter, cleanupWg, cleanupCtx, w, r)
 	})
 	mux.HandleFunc("/health", handleHealth)
+	// Public capacity endpoint — no debug gate. The captive portal
+	// page hits this before opening the WS to detect saturation and
+	// show a friendly "trop de monde, reviens dans 1 min" banner
+	// instead of letting users bang on a closed door.
+	mux.HandleFunc("/capacity", handleCapacity(limiter))
 	mux.HandleFunc("/status", requireDebugMode(handleStatus(hub, limiter)))
 	mux.HandleFunc("/blink", requireDebugMode(handleBlink))
 	mux.HandleFunc("/debug", requireDebugMode(handleDebug))

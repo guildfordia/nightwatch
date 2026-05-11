@@ -1466,7 +1466,73 @@
       }
     }
 
-    window.addEventListener('DOMContentLoaded', () => {
+    // Capacity gate: ask the bridge whether it has a free slot before
+    // opening a WebSocket. When the node is full, show a friendly
+    // "trop de monde, reviens dans 1 min" overlay instead of failing
+    // silently in the chat UI. Re-checks every 15 s; auto-dismisses
+    // when capacity returns.
+    async function checkCapacityOrShowBusy() {
+      try {
+        const r = await fetch('/api/capacity', { cache: 'no-store' });
+        if (r.status === 503) {
+          showBusyBanner();
+          return false;
+        }
+        if (r.ok) {
+          const j = await r.json();
+          if (j && j.saturated === true) {
+            showBusyBanner();
+            return false;
+          }
+        }
+        // Any non-503 response (200, or 404 if the endpoint doesn't
+        // exist on an older bridge) means "go ahead, try the WS".
+        hideBusyBanner();
+        return true;
+      } catch (_) {
+        // Network blip — let the chat layer's own reconnect handle it.
+        return true;
+      }
+    }
+
+    function showBusyBanner() {
+      if (document.getElementById('nw-busy-banner')) return;
+      const div = document.createElement('div');
+      div.id = 'nw-busy-banner';
+      div.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;'
+        + 'background:#000;color:#fff;display:flex;flex-direction:column;'
+        + 'align-items:center;justify-content:center;z-index:9999;'
+        + 'font-family:monospace;text-align:center;padding:2em;';
+      div.innerHTML =
+        '<h1 style="margin:0 0 0.5em 0;font-size:2em;">Trop de monde</h1>' +
+        '<p style="margin:0 0 1em 0;max-width:30em;line-height:1.4;">' +
+        'Ce nœud du mur des images est plein. Patiente un instant, ' +
+        'on va se reconnecter automatiquement dès qu\'une place se libère.' +
+        '</p>' +
+        '<p style="font-size:0.85em;opacity:0.6;">Réessai dans <span id="nw-busy-retry-in">15</span>&nbsp;s</p>';
+      document.body.appendChild(div);
+      let n = 15;
+      const tick = setInterval(() => {
+        n -= 1;
+        const span = document.getElementById('nw-busy-retry-in');
+        if (span) span.textContent = String(Math.max(0, n));
+        if (n <= 0) {
+          clearInterval(tick);
+          checkCapacityOrShowBusy().then(ok => { if (ok) location.reload(); });
+        }
+      }, 1000);
+    }
+
+    function hideBusyBanner() {
+      const el = document.getElementById('nw-busy-banner');
+      if (el) el.remove();
+    }
+
+    window.addEventListener('DOMContentLoaded', async () => {
+      // Block chat init until capacity check passes. checkCapacity…
+      // installs the busy banner itself if it returns false.
+      const ok = await checkCapacityOrShowBusy();
+      if (!ok) return;
       const terminal = new IrssiTerminal();
       window.addEventListener('beforeunload', () => {
         if (terminal.debugInterval) { clearInterval(terminal.debugInterval); terminal.debugInterval = null; }
