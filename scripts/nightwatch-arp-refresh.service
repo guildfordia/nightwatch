@@ -1,0 +1,17 @@
+[Unit]
+Description=Nightwatch ARP refresh (gratuitous ARP on AP-STA-CONNECTED)
+Documentation=https://github.com/guildfordia/nightwatch
+After=nightwatch-mesh.service nightwatch-app.service
+Requires=nightwatch-mesh.service
+PartOf=nightwatch-mesh.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/hostapd_cli -a /opt/nightwatch/scripts/nightwatch-arp-refresh.sh
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
