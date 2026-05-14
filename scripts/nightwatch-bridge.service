@@ -15,8 +15,11 @@ StandardError=journal
 
 # Bridge connects to local ngircd
 Environment=IRC_SERVER=127.0.0.1:6667
-# Bridge data directory for nick counter persistence
+# Bridge data directory for nick counter + chat-hash salt persistence
 Environment=DATA_DIR=/opt/nightwatch/irc-bridge-go/data
+# Optional JSONL chat archive (off by default — CdC §3.4 #8 specifies in-memory only).
+# Uncomment to enable; the operator then assumes RGPD responsibility (CdC §6.2).
+# Environment=CHAT_LOG_DIR=/var/log/nightwatch
 # Picks up NIGHTWATCH_MODE, SIGNALEMENT_EMAIL (CdC §3.4 #12, #13)
 EnvironmentFile=-/opt/nightwatch/.env
 

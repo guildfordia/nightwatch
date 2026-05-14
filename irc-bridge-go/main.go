@@ -301,6 +301,10 @@ func (rb *ReplayBuffer) Recent() []string {
 
 var replayBuffer = NewReplayBuffer(replayBufferSize)
 
+// chatLogger persists every PRIVMSG to /var/log/nightwatch/chat-YYYY-MM-DD.jsonl
+// so a reboot of any node doesn't lose chat history. Initialised in main().
+var chatLogger *ChatLogger
+
 // --- WebSocket upgrader with origin check ---
 
 var allowedOriginPrefixes = []string{
@@ -550,6 +554,10 @@ func (c *Client) readPump(hub *Hub) {
 				c.close() // signal other goroutines to stop
 				return
 			}
+			c.mu.Lock()
+			nick := c.nick
+			c.mu.Unlock()
+			chatLogger.LogOutbound(msg, nick, c.ip)
 		}
 	}
 }
@@ -619,8 +627,10 @@ func (c *Client) ircPump() {
 		}
 
 		// Store PRIVMSG in replay buffer for reconnecting clients
+		// and persist to JSONL archive for cross-reboot durability.
 		if strings.Contains(line, "PRIVMSG "+ircChannel) {
 			replayBuffer.Add(line)
+			chatLogger.LogInbound(line)
 		}
 
 		// Try to send; if channel is full, wait briefly before giving up.
@@ -1104,6 +1114,8 @@ func main() {
 	}
 
 	nickRegistry = newNickRegistry()
+	chatLogger = newChatLogger()
+	defer chatLogger.Close()
 
 	// Background context for nick counter flush loop (cancelled on shutdown)
 	flushCtx, flushCancel := context.WithCancel(context.Background())
