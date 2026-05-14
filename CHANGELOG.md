@@ -26,5 +26,5 @@ See `README.md` for the operator-facing documentation.
 - `MINOR` is bumped when a new feature is added.
 - `PATCH` is bumped for bug fixes and internal refactors.
 
-The notification of mise à disposition (cahier des charges §7.4) cites
-the exact tag of the delivered version.
+The notification of mise à disposition cites the exact tag of the
+delivered version.

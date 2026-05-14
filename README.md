@@ -257,8 +257,8 @@ PI_NUMBER=1
 MESH_IP=192.168.199.101
 
 # ── Mesh Network ──
-FREQ=2462                      # Channel 11 (CdC §3.3) — never share with the AP
-COUNTRY_CODE=FR                # CdC §6.1 ARCEP regulatory domain
+FREQ=2462                      # Channel 11 — mesh-only, never share with the AP
+COUNTRY_CODE=FR                # Regulatory domain (FR/ARCEP, ≤ 100 mW PIRE on 2.4 GHz)
 # MESH_SAE_PASSWORD=your-mesh-secret    # Optional: WPA3 mesh encryption
 
 # ── WiFi AP (hostapd on wlan2) ──
@@ -266,10 +266,10 @@ AP_CHANNEL=0                   # 0 = ACS auto-pick from {1, 6}, staggered by AP 
 WIFI_SSID=Nightwatch
 WIFI_PASSWORD=Nightwatch
 
-# ── Exposition mode (CdC §3.4 #13) ──
+# ── Exposition mode ──
 NIGHTWATCH_MODE=production     # production | debug
 
-# ── LCEN/RGPD legal disclosures (CdC §3.4 #12, Annexe A) ──
+# ── LCEN/RGPD legal disclosures ──
 SIGNALEMENT_EMAIL=NON_DEFINI@nightwatch.local   # mandatory before public deploy
 LEGAL_OPERATOR_INFO=                            # optional — name, address, SIRET
 LEGAL_RGPD_EMAIL=                               # optional — falls back to SIGNALEMENT
@@ -288,8 +288,8 @@ TAILSCALE_AUTH_KEY=
 The chat banner ships a minimum LCEN/RGPD notice (mineurs, transferts hors UE, signalement). Three knobs let an operator extend it for full compliance:
 
 - `LEGAL_OPERATOR_INFO` in `.env` — adds a "Responsable de publication / hébergeur (LCEN art. 6-III) : …" line.
-- `LEGAL_RGPD_EMAIL` in `.env` — dedicated mailto for RGPD rights (art. 15-22). When empty, the banner falls back to `SIGNALEMENT_EMAIL` with the `[RGPD]` / `[SIGNALEMENT]` subject convention from Annexe A.4.
-- `html/banner-extra.html` (gitignored) — drop arbitrary HTML for the verbatim Annexe A.1 wording. A copy-ready template lives at `html/banner-extra.html.example`.
+- `LEGAL_RGPD_EMAIL` in `.env` — dedicated mailto for RGPD rights (art. 15-22). When empty, the banner falls back to `SIGNALEMENT_EMAIL` with a `[RGPD]` / `[SIGNALEMENT]` subject-prefix convention.
+- `html/banner-extra.html` (gitignored) — drop arbitrary HTML for a long-form legal text. A copy-ready template lives at `html/banner-extra.html.example`.
 
 For a private/lab install all three may stay empty; the banner shrinks to its mandatory minimum (mineurs, transferts hors UE, signalement).
 
@@ -311,7 +311,7 @@ make sdcard       # Prepare SD card for a new node (run on laptop, Linux/macOS)
 make build-bridge # Cross-compile irc-bridge for ARM64 (run on laptop, auto in sdcard)
 make image        # Prepare this Pi for golden image capture
 make info         # Print detailed node information
-make wipe-logs    # Erase ngircd & hostapd logs on every node (CdC §9.2, expo close)
+make wipe-logs    # Erase ngircd & hostapd logs on every node (run at end of exposition)
 ```
 
 > **`make wipe-logs`** iterates SSH on `192.168.199.101-120` and removes
@@ -329,7 +329,7 @@ make wipe-logs    # Erase ngircd & hostapd logs on every node (CdC §9.2, expo c
 | `/nodes` | Show mesh network map | only when `NIGHTWATCH_MODE=debug` |
 | `/debug` | Show full node diagnostics | only when `NIGHTWATCH_MODE=debug` |
 
-CdC §3.4 #13 requires the diagnostic commands to be off by default. Set
+By design the diagnostic commands are off by default. Set
 `NIGHTWATCH_MODE=debug` in `.env` only for development; the corresponding
 HTTP endpoints (`/api/blink`, `/api/debug`, `/api/bridge-status`) return
 `403` whenever the mode is anything other than `debug`.
@@ -502,9 +502,9 @@ Each node uses its own BSSID (unique MAC) but the same SSID "Nightwatch." When n
 
 - [x] **Widen DHCP allocation** — Done. `generate_dnsmasq_conf` in `scripts/common.sh` now hands each node 8 IPs (matching `max_num_sta=8`): nodes 1–16 → `.121-.248`, nodes 17–20 → `.2-.33`. Anchor service IP `.1` and the `.34-.100` / `.249-.254` gaps stay free for ops use. Total fleet capacity: 20 × 8 = 160 baux on the existing `/24`, well above the §3.4 #11 cap.
 
-- [ ] **Distribute AP channels across co-located nodes** — `.env.example` now ships `AP_CHANNEL=0` (ACS-auto on `chanlist=1 6`) and `FREQ=2462` (mesh fixed on channel 11), so the mesh and APs no longer share spectrum on the same node (CdC §3.3). What remains: with ≥2 co-located nodes, ACS may still pick the same of {1, 6} on both, halving air time on that pair. Round-robin assignment (e.g. `AP_CHANNEL` from `[1, 6]` indexed by `(PI_NUMBER - 1) % 2`) would make this deterministic.
+- [ ] **Distribute AP channels across co-located nodes** — `.env.example` now ships `AP_CHANNEL=0` (ACS-auto on `chanlist=1 6`) and `FREQ=2462` (mesh fixed on channel 11), so the mesh and APs no longer share spectrum on the same node. What remains: with ≥2 co-located nodes, ACS may still pick the same of {1, 6} on both, halving air time on that pair. Round-robin assignment (e.g. `AP_CHANNEL` from `[1, 6]` indexed by `(PI_NUMBER - 1) % 2`) would make this deterministic.
 
-- [x] **Cap `max_num_sta` in hostapd** — Done. `generate_hostapd_conf` in `scripts/common.sh` writes `max_num_sta=8`; excess clients are refused cleanly with `802.11 reason 17` instead of crashing the AR9271 firmware (CdC §3.4 #11).
+- [x] **Cap `max_num_sta` in hostapd** — Done. `generate_hostapd_conf` in `scripts/common.sh` writes `max_num_sta=8`; excess clients are refused cleanly with `802.11 reason 17` instead of crashing the AR9271 firmware.
 
 - [x] **Pre-bake apt packages into the SD image** — Done on the golden-image path (`scripts/build-image.sh`). `firstboot.sh` now detects pre-installed packages and skips the entire `apt-get update`/`install` cycle when nothing is missing; the network wait also short-circuits to 30 s on pre-baked images. Cold-boot time-to-mesh on a cloned image drops from 6–12 min to ~2–3 min, and internet-at-firstboot is no longer required on that path. The vanilla `prepare-sdcard.sh` path still needs internet on first boot to install packages from a fresh Pi OS Lite — chroot-baking the rootfs from the laptop is left out (cross-platform qemu-static setup).
 
