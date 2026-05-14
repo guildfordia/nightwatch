@@ -161,6 +161,75 @@ fi
 # Detect platform
 OS_TYPE="$(uname -s)"
 
+# ---- Anti-erasure safeguards ----
+# The point of this script is to write to a small removable SD card. It is
+# trivially easy to type the wrong device path and accidentally write to the
+# host's system disk (the classic /dev/disk0 vs /dev/disk4 mistake on macOS,
+# or /dev/sda vs /dev/sdb on Linux). The checks below refuse the most common
+# foot-shooting patterns before doing anything destructive. They are NOT a
+# replacement for the operator reading the SD= value twice before pressing
+# enter; they are a last line of defence against the most likely mistakes.
+
+# Maximum tolerated target size in bytes. SD cards realistically used for a
+# Raspberry Pi top out around 256-512 GB; anything larger is almost certainly
+# an external disk or a host system drive. Override with NIGHTWATCH_SD_MAX_BYTES
+# if you really know you want to write to a 1 TB micro-SD card from the future.
+SD_MAX_BYTES="${NIGHTWATCH_SD_MAX_BYTES:-549755813888}"  # 512 GiB
+
+check_safe_target() {
+    local target="$1"
+
+    # 1. Refuse well-known system devices by exact path. These are the disks
+    # that almost always hold the host OS and that operators most often mistype.
+    case "$target" in
+        /dev/disk0|/dev/disk1)
+            echo -e "${RED}Refusing to write to $target (typical macOS system disk).${NC}"
+            echo "    Use 'diskutil list' to identify the SD card device (usually /dev/disk3+)."
+            exit 1
+            ;;
+        /dev/sda|/dev/sda?|/dev/nvme0n1|/dev/nvme0n1p*|/dev/mmcblk0|/dev/mmcblk0p*)
+            echo -e "${RED}Refusing to write to $target (typical Linux system disk).${NC}"
+            echo "    Use 'lsblk' to identify the SD card device (usually /dev/sdb+ or /dev/mmcblk1)."
+            exit 1
+            ;;
+    esac
+
+    # 2. If it's a block device, refuse if the size exceeds the cap. This
+    # catches the case where the operator targets a multi-TB external disk
+    # they meant to keep intact.
+    if [ -b "$target" ]; then
+        local size_bytes=""
+        if [ "$OS_TYPE" = "Darwin" ]; then
+            # diskutil reports size in bytes on macOS.
+            size_bytes=$(diskutil info "$target" 2>/dev/null | awk -F'\\(' '/Disk Size:/{gsub(/[^0-9].*/,"",$2); print $2}' | head -1)
+        else
+            size_bytes=$(blockdev --getsize64 "$target" 2>/dev/null || echo "")
+        fi
+        if [ -n "$size_bytes" ] && [ "$size_bytes" -gt "$SD_MAX_BYTES" ]; then
+            local size_gib=$((size_bytes / 1073741824))
+            local cap_gib=$((SD_MAX_BYTES / 1073741824))
+            echo -e "${RED}Refusing to write to $target: device size ${size_gib} GiB exceeds the ${cap_gib} GiB safety cap.${NC}"
+            echo "    If you really meant this device, override with:"
+            echo "      NIGHTWATCH_SD_MAX_BYTES=$((size_bytes + 1)) $0 $target"
+            exit 1
+        fi
+    fi
+
+    # 3. If it's a mounted path, refuse the obvious host-OS roots so a
+    # mistyped /Volumes/rootfs that resolved to / doesn't trash everything.
+    if [ -d "$target" ]; then
+        case "$target" in
+            /|/Users|/Users/*|/home|/home/*|/System|/System/*|/Library|/Library/*|/etc|/etc/*|/usr|/usr/*|/var|/var/*|/bin|/sbin|/boot)
+                echo -e "${RED}Refusing to write to $target (looks like the host OS, not a mounted SD card).${NC}"
+                echo "    A correctly mounted SD typically appears under /Volumes/ (macOS) or /run/media/\$USER/ (Linux)."
+                exit 1
+                ;;
+        esac
+    fi
+}
+
+check_safe_target "$SD_ROOT"
+
 # Rsync exclusions shared by both direct-copy and tarball paths
 RSYNC_EXCLUDES=(
     --exclude='.git'
