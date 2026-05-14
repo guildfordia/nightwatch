@@ -18,9 +18,8 @@
 #   reserved for static node IPs, .1 anchor, .255 broadcast, and
 #   .98-.100 / .129-.130 / .249-.254 left as operational gaps.
 #
-# For 30+ nodes you must migrate to /23 (192.168.198.0/23) — see
-# docs/capacity-planning.md. That is a netmask + IP-scheme change,
-# not a constant bump.
+# For 30+ nodes you must migrate to /23 (192.168.198.0/23) — that is
+# a netmask + IP-scheme change, not a constant bump.
 #
 # Default 20 matches the CdC §3.3 design figure. Bump up to 28 for
 # a single-event capacity push without changing the subnet. Going
