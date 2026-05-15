@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-05-15
+
+### Added
+- Opt-in JSONL chat archive in `irc-bridge-go`: when `CHAT_LOG_DIR`
+  is set, every PRIVMSG is persisted to
+  `<CHAT_LOG_DIR>/chat-YYYY-MM-DD.jsonl` with deployment-salted
+  SHA256(client IP) for pseudonymisation. Disabled by default — the
+  default behaviour remains in-memory only (replay buffer).
+
+### Changed
+- README simplified down to a short description, hardware requirements,
+  quick install, configuration essentials, and troubleshooting basics.
+- Documentation cleanup: removed internal-spec cross-references from
+  README and CHANGELOG; moved capacity-planning notes out of the
+  public tree into the maintainer workspace.
+
 ## [1.0.0] - 2026-05-14
 
 Initial tagged release. Covers the full delivery scope of the project:
