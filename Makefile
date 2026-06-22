@@ -2,7 +2,7 @@
 
 ENV_FILE := .env
 
-.PHONY: install run stop test scan update status logs sdlogs clean monitor blink image sdcard info build-bridge wipe-logs help
+.PHONY: install run stop test scan diag update status logs sdlogs clean monitor blink image sdcard info build-bridge wipe-logs help
 .DEFAULT_GOAL := help
 
 help:
@@ -20,6 +20,7 @@ help:
 	@echo "  make blink     Blink onboard LED to identify this Pi"
 	@echo "  make info      Show detailed node info"
 	@echo "  make scan      Advanced mesh network scan (all nodes)"
+	@echo "  make diag      One-command diagnostic bundle (run on a node during the problem)"
 	@echo ""
 	@echo "  make image        Prepare Pi for SD card cloning"
 	@echo "  make sdcard SD=X [NODE=N]  Prepare SD card (auto-picks node if omitted)"
@@ -206,6 +207,13 @@ info:
 
 scan:
 	@sudo scripts/test-scan.sh $(ARGS)
+
+# One-command diagnostic bundle. Run ON A NODE, ideally while the problem is
+# happening: collects system health, AP client load, mesh link quality,
+# RF/channel congestion, services, and a functional self-test into a single
+# timestamped file under diag/.
+diag:
+	@sudo scripts/nightwatch-diag.sh
 
 # CdC §6.3 + §9.2 — at expo close, erase every persistent file that links
 # a visitor pseudo, IP, or MAC. Iterates SSH on .101-.120; override the

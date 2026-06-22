@@ -62,6 +62,9 @@ build/
 # Node
 node_modules/
 
+# make diag output bundles
+diag/
+
 # Workspace privé
 docs/_private/
 
